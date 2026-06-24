@@ -29,7 +29,7 @@ import {
 } from "@/lib/store/persist";
 import { publish, complete } from "./broker";
 import { spawnHarness, containedPlanFile, type HarnessSubcommand, type SpawnHarnessOptions } from "./harness-bridge";
-import { spawnAgent, worktreePathFor, relocateTrace, type AgentSpec } from "./agent-bridge";
+import { spawnAgent, worktreePathFor, relocateTrace, type AgentSpec, type AgentUsage } from "./agent-bridge";
 import { mintLane, mintSession, mintPlanFile } from "./registry";
 
 /** One lane to build: a worktree + the agent task that fills it. */
@@ -74,7 +74,7 @@ function writePlanFile(plan: RunPlan): void {
 type RunAgentFn = (
   spec: AgentSpec,
   opts?: { spawnFn?: SpawnHarnessOptions["spawnFn"] }
-) => Promise<{ code: number | null; sessionId: string | null }>;
+) => Promise<{ code: number | null; sessionId: string | null; usage?: AgentUsage | null }>;
 
 /** Milliseconds between dry-run event yields (simulates a live stream). */
 const DRY_RUN_DELAY_MS = 50;
@@ -207,7 +207,7 @@ async function runLive(
     // enabled). It has no Bash, so it cannot git — the harness commits below. runAgent
     // gets NO harness spawn — it's a distinct seam (real spawnAgent in prod, an injected
     // fake in tests).
-    const { code, sessionId } = await runAgent({
+    const { code, sessionId, usage } = await runAgent({
       slug: lane.slug,
       worktreePath: worktreePathFor(lane.slug),
       taskPrompt: lane.taskPrompt,
@@ -215,6 +215,12 @@ async function runLive(
     });
     if (code !== 0) {
       throw new HarnessExitError(`agent for lane '${lane.slug}' exited with code ${code}`);
+    }
+
+    // Surface ACTUAL usage/cost/context for the lane (HUD token + context gauges).
+    // Best-effort: a failed-parse / no-result agent reports null → no event emitted.
+    if (usage) {
+      onEvent({ type: "usage", subtaskId: lane.slug, ...usage });
     }
 
     // Commit the agent's edits (the agent has no Bash). Stages+commits only if the

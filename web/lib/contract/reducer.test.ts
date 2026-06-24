@@ -1,5 +1,5 @@
 // web/lib/contract/reducer.test.ts
-// Table-driven unit tests for the reducer (all 8 SSEEvent variants + edge cases).
+// Table-driven unit tests for the reducer (all SSEEvent variants + edge cases).
 
 import { describe, it, expect } from "vitest";
 import { reducer } from "./events";
@@ -186,6 +186,58 @@ describe("reducer", () => {
     });
     expect(s.budget.ceilingUsd).toBe(25);
     expect(s.budget.estimatedUsd).toBe(14.2);
+  });
+
+  it("usage — records a lane keyed by subtaskId and bumps the run total", () => {
+    const s = reducer(base(), {
+      type: "usage",
+      subtaskId: "lane-a",
+      model: "claude-sonnet-4-6",
+      inputTokens: 5,
+      outputTokens: 398,
+      cacheReadTokens: 97328,
+      cacheCreationTokens: 12841,
+      contextWindow: 200000,
+      costUsd: 0.1122,
+    });
+    expect(s.usage.lanes["lane-a"]).toEqual({
+      model: "claude-sonnet-4-6",
+      inputTokens: 5,
+      outputTokens: 398,
+      cacheReadTokens: 97328,
+      cacheCreationTokens: 12841,
+      contextWindow: 200000,
+      costUsd: 0.1122,
+    });
+    expect(s.usage.totalCostUsd).toBeCloseTo(0.1122);
+  });
+
+  it("usage — merges multiple lanes and sums totalCostUsd", () => {
+    let s = reducer(base(), {
+      type: "usage",
+      subtaskId: "lane-a",
+      inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0,
+      contextWindow: 200000, costUsd: 0.1,
+    });
+    s = reducer(s, {
+      type: "usage",
+      subtaskId: "lane-b",
+      inputTokens: 2, outputTokens: 2, cacheReadTokens: 0, cacheCreationTokens: 0,
+      contextWindow: 200000, costUsd: 0.25,
+    });
+    expect(Object.keys(s.usage.lanes).sort()).toEqual(["lane-a", "lane-b"]);
+    expect(s.usage.totalCostUsd).toBeCloseTo(0.35);
+  });
+
+  it("usage — a lane-less event falls into the _run bucket", () => {
+    const s = reducer(base(), {
+      type: "usage",
+      inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0,
+      contextWindow: 0, costUsd: 0.05,
+    });
+    expect(s.usage.lanes["_run"]).toBeDefined();
+    expect(s.usage.lanes["_run"].model).toBeUndefined();
+    expect(s.usage.totalCostUsd).toBeCloseTo(0.05);
   });
 
   it("approval — sets approval on the correct phase", () => {

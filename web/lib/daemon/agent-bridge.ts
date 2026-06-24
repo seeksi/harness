@@ -34,10 +34,78 @@ export interface AgentSpec {
   allowedTools?: string[];
 }
 
+/**
+ * ACTUAL token/cost/context usage the agent reported in its --output-format json
+ * result. Surfaced so the daemon can emit a `usage` SSEEvent for the HUD. ALL fields
+ * are best-effort: a failed/absent/parse-broken result yields null (no usage event).
+ */
+export interface AgentUsage {
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  contextWindow: number;
+  costUsd: number;
+}
+
+/**
+ * Parse the agent's result JSON for usage/cost/context. Robust by design: the agent
+ * controls this stdout, and a failed run may emit no/partial/garbage JSON — so any
+ * parse failure or missing shape returns null and the caller simply skips the usage
+ * event (never throws). Prefers per-model `modelUsage` (carries contextWindow + the
+ * precise per-model costUSD); falls back to the top-level `usage` + `total_cost_usd`.
+ */
+export function parseAgentUsage(raw: string): AgentUsage | null {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const r = obj as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+  const modelUsage = r.modelUsage;
+  if (modelUsage && typeof modelUsage === "object") {
+    const entries = Object.entries(modelUsage as Record<string, unknown>);
+    if (entries.length > 0) {
+      // Single-model agent run: take the first (and typically only) model entry.
+      const [model, muRaw] = entries[0];
+      const mu = (muRaw ?? {}) as Record<string, unknown>;
+      return {
+        model,
+        inputTokens: num(mu.inputTokens),
+        outputTokens: num(mu.outputTokens),
+        cacheReadTokens: num(mu.cacheReadInputTokens),
+        cacheCreationTokens: num(mu.cacheCreationInputTokens),
+        contextWindow: num(mu.contextWindow),
+        costUsd: num(mu.costUSD ?? r.total_cost_usd),
+      };
+    }
+  }
+
+  // Fallback: top-level usage block (no contextWindow available there).
+  const usage = r.usage;
+  if (usage && typeof usage === "object") {
+    const u = usage as Record<string, unknown>;
+    return {
+      inputTokens: num(u.input_tokens),
+      outputTokens: num(u.output_tokens),
+      cacheReadTokens: num(u.cache_read_input_tokens),
+      cacheCreationTokens: num(u.cache_creation_input_tokens),
+      contextWindow: 0,
+      costUsd: num(r.total_cost_usd),
+    };
+  }
+  return null;
+}
+
 const ALLOWED_MODELS = new Set(["haiku", "sonnet", "opus"]);
 // Exact allowlist — no free-form predicates, no Bash. A Bash command-allowlist is a
 // gate-config decision (threat model G1/G9), deliberately not reachable here.
-const DEFAULT_TOOLS = ["Read", "Edit", "Write", "Grep", "Glob"];
+export const DEFAULT_TOOLS = ["Read", "Edit", "Write", "Grep", "Glob"];
 const ALLOWED_TOOLS = new Set(DEFAULT_TOOLS);
 const MAX_PROMPT = 100_000;
 // A claude session id is later passed to `harness.sh trace` — validate to that shape
@@ -276,7 +344,7 @@ export function buildInvocation(
 export function spawnAgent(
   spec: AgentSpec,
   opts: SpawnAgentOptions = {}
-): Promise<{ code: number | null; sessionId: string | null }> {
+): Promise<{ code: number | null; sessionId: string | null; usage: AgentUsage | null }> {
   return new Promise((resolve, reject) => {
     const audit = (outcome: string, code: number | null, sessionId: string | null) => {
       try {
@@ -398,7 +466,9 @@ export function spawnAgent(
           reject(new HarnessTimeoutError(`agent for '${spec.slug}' timed out after ${timeoutMs}ms`));
         } else {
           audit("exit", code, sessionId);
-          resolve({ code, sessionId });
+          // Best-effort usage extraction from the same accumulated result JSON; a
+          // parse failure / failed agent yields null and the daemon skips the event.
+          resolve({ code, sessionId, usage: parseAgentUsage(out) });
         }
       })
     );

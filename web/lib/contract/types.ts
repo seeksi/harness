@@ -58,6 +58,24 @@ export interface Budget {
   overBy?: number;
 }
 
+// ACTUAL per-lane usage the agent reported (distinct from Budget, which is the Gate-A
+// cost CEILING). The HUD context gauge compares cacheReadTokens+inputTokens vs
+// contextWindow; the cost panel sums costUsd into totalCostUsd.
+export interface LaneUsage {
+  model?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  contextWindow: number;
+  costUsd: number;
+}
+
+export interface Usage {
+  lanes: Record<string, LaneUsage>; // keyed by subtaskId
+  totalCostUsd: number;
+}
+
 export interface RunState {
   task: { id: string; brief: string; phase: PhaseId; state: "idle" | "running" | "done" | "failed" };
   subtasks: Subtask[];
@@ -66,6 +84,7 @@ export interface RunState {
   agentEvents: AgentEvent[];
   trace: TraceTick[];
   budget: Budget;
+  usage: Usage;
   ui: {
     openDetail: { kind: "gate" | "phase" | null; id: string | null };
     pendingToast?: { gate: GateId; message: string };
@@ -94,5 +113,6 @@ export const initialRunState: RunState = {
   agentEvents: [],
   trace: [],
   budget: { ceilingUsd: 0, estimatedUsd: 0 },
+  usage: { lanes: {}, totalCostUsd: 0 },
   ui: { openDetail: { kind: null, id: null } },
 };

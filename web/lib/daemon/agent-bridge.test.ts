@@ -9,6 +9,8 @@ import {
   spawnAgent,
   containedWorktree,
   relocateTrace,
+  parseAgentUsage,
+  DEFAULT_TOOLS,
   AgentExecError,
   type AgentSpec,
 } from "./agent-bridge";
@@ -180,7 +182,8 @@ describe("spawnAgent", () => {
     );
 
     const res = await spawnAgent(spec({ taskPrompt: "do TOPSECRET work" }), { spawnFn: spawnFn as never });
-    expect(res).toEqual({ code: 0, sessionId: "sess-abc123" });
+    // No usage/modelUsage in this result → usage is null (no event will be emitted).
+    expect(res).toEqual({ code: 0, sessionId: "sess-abc123", usage: null });
 
     // Minimal env allowlist — no secret propagates, full server env not forwarded.
     expect(capturedEnv).toBeDefined();
@@ -191,6 +194,29 @@ describe("spawnAgent", () => {
     const log = getAuditLog();
     expect(log[0].argv).toEqual(["lane:lane-x", "model:sonnet", "session:sess-abc123"]);
     expect(JSON.stringify(log[0])).not.toContain("TOPSECRET"); // prompt never audited
+  });
+
+  it("extracts usage/cost/context from the result JSON it already reads", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    mintLane("lane-x");
+    const spawnFn = fakeSpawn([
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        total_cost_usd: 0.1129,
+        usage: { input_tokens: 5, output_tokens: 398, cache_read_input_tokens: 97328, cache_creation_input_tokens: 12841 },
+        modelUsage: {
+          "claude-sonnet-4-6": {
+            inputTokens: 5, outputTokens: 398, cacheReadInputTokens: 97328,
+            cacheCreationInputTokens: 12841, contextWindow: 200000, costUSD: 0.1122,
+          },
+        },
+        session_id: "sess-abc123",
+      }),
+    ]);
+    const res = await spawnAgent(spec(), { spawnFn: spawnFn as never });
+    expect(res.sessionId).toBe("sess-abc123");
+    expect(res.usage).toMatchObject({ model: "claude-sonnet-4-6", contextWindow: 200000, costUsd: 0.1122 });
   });
 
   it("rejects a child-controlled / malformed session id (no audit forgery)", async () => {
@@ -222,5 +248,63 @@ describe("spawnAgent", () => {
     expect(kill).toHaveBeenCalledWith("SIGTERM");
     expect(kill).toHaveBeenCalledWith("SIGKILL");
     expect(getAuditLog().map((r) => r.outcome)).toEqual(["timeout"]);
+  });
+});
+
+describe("parseAgentUsage", () => {
+  // The real --output-format json result shape from a live run.
+  const result = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    total_cost_usd: 0.1129,
+    usage: { input_tokens: 5, output_tokens: 398, cache_read_input_tokens: 97328, cache_creation_input_tokens: 12841 },
+    modelUsage: {
+      "claude-sonnet-4-6": {
+        inputTokens: 5, outputTokens: 398, cacheReadInputTokens: 97328,
+        cacheCreationInputTokens: 12841, contextWindow: 200000, maxOutputTokens: 32000, costUSD: 0.1122,
+      },
+    },
+    session_id: "abc",
+    num_turns: 4,
+  });
+
+  it("prefers modelUsage (model + contextWindow + per-model costUSD)", () => {
+    expect(parseAgentUsage(result)).toEqual({
+      model: "claude-sonnet-4-6",
+      inputTokens: 5,
+      outputTokens: 398,
+      cacheReadTokens: 97328,
+      cacheCreationTokens: 12841,
+      contextWindow: 200000,
+      costUsd: 0.1122,
+    });
+  });
+
+  it("falls back to top-level usage + total_cost_usd when modelUsage is absent", () => {
+    const noModel = JSON.stringify({
+      usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 1, cache_creation_input_tokens: 2 },
+      total_cost_usd: 0.5,
+    });
+    expect(parseAgentUsage(noModel)).toEqual({
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 1,
+      cacheCreationTokens: 2,
+      contextWindow: 0,
+      costUsd: 0.5,
+    });
+  });
+
+  it("returns null on parse failure / no usage shape (failed agent) — never throws", () => {
+    expect(parseAgentUsage("not json {")).toBeNull();
+    expect(parseAgentUsage("")).toBeNull();
+    expect(parseAgentUsage(JSON.stringify({ type: "result", subtype: "error" }))).toBeNull();
+  });
+});
+
+describe("capability constants (capabilities route source of truth)", () => {
+  it("DEFAULT_TOOLS is the exported allowlist (no Bash)", () => {
+    expect(DEFAULT_TOOLS).toEqual(["Read", "Edit", "Write", "Grep", "Glob"]);
+    expect(DEFAULT_TOOLS).not.toContain("Bash");
   });
 });

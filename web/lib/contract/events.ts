@@ -15,6 +15,7 @@ import type {
   SubtaskStatus,
   Subtask,
   AgentEvent,
+  LaneUsage,
 } from "./types";
 import { TRACE_WINDOW } from "./types";
 
@@ -34,6 +35,17 @@ export type SSEEvent =
   | { type: "agentFire"; id: string; subtaskId: string; kind: AgentEvent["kind"]; severity: Severity; firedAt: number }
   | { type: "trace"; ts: number; tool: string; sig: string; subtaskId?: string }
   | { type: "budget"; ceilingUsd: number; estimatedUsd: number; spentUsd?: number; overBy?: number }
+  | {
+      type: "usage";
+      subtaskId?: string;
+      model?: string;
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+      contextWindow: number;
+      costUsd: number;
+    }
   | { type: "approval"; phase: PhaseId; kind: NonNullable<PhaseState["approval"]>["kind"]; state: "awaiting" | "approved" | "rejected" }
   | { type: "hello"; run: RunState };
 
@@ -119,6 +131,29 @@ export function reducer(state: RunState, event: SSEEvent): RunState {
     case "budget": {
       const { type: _t, ...b } = event;
       return { ...state, budget: b };
+    }
+
+    case "usage": {
+      // ACTUAL usage (not the Gate-A ceiling). Merge into the lane keyed by subtaskId
+      // (fall back to a single "_run" bucket when the event carries no lane) and bump
+      // the run total by this event's cost.
+      const laneKey = event.subtaskId ?? "_run";
+      const lane: LaneUsage = {
+        ...(event.model !== undefined && { model: event.model }),
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
+        cacheReadTokens: event.cacheReadTokens,
+        cacheCreationTokens: event.cacheCreationTokens,
+        contextWindow: event.contextWindow,
+        costUsd: event.costUsd,
+      };
+      return {
+        ...state,
+        usage: {
+          lanes: { ...state.usage.lanes, [laneKey]: lane },
+          totalCostUsd: state.usage.totalCostUsd + event.costUsd,
+        },
+      };
     }
 
     case "approval": {

@@ -91,6 +91,49 @@ describe("startRun — live per-lane interleave", () => {
     expect(getSnapshot("run-1")?.task.state).toBe("done");
   });
 
+  it("emits a usage event (per-lane subtaskId + cost) after the agent returns", async () => {
+    const { fn: spawnFn } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({
+      code: 0,
+      sessionId: "sess-usage",
+      usage: {
+        model: "claude-sonnet-4-6",
+        inputTokens: 5,
+        outputTokens: 398,
+        cacheReadTokens: 97328,
+        cacheCreationTokens: 12841,
+        contextWindow: 200000,
+        costUsd: 0.1122,
+      },
+    }));
+
+    const seen = await runToCompletion("run-usage", "x", { live: true, plan: onePlan, spawnFn, runAgent });
+
+    const usageEvt = seen.find((e) => e.type === "usage");
+    expect(usageEvt).toBeDefined();
+    expect(usageEvt).toMatchObject({
+      type: "usage",
+      subtaskId: "lane-a",
+      model: "claude-sonnet-4-6",
+      contextWindow: 200000,
+      costUsd: 0.1122,
+    });
+    // The lane usage reached the persisted snapshot via the reducer.
+    const snap = getSnapshot("run-usage");
+    expect(snap?.usage.lanes["lane-a"]?.costUsd).toBeCloseTo(0.1122);
+    expect(snap?.usage.totalCostUsd).toBeCloseTo(0.1122);
+  });
+
+  it("emits NO usage event when the agent reports null usage (parse-fail/failed result)", async () => {
+    const { fn: spawnFn } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 0, sessionId: "s-nousage", usage: null }));
+
+    const seen = await runToCompletion("run-nousage", "x", { live: true, plan: onePlan, spawnFn, runAgent });
+
+    expect(seen.some((e) => e.type === "usage")).toBe(false);
+    expect(getSnapshot("run-nousage")?.task.state).toBe("done");
+  });
+
   it("finalizes FAILED and skips merge/trace when the agent fails", async () => {
     const { fn: spawnFn, calls } = harnessFake(0);
     const runAgent = vi.fn(async () => ({ code: 1, sessionId: null }));
