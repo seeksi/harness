@@ -43,6 +43,26 @@ die() { echo "harness: $*" >&2; exit 1; }
 on_branch() { [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" = "$1" ]; }
 tree_clean() { git diff --quiet && git diff --cached --quiet; }
 
+# Reclaim the lane worktrees to the daemon user before teardown. wt-new chowns each lane
+# to $AGENT_USER so the agent can write it; afterwards `git worktree remove` (run as the
+# daemon user) can't delete agent-owned files ("Permission denied"). Chown the whole
+# worktrees dir back so clean actually removes the lanes. Best-effort + only when an agent
+# user is in play (no-op in dev/test). Path computed exactly like wt-new/wt-commit.
+reclaim_worktrees() {
+  [ -n "${AGENT_USER:-}" ] || return 0
+  _rr=$(git rev-parse --show-toplevel) || return 0
+  _wt="$(cd "$_rr/.." && pwd)/$(basename "$_rr").worktrees"
+  [ -d "$_wt" ] || return 0
+  [ ! -L "$_wt" ] || { echo "harness: warning: $_wt is a symlink — skipping reclaim" >&2; return 0; }
+  # -hR never derefs a symlink (chown the link, not its target). --from="$AGENT_USER"
+  # limits the chown to files the agent ACTUALLY owns — so a hardlink the agent planted to
+  # a non-agent file (root-owned, etc.) is NOT reassigned, closing the recursive-chown-via-
+  # hardlink escalation. -- stops option parsing. Best-effort. (Runs only at terminal
+  # teardown; the daemon is single-slot so no other lane is active.)
+  sudo -n chown -hR --from="$AGENT_USER" -- "$(id -un)" "$_wt" 2>/dev/null \
+    || echo "harness: warning: could not reclaim $_wt ownership (clean may leave lane dirs)" >&2
+}
+
 # --- JSON event emitters (stdout = the machine contract). Enum fields (status,
 # severity, kind, phase number) are fixed literals from this script. Dynamic string
 # fields (ids, summaries) are run through jesc so a stray quote/backslash can never
@@ -303,6 +323,7 @@ case "$cmd" in
       # already-succeeded promote (guards keep set -eu from tripping; the lane worktrees are
       # disposable scratch — their commits are now in $BASE).
       if on_branch "$BASE" && git merge-base --is-ancestor integration "$BASE"; then
+        reclaim_worktrees
         sh "$WT" clean "$BASE" >&2 || echo "promote: post-promote worktree clean had issues (non-fatal)" >&2
         git branch -d integration >/dev/null 2>&1 && echo "promote: deleted integration" >&2 || true
       else
@@ -338,6 +359,7 @@ case "$cmd" in
     exit 0
     ;;
   clean)
+    reclaim_worktrees
     sh "$WT" clean "$BASE" >&2
     git branch -d integration 2>/dev/null && echo "deleted integration" >&2 || true
     ;;
