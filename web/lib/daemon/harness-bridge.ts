@@ -13,6 +13,7 @@
 
 import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildProcess } from "child_process";
 import { createInterface } from "readline";
+import path from "path";
 import type { SSEEvent } from "@/lib/contract/events";
 import { isLane, isSession, isPlanFile } from "./registry";
 import { HarnessArgError, HarnessTimeoutError } from "./errors";
@@ -53,6 +54,31 @@ function requirePlanFile(name: string): string {
   return name;
 }
 
+// Fixed allow-dir for plan files, resolved ONCE at module load (not per call) so the
+// containment boundary can't shift with a later process.chdir / env mutation. Set via
+// HARNESS_PLAN_DIR (default "data/plans") under HARNESS_REPO || cwd. Plan files are
+// written here by the server (route-cost step).
+const PLAN_DIR_ABS = path.resolve(
+  process.env.HARNESS_REPO ?? process.cwd(),
+  process.env.HARNESS_PLAN_DIR ?? "data/plans"
+);
+
+/**
+ * Resolve a plan-file NAME to an absolute path inside the fixed allow-dir and assert
+ * it cannot escape (threat model T5). This is an independent second layer beneath
+ * provenance + the bare-filename regex: even if a name with separators ever reached
+ * here, it would be rejected rather than read from outside the allow-dir. Pure path
+ * math — no filesystem access. Exported so the containment guarantee is unit-tested
+ * directly (provenance blocks malicious input upstream, so buildArgs can't reach it).
+ */
+export function containedPlanFile(name: string): string {
+  const fullAbs = path.resolve(PLAN_DIR_ABS, name);
+  if (fullAbs !== PLAN_DIR_ABS && !fullAbs.startsWith(PLAN_DIR_ABS + path.sep)) {
+    throw new HarnessArgError(`plan file escapes allow-dir: ${JSON.stringify(name)}`);
+  }
+  return fullAbs;
+}
+
 /**
  * Build the exact argv for harness.sh from a validated subcommand. Throws
  * HarnessArgError on any value that isn't server-minted. The result is passed to
@@ -61,7 +87,8 @@ function requirePlanFile(name: string): string {
 export function buildArgs(sub: HarnessSubcommand): string[] {
   switch (sub.cmd) {
     case "budget":
-      return ["budget", requirePlanFile(sub.planFile)];
+      // provenance (minted) → then resolve+contain under the allow-dir (T5).
+      return ["budget", containedPlanFile(requirePlanFile(sub.planFile))];
     case "wt-new":
       return ["wt-new", requireLane(sub.slug)];
     case "integ-start":

@@ -3,10 +3,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
 import type { ChildProcess } from "child_process";
+import path from "path";
 import {
   buildArgs,
   parseHarnessLine,
   spawnHarness,
+  containedPlanFile,
   HarnessArgError,
   HarnessTimeoutError,
 } from "./harness-bridge";
@@ -32,9 +34,46 @@ describe("buildArgs — server-minted provenance → argv (no client strings, no
       "control-plane",
     ]);
     expect(buildArgs({ cmd: "trace", session: "abc123_DEF" })).toEqual(["trace", "abc123_DEF"]);
-    expect(buildArgs({ cmd: "budget", planFile: "plan.jsonl" })).toEqual(["budget", "plan.jsonl"]);
     expect(buildArgs({ cmd: "integ-start" })).toEqual(["integ-start"]);
     expect(buildArgs({ cmd: "promote" })).toEqual(["promote"]);
+    // budget resolves the minted plan file to the absolute contained path (T5).
+    expect(buildArgs({ cmd: "budget", planFile: "plan.jsonl" })).toEqual([
+      "budget",
+      containedPlanFile("plan.jsonl"),
+    ]);
+  });
+
+  it("contains plan files under the allow-dir and rejects escapes (T5)", () => {
+    const baseAbs = path.resolve(process.env.HARNESS_REPO ?? process.cwd(), "data/plans");
+    // A normal name resolves to a child of the allow-dir.
+    const ok = containedPlanFile("plan.jsonl");
+    expect(ok).toBe(path.join(baseAbs, "plan.jsonl"));
+    expect(path.isAbsolute(ok)).toBe(true);
+    expect(ok.startsWith(baseAbs + path.sep)).toBe(true);
+    // Defense in depth: a separator/traversal name (which provenance would already
+    // block upstream) is rejected by the containment layer if it ever reached it.
+    for (const escape of ["../../etc/passwd", "../secret", "/etc/passwd", "a/../../b"]) {
+      expect(() => containedPlanFile(escape), escape).toThrow(HarnessArgError);
+    }
+  });
+
+  it("honors HARNESS_PLAN_DIR / HARNESS_REPO for the allow-dir (T5)", async () => {
+    const prevDir = process.env.HARNESS_PLAN_DIR;
+    const prevRepo = process.env.HARNESS_REPO;
+    vi.resetModules(); // PLAN_DIR_ABS is frozen at module load — re-import with new env
+    process.env.HARNESS_PLAN_DIR = "custom/plans";
+    process.env.HARNESS_REPO = "/srv/harness";
+    try {
+      const mod = await import("./harness-bridge");
+      expect(mod.containedPlanFile("p.jsonl")).toBe(path.join("/srv/harness", "custom", "plans", "p.jsonl"));
+      expect(() => mod.containedPlanFile("../escape")).toThrow();
+    } finally {
+      if (prevDir !== undefined) process.env.HARNESS_PLAN_DIR = prevDir;
+      else delete process.env.HARNESS_PLAN_DIR;
+      if (prevRepo !== undefined) process.env.HARNESS_REPO = prevRepo;
+      else delete process.env.HARNESS_REPO;
+      vi.resetModules();
+    }
   });
 
   it("rejects a regex-VALID but UNMINTED slug/session/plan-file (provenance over pattern — T1)", () => {
