@@ -82,6 +82,7 @@ uncoordinated, or unmeasured harnesses fail:
 ```
 .claude/
   settings.json                 # registers the Phase 3 trace hook
+  agents/                       # the engineering team (see below)
   skills/
     cross-review/    SKILL.md
     parallel-build/  SKILL.md  wt.sh
@@ -89,6 +90,31 @@ uncoordinated, or unmeasured harnesses fail:
     route-cost/      SKILL.md  route.py  budget.py  models.json
   traces/                       # gitignored — per-session tool-call logs
 ```
+
+## The team
+
+The phases are the *plumbing* — how a unit of work moves safely to main. The
+`agents/` directory is the *crew* that does the work inside that plumbing.
+`parallel-build` decomposes a task and dispatches these personas into worktrees;
+`route-cost` picks each one's model; `cross-review` gates their diffs. Each agent
+is project-scoped here (not global) so it only activates in build contexts, and
+each wraps the role skills it relies on rather than duplicating them.
+
+| Agent | Role | Model | Wraps / hands off to |
+|---|---|---|---|
+| [`architect`](.claude/agents/architect.md) | System design, tech selection, ADRs — produces the spec `parallel-build` splits | opus | → `security-engineer`, `database`, `devops` |
+| [`devops`](.claude/agents/devops.md) | CI/CD, Docker, IaC, secrets, observability — wires the gates into the pipeline | sonnet | `vercel` skill; → `security-engineer` |
+| [`security-engineer`](.claude/agents/security-engineer.md) | Threat modeling, dep/secrets audit, authz review (Critical/High = BLOCK) | opus | built-in `security-review` skill |
+| [`qa-lead`](.claude/agents/qa-lead.md) | Test strategy across the pyramid; feeds the `eval-gate` regression set | sonnet | `webapp-testing`, `eval-gate` |
+| [`mobile-engineer`](.claude/agents/mobile-engineer.md) | RN/Expo, Swift, Kotlin — UI, offline sync, device APIs, store release | sonnet | `context7`; → `backend`, `qa-lead` |
+| [`data-ml-engineer`](.claude/agents/data-ml-engineer.md) | Pipelines, warehouse modeling, model train/eval, RAG — analytical data above OLTP | opus | `python-pro`, `claude-api`; → `devops` |
+| [`tech-writer`](.claude/agents/tech-writer.md) | READMEs, API refs, runbooks, changelogs — engineering docs, not marketing | sonnet | — |
+
+Frontend, backend, database, and UI/UX work run off the global role **skills**
+(`frontend`, `backend`, `database`, `web-design`); the agents above add the roles
+those skills don't cover and the leads that own a phase. Models follow the same
+tiering as `route-cost`: high-stakes reasoning (architect, security, data/ML) →
+opus, ordinary build/ship work → sonnet.
 
 ## Prerequisites
 
