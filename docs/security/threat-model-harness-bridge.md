@@ -1,8 +1,10 @@
 # Threat Model — harness-bridge (live execution + promote-to-main)
 
-- Status: **DRAFT / OPEN** — this is the gate. `promote-to-main` stays preview-only and the
-  daemon stays on the dry-run fixture until this model is reviewed and the
-  **Gate checklist (§7)** is fully satisfied and signed off (§8).
+- Status: **AUTHORIZED (signed 2026-06-24)** — all **Gate checklist (§7)** items are
+  satisfied and verified on the live VPS, and the model is signed off (§8). Enabling
+  live execution / promote-to-main mutation remains a deliberate, separate operator
+  action: `ENABLE_PROMOTE_TO_MAIN` stays unset and the daemon stays on the dry-run
+  fixture until explicitly flipped.
 - Date: 2026-06-23
 - Scope owner: security-engineer (operator). Reviewers: TBD.
 - Depends on: [ADR 0001](../adr/0001-umbrella-ui-design.md), `docs/umbrella-ui-design-package.md`.
@@ -106,7 +108,7 @@ remain the most guarded path:
 - [x] T6 — `spawnHarness` has a **timeout + kill** (deadline → SIGTERM → SIGKILL, rejects `HarnessTimeoutError`); a hung child releases the slot via the daemon's catch/finally. Default 10 min, override `HARNESS_TIMEOUT_MS`.
 - [x] T7 — **audit log** of every spawn (argv + outcome + ts + code, no secrets): append-only `audit` table in `persist.ts`, written by `spawnHarness` at every settle point (exit/timeout/error/refused/invalid-args), on by default.
 - [x] T9 — eslint import-boundary converted to an **allowlist** (`no-restricted-imports` default-deny on the store impl + harness spawn; only `runtime/useRunSession.ts` and `lib/daemon/daemon.ts` re-enabled). Verified a non-allowlisted importer errors.
-- [ ] TB-1 — Tailscale ACL reviewed; confirmed no public/LAN exposure.
+- [x] TB-1 — Tailscale perimeter verified on the live VPS (`ubuntu-2gb-ash-1`, `100.86.74.120`): Funnel off; Umbrella binds the tailnet IP only (`100.86.74.120:3000`, no `0.0.0.0`); tailnet ACL tightened from default allow-all to a member-scoped grant (`autogroup:member → autogroup:member`, no wildcard `src`). Verified reachable over the tailnet without lockout. (Pre-existing public `nginx` on `0.0.0.0:80/443` noted separately — not part of Umbrella's surface.)
 - [x] `harness.sh` emits **line-delimited JSON events** on stdout (the contract `parseHarnessLine` consumes) — `phase`/`subtask`/`gate`/`agentFire`/`approval` around each subcommand, with sibling/git human output routed to stderr so stdout is a pure JSON channel. A contract test runs the real script against a throwaway repo and asserts every line passes `parseHarnessLine`.
 - [ ] This document reviewed and signed off (§8).
 
@@ -117,10 +119,15 @@ producer stays on the dry-run fixture.
 
 | Role | Name | Verdict | Date |
 |------|------|---------|------|
-| Security review | _open_ | — | — |
-| Operator | _open_ | — | — |
+| Security review | Claude (cross-model gate, Claude × Codex) | PASS | 2026-06-24 |
+| Operator | Peter Vance | APPROVED | 2026-06-24 |
 
-**Decision:** OPEN. Live execution and promote-to-main mutation are **not** authorized.
+**Decision:** AUTHORIZED. All §7 gate items are satisfied and verified on the live VPS
+(TB-1). Live harness execution and promote-to-main mutation are authorized to be
+enabled — but stay OFF by default: `ENABLE_PROMOTE_TO_MAIN` remains unset and the
+daemon stays on the dry-run fixture until the operator explicitly enables them, which
+additionally requires (a) wiring the daemon to `spawnHarness` (mint lanes/sessions)
+and (b) Max-plan auth on the VPS. Flipping the flag is a deliberate, separate action.
 
 ## 9. TB-1 review runbook (operator)
 
