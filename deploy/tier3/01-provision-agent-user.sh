@@ -78,6 +78,12 @@ else
   say "WARN: $REPO/.git not found — provision the deploy repo first"
 fi
 
+# 4b. $AGENT_HOME lives INSIDE $REPO, so the `find $REPO -type d -exec chmod o+rx`
+#     above re-opened it (0700 → 0705). Re-assert 0700 LAST so the Max-plan session dir
+#     is readable ONLY by agent (G5). Must come after the repo o+rx pass.
+sudo chmod 0700 "$AGENT_HOME"
+say "re-asserted $AGENT_HOME 0700 (G5 — undo the repo o+rx that reaches into it)"
+
 # 5. Sanity echo of the resulting identity (operator verifies against the unit env).
 say "agent uid/gid: $(id "$AGENT_USER")"
 say "DONE. Next: install sudoers fragment, drop-in, wrapper, nft (see RUNBOOK.md)."

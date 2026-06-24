@@ -13,8 +13,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 # tinyproxy in the foreground (-d). Config selects User/Group tinyproxy-agent itself.
-ExecStartPre=/usr/sbin/tinyproxy -d -c /etc/tinyproxy/agent-proxy.conf -t  # config test
-ExecStart=/usr/sbin/tinyproxy -d -c /etc/tinyproxy/agent-proxy.conf
+# Path is /usr/bin on Ubuntu (not /usr/sbin). tinyproxy 1.11.x has no config-test
+# flag, so there is no ExecStartPre; a bad config simply fails ExecStart (Restart=on-failure).
+ExecStart=/usr/bin/tinyproxy -d -c /etc/tinyproxy/agent-proxy.conf
 Restart=on-failure
 RestartSec=2
 

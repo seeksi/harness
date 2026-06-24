@@ -106,10 +106,19 @@ sudo install -m 0644 -o root -g root \
 sudo install -m 0644 -o root -g root \
   /opt/umbrella/deploy/tier3/egress-proxy/umbrella-egress-proxy.service \
   /etc/systemd/system/umbrella-egress-proxy.service
+# AppArmor: Ubuntu's tinyproxy profile confines it to DEFAULT paths and DENIES our custom
+# config/filter/log (symptom: "Could not open config file" even as root). Add the override.
+sudo install -m 0644 -o root -g root \
+  /opt/umbrella/deploy/tier3/egress-proxy/apparmor-local-tinyproxy /etc/apparmor.d/local/tinyproxy
+sudo apparmor_parser -r /etc/apparmor.d/tinyproxy
 sudo systemctl daemon-reload
 sudo systemctl enable --now umbrella-egress-proxy
 sudo ss -ltnp | grep 127.0.0.1:3128       # listening on loopback only
 ```
+Notes (from the first real run): the binary is `/usr/bin/tinyproxy` (not `/usr/sbin`), this
+tinyproxy (1.11) has no config-test flag, and its config takes **no inline `#` comments**.
+Those are already baked into the committed unit/config — listed here only so the symptoms
+("status=203/EXEC", "Syntax error on line N") are recognizable.
 Allowed hostnames (in `anthropic-allow.filter`): `api.anthropic.com` (and any
 `*.anthropic.com` sub-host). Everything else is denied by `FilterDefaultDeny Yes`. Do NOT
 widen to telemetry hosts unless the CLI hard-fails without them (see GAPS.md G4).

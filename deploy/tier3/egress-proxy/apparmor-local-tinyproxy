@@ -1,0 +1,15 @@
+# HARNESS Tier-3 (G4) — AppArmor local override for the agent egress proxy.
+#
+# Ubuntu's base profile /etc/apparmor.d/tinyproxy confines /usr/bin/tinyproxy to its
+# DEFAULT paths only (tinyproxy.conf, tinyproxy.log) — it DENIES our custom config/filter/
+# log even when tinyproxy runs as root, surfacing as "Could not open config file". The base
+# profile includes /etc/apparmor.d/local/tinyproxy; add the custom paths here.
+#
+# Install:
+#   sudo install -m 0644 -o root -g root \
+#     deploy/tier3/egress-proxy/apparmor-local-tinyproxy /etc/apparmor.d/local/tinyproxy
+#   sudo apparmor_parser -r /etc/apparmor.d/tinyproxy
+#   sudo systemctl restart umbrella-egress-proxy
+  /etc/tinyproxy/agent-proxy.conf r,
+  /etc/tinyproxy/anthropic-allow.filter r,
+  /var/log/tinyproxy/agent-proxy.log rw,
