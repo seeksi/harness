@@ -1,0 +1,61 @@
+#!/usr/sbin/nft -f
+# Tier-3 / G4 — egress BACKSTOP for the `agent` user (proxy-bypass prevention).
+#
+# Trust model (council 2B): the FQDN allowlist lives in the loopback forward proxy
+# (egress-proxy/tinyproxy.conf). THIS ruleset's only job is to guarantee the proxy is the
+# ONLY way out for the agent uid — it default-DROPs all direct agent egress so the agent
+# cannot bypass the proxy and dial the internet itself. Uses `meta skuid "agent"` so the
+# policy follows the uid, not an IP/port the agent picks. Other users are untouched.
+#
+# Allowed for uid agent: loopback (incl. 127.0.0.1:3128 to the proxy) + established.
+# DENIED: everything else, INCLUDING direct DNS (:53) — the agent does not resolve names
+# itself; it speaks to the proxy by IP:port and the PROXY resolves Anthropic. Blocking
+# direct DNS also closes the classic DNS-tunnel exfil channel.
+#
+# Install / load:
+#   $ sudo nft -f deploy/tier3/agent-egress.nft
+#   $ sudo nft list table inet agent_egress      # verify
+# Persist via your nftables include (/etc/nftables.conf `include`, or /etc/nftables.d/).
+# Self-contained own table — does NOT flush the host ruleset.
+
+# Proxy endpoint the agent is allowed to reach (must match tinyproxy Listen/Port and the
+# wrapper's PROXY_PORT). Loopback only.
+define PROXY_PORT = 3128
+
+# Idempotent reload: declare-then-delete so the first load doesn't error on a missing table.
+table inet agent_egress {}
+delete table inet agent_egress
+table inet agent_egress {
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        # Only constrain the agent uid; everyone else is untouched by this table.
+        meta skuid != "agent" accept
+
+        # --- from here down, packet is from uid `agent` ---
+        # Loopback only. This covers the connection to the proxy at 127.0.0.1:$PROXY_PORT
+        # (and any other localhost traffic). Restrict the loopback allow to the proxy port
+        # so the agent can't reach some other unexpected localhost listener.
+        oifname "lo" ip  daddr 127.0.0.1 tcp dport $PROXY_PORT accept
+        oifname "lo" ip6 daddr ::1        tcp dport $PROXY_PORT accept
+        # DNS-to-localhost is intentionally NOT allowed: the proxy resolves names.
+
+        # Established/related return traffic for the above.
+        ct state established,related accept
+
+        # Everything else from the agent uid (direct internet, direct DNS, other ports):
+        # log (rate-limited) and DROP. A spike here = the agent trying to bypass the proxy.
+        limit rate 10/minute burst 5 packets log prefix "agent-egress-drop: " flags all
+        counter drop
+    }
+}
+
+# ponytail: the agent is pinned to ONE loopback proxy port; the proxy holds the real FQDN
+# allowlist. Ceiling: if a non-agent uid (e.g. a compromised proxy user) wanted to exfil
+# it isn't covered here — this table governs only uid agent by design. The proxy unit's
+# own hardening (umbrella-egress-proxy.service) bounds that. Upgrade path: extend the
+# table to also constrain the proxy uid's egress to the resolved Anthropic IPs if you want
+# defense-in-depth on the proxy itself.
+#
+# skipped: rate-limiting agent→proxy bandwidth (tc/htb), add if exfil-throughput via the
+#          allowed channel is a concern.

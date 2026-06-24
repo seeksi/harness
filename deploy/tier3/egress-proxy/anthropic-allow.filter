@@ -1,0 +1,17 @@
+# Tier-3 / G4 — tinyproxy FQDN allowlist (FilterDefaultDeny Yes ⇒ only these match).
+# POSIX-extended regex, anchored, matched against the CONNECT host (FilterExtended Yes).
+#
+# Hostnames the claude CLI / Max-plan session need:
+#   api.anthropic.com        — the Anthropic API (chat/messages). REQUIRED.
+# The Max-plan subscription auth flow and the CLI's normal operation egress to
+# api.anthropic.com. The two entries below also permit any *.anthropic.com sub-host in
+# case the CLI uses a regional/edge API hostname under the same domain — review the
+# CLI's actual egress (RUNBOOK Step 4 verify logs) and tighten to exactly the hosts seen.
+#
+# If telemetry/error-reporting must be allowed (OFF by default — keep it denied unless
+# the CLI hard-fails without it), the candidate hosts would be statsig.anthropic.com and
+# a sentry ingest host; do NOT add them unless verified necessary. Prefer disabling CLI
+# telemetry over widening the allowlist.
+
+^api\.anthropic\.com$
+^([a-z0-9-]+\.)*anthropic\.com$

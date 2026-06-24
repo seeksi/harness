@@ -1,0 +1,35 @@
+# Tier-3 / G1 — sudoers fragment: deploy may run ONLY the agent-exec wrapper as `agent`.
+#
+# Install to: /etc/systemd/.. NO — install to /etc/sudoers.d/umbrella-agent
+#   owner root:root, mode 0440 (sudo refuses group/world-writable drop-ins).
+#   $ sudo install -m 0440 -o root -g root \
+#         deploy/tier3/sudoers.d-umbrella-agent /etc/sudoers.d/umbrella-agent
+#
+# VALIDATE BEFORE TRUSTING (a broken sudoers can lock you out):
+#   $ sudo visudo -cf /etc/sudoers.d/umbrella-agent     # must print: parsed OK
+#   (visudo -c checks the whole /etc/sudoers tree incl. this drop-in.)
+#
+# Contract from agent-bridge.ts buildInvocation:
+#   sudo -n -H -u agent -- /opt/umbrella/deploy/agent-exec-wrapper.sh <args...>
+#   -n  never prompt (fail closed)      -H  HOME from agent's passwd (its ~/.claude)
+# The Cmnd is the wrapper's ABSOLUTE path with NO args, so deploy may pass ANY args to
+# THIS ONE binary as agent — but cannot run anything else as agent, and cannot swap the
+# binary (agent-bridge pins AGENT_CLI_PATH; this rule pins the path sudo will accept).
+
+# env_reset (sudo default) drops deploy's environment so no daemon env/secret reaches the
+# agent. secure_path is restricted to trusted system dirs for the agent command context.
+Defaults!UMBRELLA_AGENT_EXEC env_reset
+Defaults!UMBRELLA_AGENT_EXEC secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# The single allowed command alias — exact absolute path, no wildcards.
+Cmnd_Alias UMBRELLA_AGENT_EXEC = /opt/umbrella/deploy/agent-exec-wrapper.sh
+
+# deploy may run that wrapper as agent only, password-less. NOTHING else is granted here.
+deploy ALL=(agent) NOPASSWD: UMBRELLA_AGENT_EXEC
+
+# ponytail: the rule trusts the wrapper file's integrity. Ceiling: if the wrapper were
+# agent-writable the agent could rewrite its own limits. Upgrade path: keep the wrapper
+# root-owned 0755 (provision step does this) and/or add a dpkg/aide integrity check.
+#
+# skipped: per-arg command restriction (e.g. forcing --allowedTools), add if you want
+# sudoers (not just the daemon) to enforce the tool allowlist — args are free-form here.

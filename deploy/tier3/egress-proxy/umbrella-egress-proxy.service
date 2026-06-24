@@ -1,0 +1,45 @@
+# Tier-3 / G4 — systemd unit for the agent egress proxy (tinyproxy, loopback-only).
+#
+# Install: deploy/tier3/egress-proxy/umbrella-egress-proxy.service
+#          → /etc/systemd/system/umbrella-egress-proxy.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now umbrella-egress-proxy
+#   DRAFT FOR REVIEW — do NOT run until sign-off (see RUNBOOK.md).
+
+[Unit]
+Description=HARNESS agent egress proxy (FQDN allowlist, loopback only) — G4
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# tinyproxy in the foreground (-d). Config selects User/Group tinyproxy-agent itself.
+ExecStartPre=/usr/sbin/tinyproxy -d -c /etc/tinyproxy/agent-proxy.conf -t  # config test
+ExecStart=/usr/sbin/tinyproxy -d -c /etc/tinyproxy/agent-proxy.conf
+Restart=on-failure
+RestartSec=2
+
+# Hardening: the proxy is internet-facing logic, lock it down. It needs outbound network
+# and its log dir; nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/tinyproxy
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+# Bind is loopback (config), but the proxy must still dial OUT to Anthropic — so do NOT
+# restrict it to loopback-only address families/IPs here; nft governs the agent, not the proxy.
+RestrictSUIDSGID=yes
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
+
+# ponytail: a single shared proxy for the agent. Ceiling: the proxy user (tinyproxy-agent)
+# has unrestricted internet egress to the allowlisted hosts — if it were compromised it
+# could reach Anthropic only (allowlist) but that's still A2/A4 surface. Upgrade path:
+# per-lane proxy instances, or move the allowlist into nft+SNI inspection so no proxy uid
+# holds broad egress.
