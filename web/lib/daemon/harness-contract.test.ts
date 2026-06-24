@@ -364,6 +364,87 @@ describe("harness.sh → parseHarnessLine contract", () => {
     expect(execFileSync("git", ["rev-parse", "main"], { cwd: repo, encoding: "utf8" }).trim()).toBe(baseBefore);
   });
 
+  it("multi-lane happy path: two DISJOINT lanes both merge; integration has BOTH changes", () => {
+    // Two lanes edit DIFFERENT files → both wt-verify clear, both integ-merge onto
+    // integration with no conflict. This is the multi-lane win exercised against real git.
+    const repo = newRepo();
+
+    // Lane "alpha" edits a.txt; lane "beta" edits b.txt — file-disjoint, no overlap.
+    harness(repo, ["wt-new", "alpha"]);
+    const wtA = wtPath(repo, "alpha");
+    writeFileSync(path.join(wtA, "a.txt"), "from alpha\n");
+    git(wtA, ["add", "a.txt"]);
+    git(wtA, ["commit", "-q", "-m", "alpha work"]);
+
+    harness(repo, ["wt-new", "beta"]);
+    const wtB = wtPath(repo, "beta");
+    writeFileSync(path.join(wtB, "b.txt"), "from beta\n");
+    git(wtB, ["add", "b.txt"]);
+    git(wtB, ["commit", "-q", "-m", "beta work"]);
+
+    // Both lanes pass Gate B.
+    for (const slug of ["alpha", "beta"]) {
+      const out = harness(repo, ["wt-verify", slug]);
+      const events = out.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+      expect(events).toContainEqual(expect.objectContaining({ type: "gate", id: "B", status: "clear" }));
+    }
+
+    // Serial merge in lane order: both land on integration with no conflict.
+    harness(repo, ["integ-start"]);
+    assertAllValidEvents(harness(repo, ["integ-merge", "alpha"]));
+    assertAllValidEvents(harness(repo, ["integ-merge", "beta"]));
+
+    // integration contains BOTH lanes' changes.
+    const tree = execFileSync("git", ["ls-tree", "-r", "--name-only", "integration"], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    expect(tree).toContain("a.txt");
+    expect(tree).toContain("b.txt");
+    expect(execFileSync("git", ["show", "integration:a.txt"], { cwd: repo, encoding: "utf8" })).toBe("from alpha\n");
+    expect(execFileSync("git", ["show", "integration:b.txt"], { cwd: repo, encoding: "utf8" })).toBe("from beta\n");
+  });
+
+  it("multi-lane conflict: two lanes edit the SAME file; second integ-merge CONFLICTS, raises Gate C, blocks", () => {
+    // Both lanes edit shared.txt with DIFFERENT content. The first merge lands; the
+    // second conflicts → exits non-zero → Gate C raised. integration keeps the first
+    // lane, NOT the second — conflicts surface as normal git conflicts, never auto-merged.
+    const repo = newRepo();
+    writeFileSync(path.join(repo, "shared.txt"), "BASE\n");
+    git(repo, ["add", "shared.txt"]);
+    git(repo, ["commit", "-q", "-m", "add shared"]);
+
+    harness(repo, ["wt-new", "one"]);
+    const wt1 = wtPath(repo, "one");
+    writeFileSync(path.join(wt1, "shared.txt"), "FROM_ONE\n");
+    git(wt1, ["commit", "-q", "-am", "one edits shared"]);
+
+    harness(repo, ["wt-new", "two"]);
+    const wt2 = wtPath(repo, "two");
+    writeFileSync(path.join(wt2, "shared.txt"), "FROM_TWO\n");
+    git(wt2, ["commit", "-q", "-am", "two edits shared"]);
+
+    harness(repo, ["integ-start"]);
+    assertAllValidEvents(harness(repo, ["integ-merge", "one"])); // first lands clean
+
+    // Second merge CONFLICTS: non-zero exit + raised Gate C.
+    const { stdout, status } = harnessFails(repo, ["integ-merge", "two"]);
+    expect(status, "non-zero exit on conflict").toBeGreaterThan(0);
+    const events = stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "gate", id: "C", status: "raised", severity: "high" })
+    );
+
+    // integration has the FIRST lane's content, not the second's (no auto-resolution).
+    // (Abort any in-progress merge state first so `git show` reads the committed tip.)
+    try {
+      execFileSync("git", ["merge", "--abort"], { cwd: repo });
+    } catch {
+      // merge may already be in a clean-but-unmerged state; the show below is the assertion
+    }
+    expect(execFileSync("git", ["show", "integration:shared.txt"], { cwd: repo, encoding: "utf8" })).toBe("FROM_ONE\n");
+  });
+
   it("wt-verify: UNTRACKED (uncommitted) files raise Gate B even with prior commits", () => {
     const repo = newRepo();
     harness(repo, ["wt-new", "dirty"]);

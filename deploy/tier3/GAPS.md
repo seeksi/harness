@@ -49,6 +49,26 @@ Option B once a curated git+test command allowlist is written and reviewed. Eith
 this is a code/config decision the operator must sign off — the draft cannot pick it
 unilaterally because it changes the daemon contract.
 
+### 2. Multi-lane concurrency (`LANE_CONCURRENCY > 1`) — gated on per-lane isolation
+The daemon's build phase (`daemon.ts` `runLive`) can run N lane agents concurrently
+(capped by `LANE_CONCURRENCY`), but the prod **default is 1 (sequential)** and must stay
+there until per-lane isolation lands. Raising it above 1 on the current single-uid host is
+**BLOCKED by cross-review**: all lanes share one `agent` uid + one `~/.claude`
+session/cache (concurrent writers corrupt it), the same uid can write sibling worktrees
+(no lane-to-lane FS isolation — see G1), and N×MemoryMax (1500M) exceeds host RAM (the
+cgroup cap is per-invocation, not aggregate — see G6).
+
+`LANE_CONCURRENCY > 1` REQUIRES, before it is enabled:
+- a **per-lane OS user + HOME** (or a userns/landlock jail per lane) so each agent has its
+  own `~/.claude` session/cache and cannot write another lane's worktree;
+- a **parent `umbrella-agent.slice` aggregate cgroup cap** so N concurrent scopes share a
+  host-wide `MemoryMax` (N×per-lane MemoryMax must not exceed host RAM);
+- **raised tinyproxy `MaxClients`** so N simultaneous agents aren't throttled at the egress
+  proxy.
+
+Until then prod runs sequentially (default 1). The asyncPool + phased-merge machinery is
+correct and stays; only the default is constrained.
+
 ## Resolved by council (this revision)
 
 ### G4 — egress: RESOLVED via FQDN proxy (council 2B)
@@ -75,6 +95,6 @@ verified in RUNBOOK Step 2.
 - No containerization (operator already chose hardened-host in the threat model §107).
 - Nothing executed on the VPS; nothing committed.
 
-skipped: per-lane FS isolation, add when concurrent/multi-tenant lanes appear.
+skipped: per-lane FS isolation (per-lane user+HOME / userns), add to unblock LANE_CONCURRENCY>1 (Decision 2).
 skipped: SNI-aware egress inspection, add if the allowlist must bind to TLS SNI not the CONNECT host.
-skipped: parent agent slice (host-wide MemoryMax), add when >1 concurrent agent lane is introduced.
+skipped: parent umbrella-agent.slice (host-wide MemoryMax) + raised tinyproxy MaxClients, add to unblock LANE_CONCURRENCY>1 (Decision 2).

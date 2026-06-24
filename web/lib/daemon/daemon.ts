@@ -94,6 +94,53 @@ const defaultRunAgent: RunAgentFn = async (spec, runOpts) => {
   return { code: exitCode, sessionId, usage };
 };
 
+/**
+ * How many lane AGENT BUILDS run at once. Only the build step is concurrent — every
+ * git op stays serial. The multi-lane MACHINERY is correct for any N, but DEFAULT IS 1
+ * (fully sequential — identical to the pre-#16 behavior) because real N-lane concurrency
+ * is NOT YET SAFE on the current host: all lane agents share one `agent` uid + one
+ * $HOME/~/.claude (racy OAuth/session/cache — corruption), the same uid can read/write
+ * SIBLING worktrees (cwd is not a jail), and N × the per-scope MemoryMax can exceed host
+ * RAM. Raising LANE_CONCURRENCY > 1 REQUIRES the per-lane isolation chunk first: per-lane
+ * OS user + HOME (or a userns/landlock jail) + a parent `umbrella-agent.slice` aggregate
+ * cgroup cap. Clamped to 1..5. (Cross-review BLOCK 2026-06-24 — see harness-roadmap #16b.)
+ */
+const LANE_CONCURRENCY = (() => {
+  const raw = Number(process.env.LANE_CONCURRENCY);
+  const n = Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 1; // SAFE default: sequential
+  return Math.min(5, Math.max(1, n));
+})();
+
+/**
+ * Run `worker` over `items` with at most `cap` in flight at once, preserving each
+ * item's index in the result. Settles like Promise.allSettled: one worker rejecting
+ * never leaves another's rejection unhandled, and the pool always drains. No new
+ * dependency — a tiny index-cursor pool shared by `cap` runners.
+ * ponytail: in-process only (no backpressure across processes); fine for one daemon slot.
+ */
+async function asyncPool<T, R>(
+  cap: number,
+  items: readonly T[],
+  worker: (item: T, index: number) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let cursor = 0;
+  const runner = async (): Promise<void> => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      try {
+        results[i] = { status: "fulfilled", value: await worker(items[i], i) };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  };
+  const lanes = Math.min(Math.max(1, cap), items.length);
+  await Promise.all(Array.from({ length: lanes }, runner));
+  return results;
+}
+
 /** Milliseconds between dry-run event yields (simulates a live stream). */
 const DRY_RUN_DELAY_MS = 50;
 
@@ -178,21 +225,29 @@ async function runSub(
 }
 
 /**
- * Execute a server-built live run: Gate A (budget) → open integration → for each lane
- * { wt-new → run the AGENT in the worktree → wt-commit (harness commits the edits) →
- * wt-verify (Gate B) → integ-merge (Gate C) → trace the agent's session (Gate D) }.
- * Provenance is minted from server-built values before each step.
- * A non-zero exit / agent failure stops the run (finalized failed by startRun's catch).
+ * Execute a server-built live run as four phases over `plan.lanes`. Lane order (the
+ * plan order) is the canonical order for every git op; only the agent BUILD is unordered.
+ *   Gate A (budget) → ONE integ-start, then:
+ *   1. wt-new   — SERIAL, lane order (git worktree add races the shared index/refs).
+ *   2. build    — CONCURRENT, capped at LANE_CONCURRENCY. Each agent only EDITS files in
+ *      its own isolated worktree (no git, no shared state) — the safe parallelism + the
+ *      win. allSettled drains; if ANY lane rejected OR exited non-zero we throw BEFORE
+ *      any merge (a run with a failed lane must not merge).
+ *   3. finalize — SERIAL, lane order: wt-commit → wt-verify (Gate B) → (if sessionId:
+ *      mintSession + relocate + trace Gate D). All git/serial; a raised gate throws.
+ *   4. merge    — SERIAL, lane order: integ-merge (Gate C). The FIRST conflicting merge
+ *      makes harness.sh exit non-zero → runSub throws → the run blocks with that lane's
+ *      Gate C raised. Conflicts are surfaced as normal git conflicts, never auto-resolved.
+ * Provenance is minted from server-built values before any side effect.
  *
  * The agent step is gated inside spawnAgent (ENABLE_AGENT_EXEC); promote is never auto-
- * run. The session for the trace gate is the one the agent actually reported.
+ * run. The session for the trace gate is the one each agent actually reported.
  *
  * ponytail (remaining runtime gate-checklist items, validated on the VPS):
  *   - on failure, the worktree + feat/integration branches are left dangling; cleanup is
  *     `harness.sh clean` (destructive — intentionally manual, not auto-run here).
  *   - VPS hardening (dedicated agent user, egress firewall, resource limits) + Max-plan
  *     auth + flipping ENABLE_AGENT_EXEC are operational, not code (§6 gate checklist).
- * The plan.jsonl, the wt-verify (commit) gate, and trace relocation are now handled here.
  */
 async function runLive(
   plan: RunPlan,
@@ -218,28 +273,57 @@ async function runLive(
   await runSub({ cmd: "budget", planFile: plan.planFile }, onEvent, opts.spawnFn); // Gate A
   await runSub({ cmd: "integ-start" }, onEvent, opts.spawnFn);
 
+  // Phase 1 — CREATE WORKTREES: SERIAL, lane order. `git worktree add` mutates the
+  // shared index + refs/admin of the single repo, so these can NEVER run concurrently.
   for (const lane of plan.lanes) {
     await runSub({ cmd: "wt-new", slug: lane.slug }, onEvent, opts.spawnFn);
+  }
 
-    // Build: the agent only EDITS files in the lane worktree (gated; refuses unless
-    // enabled). It has no Bash, so it cannot git — the harness commits below. runAgent
-    // gets NO harness spawn — it's a distinct seam (real spawnAgent in prod, an injected
-    // fake in tests).
-    const { code, sessionId, usage } = await runAgent({
+  // Phase 2 — BUILD AGENTS: CONCURRENT, capped at LANE_CONCURRENCY. Each agent only
+  // EDITS files in its own isolated worktree (no git, no Bash, no shared state) — the
+  // actual win. runAgent gets NO harness spawn (a distinct seam: real spawnAgent in
+  // prod, an injected fake in tests). allSettled (NOT all) so one rejection never leaves
+  // another's unhandled and the pool always drains before we inspect outcomes.
+  type LaneBuild = Awaited<ReturnType<RunAgentFn>>;
+  const builds = await asyncPool<LaneStep, LaneBuild>(LANE_CONCURRENCY, plan.lanes, (lane) =>
+    runAgent({
       slug: lane.slug,
       worktreePath: worktreePathFor(lane.slug),
       taskPrompt: lane.taskPrompt,
       model: lane.model,
-    });
-    if (code !== 0) {
-      throw new HarnessExitError(`agent for lane '${lane.slug}' exited with code ${code}`);
-    }
+    })
+  );
 
-    // Surface ACTUAL usage/cost/context for the lane (HUD token + context gauges).
-    // Best-effort: a failed-parse / no-result agent reports null → no event emitted.
-    if (usage) {
-      onEvent({ type: "usage", subtaskId: lane.slug, ...usage });
-    }
+  // Block the WHOLE run BEFORE any merge if any lane rejected OR exited non-zero — a run
+  // with a failed lane must not merge. (We still emit usage for the lanes that produced
+  // it, below, for the lanes that did succeed.)
+  const failed = builds.findIndex(
+    (b) => b.status === "rejected" || (b.status === "fulfilled" && b.value.code !== 0)
+  );
+  if (failed !== -1) {
+    const lane = plan.lanes[failed];
+    const b = builds[failed];
+    const why =
+      b.status === "rejected"
+        ? `threw (${b.reason instanceof Error ? b.reason.message : String(b.reason)})`
+        : `exited with code ${(b as PromiseFulfilledResult<LaneBuild>).value.code}`;
+    throw new HarnessExitError(`agent for lane '${lane.slug}' ${why}`);
+  }
+
+  // All builds succeeded — fold to the per-lane results in lane order.
+  const results = builds.map((b) => (b as PromiseFulfilledResult<LaneBuild>).value);
+
+  // Surface ACTUAL usage/cost/context per lane (HUD token + context gauges), in lane
+  // order. Best-effort: a failed-parse / no-result agent reports null → no event.
+  plan.lanes.forEach((lane, i) => {
+    const { usage } = results[i];
+    if (usage) onEvent({ type: "usage", subtaskId: lane.slug, ...usage });
+  });
+
+  // Phase 3 — FINALIZE EACH LANE: SERIAL, lane order. All git/serial.
+  for (let i = 0; i < plan.lanes.length; i++) {
+    const lane = plan.lanes[i];
+    const { sessionId } = results[i];
 
     // Commit the agent's edits (the agent has no Bash). Stages+commits only if the
     // worktree is dirty — a genuine no-op lane stays uncommitted so Gate B below still
@@ -260,7 +344,12 @@ async function runLive(
         await runSub({ cmd: "trace", session: sessionId }, onEvent, opts.spawnFn);
       }
     }
+  }
 
+  // Phase 4 — MERGE: SERIAL, lane order. The first conflicting integ-merge makes
+  // harness.sh exit non-zero → runSub throws → the run blocks with that lane's Gate C
+  // raised. No catch-and-continue: conflicts are surfaced as normal git conflicts.
+  for (const lane of plan.lanes) {
     await runSub({ cmd: "integ-merge", slug: lane.slug }, onEvent, opts.spawnFn); // Gate C
   }
 }
@@ -271,8 +360,9 @@ async function runLive(
  * is trustworthy (T1). The taskPrompt is the brief (opaque task text; not provenance).
  * `promote` is never planned (separate human-gated action).
  *
- * ponytail: single generic lane. Real multi-lane decomposition (brief → N lanes via
- * the decompose agent) is a later increment.
+ * ponytail: single generic lane (cap: one lane). runLive already runs plan.lanes of
+ * length 1..N identically — the only missing piece is real brief → N file-DISJOINT-lane
+ * decomposition (the decompose agent), which is the NEXT chunk; add when wiring it.
  */
 export function planRun(runId: string, brief: string): RunPlan {
   // Hash the FULL runId → a fixed-length, collision-resistant, validator-safe id, so
