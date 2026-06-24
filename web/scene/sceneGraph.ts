@@ -11,6 +11,7 @@
 // increments (see ponytail notes at the bottom).
 
 import type { RunState, PhaseId, SubtaskStatus } from "@/lib/contract/types";
+import { selectActivePhase } from "@/lib/contract/selectors";
 
 export interface SceneNode {
   id: string;
@@ -59,7 +60,9 @@ function pickActiveSubtask(state: RunState): string | null {
 
 export function project_scene(state: RunState): SceneGraph {
   const raisedGateCount = state.gates.filter((g) => g.status === "raised").length;
-  const currentPhase = state.task.phase;
+  // Shared selector — same derivation the DOM mirror uses, so the two projections
+  // never disagree on the current phase (drift fix).
+  const currentPhase = selectActivePhase(state);
   const currentPhaseLabel =
     state.phases.find((p) => p.id === currentPhase)?.label ?? String(currentPhase);
   const activeSubtask = pickActiveSubtask(state);

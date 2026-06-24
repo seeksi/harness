@@ -43,6 +43,11 @@ export async function startRun(runId: string, brief: string): Promise<RunHandle>
   async function* generate(): AsyncGenerator<SSEEvent, void, unknown> {
     try {
       for (const event of dryRun) {
+        // Skip the fixture's `hello` — it carries the fixture's run identity
+        // (`run-fixture`) and would replace our real server-generated runId/brief
+        // wholesale. The seeded snapshot below is the real resync state; deltas
+        // are self-sufficient (subtask events create-if-missing in the reducer).
+        if (event.type === "hello") continue;
         // ponytail: replace dryRun iteration with harness-bridge spawn when real.
         state = reducer(state, event);
         appendEvent(runId, event);

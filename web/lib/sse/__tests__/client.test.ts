@@ -159,6 +159,24 @@ describe("SSE client — reconnect + hello resync", () => {
     client.destroy();
   });
 
+  it("closes without reconnecting after the terminal end frame", () => {
+    const store = makeTestStore();
+    const client = createSseClient({ runId: "r7", store, baseUrl: "" });
+    const es = instances[0];
+
+    // Terminal control frame must NOT be applied to the store.
+    es._emit({ type: "__umbrella_end" } as unknown as SSEEvent);
+    expect(store._applied).toHaveLength(0);
+
+    // A subsequent error (the connection close after the end frame) must NOT
+    // spawn a reconnect.
+    es._error();
+    vi.advanceTimersByTime(60_000);
+    expect(instances.length).toBe(1);
+
+    client.destroy();
+  });
+
   it("status callback is called on connect, reconnect, and close", () => {
     const statuses: string[] = [];
     const client = createSseClient({

@@ -10,6 +10,7 @@ import { initialRunState } from "@/lib/contract/types";
 import type { SSEEvent } from "@/lib/contract/events";
 import { dryRun } from "@/lib/contract/fixture";
 import { getSnapshot } from "@/lib/store/persist";
+import { STREAM_END } from "@/lib/sse/client";
 
 function sseChunk(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
@@ -47,6 +48,10 @@ export async function GET(
           enqueue(sseChunk(event));
           await new Promise<void>((res) => setTimeout(res, 50));
         }
+        // Terminal frame: the dry run is finite. Without this the client's
+        // EventSource would treat the close as an error and reconnect, re-replaying
+        // the whole fixture forever.
+        enqueue(`data: ${JSON.stringify({ type: STREAM_END })}\n\n`);
       } finally {
         controller.close();
       }

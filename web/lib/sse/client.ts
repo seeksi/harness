@@ -14,6 +14,13 @@ import type { SSEEvent } from "@/lib/contract/events";
 
 export type ConnectionStatus = "connecting" | "open" | "reconnecting" | "closed";
 
+// Terminal control frame. A finite stream (e.g. the dry run) ends by sending this
+// instead of just closing the connection — EventSource treats a bare close as an
+// error and auto-reconnects, which would re-replay the whole stream forever. On
+// this frame the client closes WITHOUT reconnecting. It is NOT a domain SSEEvent
+// and never reaches the reducer.
+export const STREAM_END = "__umbrella_end";
+
 export interface SseClientOptions {
   runId: string;
   store: RunStore;
@@ -46,6 +53,7 @@ export function createSseClient(opts: SseClientOptions): SseClient {
   let attempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
+  let ended = false; // set when the stream signals terminal completion — no reconnect
 
   function notify(status: ConnectionStatus) {
     // ponytail: wire status into RunState.ui.connection when the contract adds it.
@@ -72,6 +80,15 @@ export function createSseClient(opts: SseClientOptions): SseClient {
         // the reducer (drops unknown events per ADR 0001 §2.3).
         return;
       }
+      // Terminal control frame: stream complete. Close without reconnecting (and
+      // never apply it to the store — it is not a domain event).
+      if ((parsed as { type?: string }).type === STREAM_END) {
+        ended = true;
+        es?.close();
+        es = null;
+        notify("closed");
+        return;
+      }
       // The ONLY action here is buffering. No React notify. No subscriber call.
       // Lane B's rAF loop calls store.flush() once per frame — that is the sole
       // notification path into React and r3f.
@@ -83,7 +100,7 @@ export function createSseClient(opts: SseClientOptions): SseClient {
     es.onerror = () => {
       es?.close();
       es = null;
-      if (destroyed) return;
+      if (destroyed || ended) return; // terminal completion is not a reconnectable error
       notify("reconnecting");
       const delay = backoffMs(attempt);
       attempt += 1;

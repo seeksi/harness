@@ -6,7 +6,8 @@
 "use client";
 
 import React from "react";
-import type { RunState, PhaseId } from "@/lib/contract/types";
+import type { RunState } from "@/lib/contract/types";
+import { selectActivePhase } from "@/lib/contract/selectors";
 import { PHASE_LABELS, STATUS_BADGE } from "./announce";
 
 // Re-export so callers have a named function matching the contract name.
@@ -14,14 +15,6 @@ export { projectDom as project_dom };
 
 interface DomMirrorProps {
   state: RunState;
-}
-
-/** Active phase: the highest-id phase currently "active", or the task's `.phase`. */
-function activePhase(state: RunState): PhaseId {
-  const active = [...state.phases]
-    .reverse()
-    .find((p) => p.status === "active");
-  return active ? active.id : state.task.phase;
 }
 
 /** Active subtask: first subtask whose status is "building". */
@@ -39,7 +32,7 @@ function raisedGateCount(state: RunState): number {
  * This is the function name that matches the two-renderer rule in the contract README.
  */
 function projectDom(state: RunState): React.ReactElement {
-  const phase = activePhase(state);
+  const phase = selectActivePhase(state);
   const phaseLabel = PHASE_LABELS[phase];
   const subtask = activeSubtask(state);
   const gateCount = raisedGateCount(state);
