@@ -21,6 +21,9 @@ PROXY="${PROXY:-http://127.0.0.1:3128}"
 WRAPPER="${WRAPPER:-/opt/umbrella/deploy/agent-exec-wrapper.sh}"
 ALLOW_HOST="${ALLOW_HOST:-https://api.anthropic.com/}"
 DENY_HOST="${DENY_HOST:-https://example.com/}"
+# The app binds the tailnet IP (not loopback), so default the capabilities URL to it.
+# Override CAPS_URL for a different bind.
+CAPS_URL="${CAPS_URL:-http://100.86.74.120:3000/api/agent/capabilities}"
 
 pass=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$1"; pass=$((pass+1)); }
@@ -32,7 +35,6 @@ asagent() { sudo -n -u "$AGENT_USER" -H "$@"; }
 sect "G1 — privilege drop & FS confinement"
 if id "$AGENT_USER" >/dev/null 2>&1; then
   uid=$(id -u "$AGENT_USER")
-  [ "$uid" -ge 1000 ] || [ "$uid" -lt 1000 ] # captured below
   [ "$uid" != 0 ] && ok "agent uid=$uid is not root" || bad "agent runs as root"
 else bad "agent user '$AGENT_USER' does not exist"; fi
 asagent test -w "$REPO" 2>/dev/null && bad "agent CAN write the repo ($REPO)" || ok "repo is read-only to the agent"
@@ -74,7 +76,7 @@ rc=$?; [ "$rc" -eq 78 ] && ok "wrapper FAILS CLOSED (exit 78) when the cgroup sc
   || bad "wrapper did not fail closed (exit $rc) — could run claude uncapped"
 
 sect "G1/G9 — tool allowlist & MCP isolation (static surface)"
-caps=$(curl -sS --max-time 6 http://127.0.0.1:3000/api/agent/capabilities 2>/dev/null)
+caps=$(curl -sS --max-time 6 "$CAPS_URL" 2>/dev/null)
 if [ -n "$caps" ]; then
   echo "$caps" | grep -q '"bashEnabled":false' && ok "Bash is NOT in the agent allowlist" || bad "Bash appears enabled"
   echo "$caps" | grep -qE '"servers":\[\]' && echo "$caps" | grep -q '"strict":true' \
