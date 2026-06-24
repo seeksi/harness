@@ -23,6 +23,18 @@ REAL_CLAUDE="${REAL_CLAUDE:-/usr/local/bin/claude}"
 PROXY_PORT="${PROXY_PORT:-3128}"
 PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 
+# --- G6 resource caps from the validated SANDBOX_* contract ----------------------------
+# lib/sandbox `validateLimits` already shape-checks + bounds these (MemoryMax/CPUQuota
+# regex `^\d+[KMGT]?$|^\d+%$`, TasksMax/CPUSeconds positive ints) and they survive sudo
+# env_reset via the sudoers `env_keep`. So we TRUST the shape and only DEFAULT-when-empty
+# to the historical 2 GB-host values — but still quote them in every systemd-run/ulimit
+# arg (defence in depth; never let an unquoted value split an arg). An unset OR empty var
+# falls back to the default, so today's behavior is unchanged when the daemon sends none.
+MEM="${SANDBOX_MEM_MAX:-1500M}"
+TASKS="${SANDBOX_TASKS_MAX:-256}"
+CPU_QUOTA="${SANDBOX_CPU_QUOTA:-180%}"
+CPU_SECONDS="${SANDBOX_CPU_SECONDS:-1500}"
+
 # --- G4 egress: route all CLI HTTP(S) through the loopback FQDN proxy -----------------
 # The proxy holds the FQDN allowlist (api.anthropic.com …); nft prevents bypass.
 export HTTPS_PROXY="$PROXY_URL" https_proxy="$PROXY_URL"
@@ -34,8 +46,8 @@ export NO_PROXY="" no_proxy=""   # nothing bypasses the proxy
 # virtual memory at startup regardless of actual RSS, so a -v cap makes claude SIGABRT
 # (exit 134, core dumped) before it runs. Real memory is capped by the cgroup MemoryMax
 # in the systemd-run scope below — that is the correct knob, not ulimit -v.
-ulimit -u 256         # max user processes (fork-bomb guard) for the agent uid
-ulimit -t 1500        # CPU seconds (~25 min) — pairs with AGENT_TIMEOUT_MS wall clock
+ulimit -u 256              # max user processes (fork-bomb guard) for the agent uid
+ulimit -t "$CPU_SECONDS"   # CPU seconds (default 1500 ≈ 25 min) — pairs with AGENT_TIMEOUT_MS wall clock
 ulimit -f 1048576     # max file size (KB) = 1 GB — caps disk write per file
 ulimit -c 0           # no core dumps (could contain session material)
 
@@ -66,13 +78,14 @@ if ! systemd-run --user --scope -q -- true >/dev/null 2>&1; then
 fi
 
 exec systemd-run --user --scope -q \
-  -p MemoryMax=1500M \
+  -p MemoryMax="$MEM" \
   -p MemorySwapMax=0 \
-  -p TasksMax=256 \
-  -p CPUQuota=180% \
+  -p TasksMax="$TASKS" \
+  -p CPUQuota="$CPU_QUOTA" \
   -- "$REAL_CLAUDE" "$@"
 
-# ponytail: caps are tuned for the 2 GB host (1.5 G mem, no swap, 256 tasks, 1.8 CPU).
+# ponytail: caps DEFAULT to the 2 GB host values (1.5 G mem, no swap, 256 tasks, 1.8 CPU)
+# and are overridden per-run by the validated SANDBOX_* env (lib/sandbox validateLimits).
 # Ceiling: one shared scope per invocation; concurrent lanes (none today — daemon is
 # single-slot) would each get their own scope but share host RAM. Upgrade path: a parent
 # slice (umbrella-agent.slice) with a host-wide MemoryMax so concurrent agents can't
