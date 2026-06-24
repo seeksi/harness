@@ -1,0 +1,57 @@
+# Tier-1 CI gate: build / test / typecheck / lint on every push and PR.
+#
+# ponytail: harness eval gates (cross-review Phase 1, eval-gate Phase 3)
+#   require ANTHROPIC_API_KEY and are intentionally excluded here.
+#   Add them as downstream jobs in this workflow once the eval suite and
+#   API secret are wired into the repo's Actions secrets.
+#
+# ponytail: single serial job — split into parallel jobs (typecheck+lint /
+#   test / build) when CI wall-clock time exceeds ~5 min.
+#
+# Assumption: ubuntu-latest ships build-essential + python3, which compiles
+#   better-sqlite3 (native addon) during `npm ci` without extra apt installs.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (platform-native, free).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
