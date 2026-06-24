@@ -242,7 +242,14 @@ case "$cmd" in
     [ -n "${2:-}" ] || die "integ-merge needs a <slug>"
     on_branch integration || die "not on integration (run integ-start first)"
     emit_phase 5 active
-    if git merge --no-ff "feat/$2" >&2; then
+    # --no-ff ALWAYS writes a merge commit, so it needs a committer identity, no signing,
+    # and no inherited hooks — same as wt-commit. The prod `deploy` user has no global
+    # git identity, so pin it here (env + -c; empty inherited GIT_*_NAME would override -c).
+    if GIT_AUTHOR_NAME="umbrella-harness" GIT_AUTHOR_EMAIL="harness@umbrella.local" \
+       GIT_COMMITTER_NAME="umbrella-harness" GIT_COMMITTER_EMAIL="harness@umbrella.local" \
+       git -c user.name="umbrella-harness" -c user.email="harness@umbrella.local" \
+           -c commit.gpgsign=false -c core.hooksPath=/dev/null \
+           merge --no-ff --no-verify "feat/$2" >&2; then
       emit_subtask "$2" merged
       emit_agentfire "$2" merge low
       emit_gate C clear info "merged feat/$2" "$2"
