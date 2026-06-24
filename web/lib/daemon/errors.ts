@@ -8,3 +8,11 @@ export class HarnessArgError extends Error {
     this.name = "HarnessArgError";
   }
 }
+
+/** A spawned harness child exceeded its deadline and was killed (threat model T6). */
+export class HarnessTimeoutError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "HarnessTimeoutError";
+  }
+}

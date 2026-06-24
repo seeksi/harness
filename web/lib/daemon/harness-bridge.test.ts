@@ -8,6 +8,7 @@ import {
   parseHarnessLine,
   spawnHarness,
   HarnessArgError,
+  HarnessTimeoutError,
 } from "./harness-bridge";
 import { mintLane, mintSession, mintPlanFile, _resetRegistry } from "./registry";
 
@@ -154,6 +155,52 @@ describe("spawnHarness — shell:false + validated argv + structured-only events
       spawnHarness({ cmd: "wt-new", slug: "../bad" }, () => {}, { spawnFn: fakeSpawn as never })
     ).rejects.toBeInstanceOf(HarnessArgError);
     expect(fakeSpawn).not.toHaveBeenCalled();
+  });
+
+  it("on timeout: SIGTERM, then SIGKILL after grace, holds the slot until exit, rejects (T6)", async () => {
+    let child: (EventEmitter & { stdout: Readable; kill: ReturnType<typeof vi.fn> }) | undefined;
+    // The kill mock simulates the OS: SIGKILL actually reaps the child → emits close.
+    const kill = vi.fn((sig: string) => {
+      if (sig === "SIGKILL") setImmediate(() => child!.emit("close", null));
+    });
+    const fakeSpawn = vi.fn(() => {
+      child = new EventEmitter() as EventEmitter & { stdout: Readable; kill: typeof kill };
+      child.stdout = new Readable({ read() {} }); // never ends → simulates a hang
+      child.kill = kill;
+      return child as unknown as ChildProcess;
+    });
+
+    mintLane("scene");
+    // The promise must NOT settle on SIGTERM — only once close fires (after SIGKILL),
+    // proving the slot is held until the child is truly gone (no run overlap).
+    await expect(
+      spawnHarness({ cmd: "wt-new", slug: "scene" }, () => {}, {
+        spawnFn: fakeSpawn as never,
+        timeoutMs: 20,
+        killGraceMs: 5,
+      })
+    ).rejects.toBeInstanceOf(HarnessTimeoutError);
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
+    expect(kill).toHaveBeenCalledWith("SIGKILL"); // escalated after grace
+  });
+
+  it("completes before the deadline → resolves, no kill, single settle (T6 race)", async () => {
+    const kill = vi.fn();
+    const fakeSpawn = vi.fn(() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable; kill: typeof kill };
+      child.stdout = Readable.from(['{"type":"phase","phase":1,"status":"done"}\n']);
+      child.kill = kill;
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+
+    mintLane("scene");
+    const result = await spawnHarness({ cmd: "wt-new", slug: "scene" }, () => {}, {
+      spawnFn: fakeSpawn as never,
+      timeoutMs: 5_000,
+    });
+    expect(result.code).toBe(0);
+    expect(kill).not.toHaveBeenCalled(); // deadline canceled, child never killed
   });
 
   it("refuses to spawn promote unless the default-off flag is set", async () => {

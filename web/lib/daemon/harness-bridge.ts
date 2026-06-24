@@ -15,7 +15,7 @@ import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildPr
 import { createInterface } from "readline";
 import type { SSEEvent } from "@/lib/contract/events";
 import { isLane, isSession, isPlanFile } from "./registry";
-import { HarnessArgError } from "./errors";
+import { HarnessArgError, HarnessTimeoutError } from "./errors";
 
 export type HarnessSubcommand =
   | { cmd: "budget"; planFile: string }
@@ -25,9 +25,9 @@ export type HarnessSubcommand =
   | { cmd: "trace"; session: string }
   | { cmd: "promote" };
 
-// Re-exported for callers/tests that import it from the bridge; defined in errors.ts
-// to keep registry.ts ↔ harness-bridge.ts free of a circular dependency.
-export { HarnessArgError };
+// Re-exported for callers/tests that import them from the bridge; defined in
+// errors.ts to keep registry.ts ↔ harness-bridge.ts free of a circular dependency.
+export { HarnessArgError, HarnessTimeoutError };
 
 // Provenance gate (threat model T1): a slug/session/plan-file reaches harness.sh
 // ONLY if the server minted it (registry.ts), never because a client string happens
@@ -205,15 +205,25 @@ export interface SpawnHarnessOptions {
   cwd?: string;
   /** Injectable for tests; defaults to child_process.spawn. */
   spawnFn?: (cmd: string, args: string[], options: NodeSpawnOptions) => ChildProcess;
+  /** Wall-clock deadline; on expiry the child is killed and the promise rejects (T6). */
+  timeoutMs?: number;
+  /** Grace after SIGTERM before SIGKILL. */
+  killGraceMs?: number;
 }
 
 const DEFAULT_SCRIPT = process.env.HARNESS_SCRIPT_PATH ?? "../.claude/skills/harness/harness.sh";
+// All harness.sh subcommands are short git/python ops — a longer run means a hung
+// child, which must not hold the single slot forever (threat model T6). Override
+// via HARNESS_TIMEOUT_MS or opts.timeoutMs for an unusually slow host.
+const DEFAULT_TIMEOUT_MS = Number(process.env.HARNESS_TIMEOUT_MS) || 600_000; // 10 min
+const DEFAULT_KILL_GRACE_MS = 5_000;
 
 /**
  * Spawn a harness.sh subcommand and stream its structured stdout to onEvent.
  * shell:false + validated argv = no shell interpretation of any value. Raw output
  * is never forwarded — only events that pass parseHarnessLine. Resolves with the
- * exit code.
+ * exit code, or rejects with HarnessTimeoutError if the child exceeds its deadline
+ * (after SIGTERM → SIGKILL), so a hung child always releases the caller's slot.
  */
 export function spawnHarness(
   sub: HarnessSubcommand,
@@ -240,6 +250,9 @@ export function spawnHarness(
     const child = spawnFn(script, args, {
       cwd: opts.cwd ?? process.env.HARNESS_REPO ?? process.cwd(),
       shell: false, // CRITICAL: never let a shell re-parse the argv
+      // Own process group so a timeout can kill the whole tree (harness.sh spawns
+      // git/python children); without this only the shell PID dies and children leak.
+      detached: true,
     });
     if (!child.stdout) {
       reject(new Error("harness spawn produced no stdout"));
@@ -253,10 +266,56 @@ export function spawnHarness(
       const event = parseHarnessLine(line);
       if (event) onEvent(event);
     });
-    child.on("error", reject);
-    child.on("close", (code) => {
+
+    // Kill the whole process group (negative pid) so children spawned by harness.sh
+    // die too; fall back to the single child if there's no pid (e.g. test fakes).
+    const killTree = (signal: NodeJS.Signals) => {
+      try {
+        if (typeof child.pid === "number") process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        // already gone
+      }
+    };
+
+    // Single-settle guard. The deadline does NOT settle the promise itself — it only
+    // kills the child; the promise settles on `close` (the child actually exited).
+    // This keeps the caller's slot held until the process is truly gone, so a timed-out
+    // run can never overlap the next one (which would race on the git repo).
+    let settled = false;
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (killTimer) clearTimeout(killTimer);
       rl.close();
-      resolve({ code });
-    });
+      action();
+    };
+
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      killTree("SIGTERM"); // graceful first
+      killTimer = setTimeout(() => killTree("SIGKILL"), opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS);
+      killTimer.unref?.();
+      // intentionally no settle here — wait for `close` below.
+    }, timeoutMs);
+    deadline.unref?.();
+
+    child.on("error", (e) => finish(() => reject(e)));
+    child.on("close", (code) =>
+      finish(() =>
+        timedOut
+          ? reject(new HarnessTimeoutError(`harness '${sub.cmd}' timed out after ${timeoutMs}ms`))
+          : resolve({ code })
+      )
+    );
   });
 }
+
+// ponytail: SIGKILL on the process group is assumed to reap the child (close fires).
+// A truly unkillable child (D-state / uninterruptible kernel I/O) would leave the
+// promise pending — accepted: holding the slot beats overlapping a live git mutation.
+// skipped: cross-platform group kill (Windows uses taskkill /T), add if ever non-Linux.
