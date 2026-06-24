@@ -25,7 +25,7 @@ vi.mock("@/lib/contract/events", () => ({
   },
 }));
 
-import { createStore } from "./store";
+import { createStore, MAX_PENDING } from "./store";
 import { createRafFlusher } from "./raf-flush";
 
 // A fake, controlled rAF clock: callbacks queue and only run when we tick().
@@ -150,6 +150,25 @@ describe("createStore — flush/notify mechanics", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("safety valve: buffering MAX_PENDING events without a flush bounds memory but does NOT notify; the next flush notifies once", () => {
+    const store = createStore(initialRunState);
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    // No rAF loop running — simulate a stalled flush while SSE keeps delivering.
+    for (let i = 0; i < MAX_PENDING; i++) store.apply(ev(`st-${i}`));
+
+    // apply() must never notify, even when the valve coalesces.
+    expect(listener).toHaveBeenCalledTimes(0);
+    // All events were folded (memory bounded), not dropped.
+    expect(reducerCalls).toBe(MAX_PENDING);
+    expect(store.getSnapshot().task.brief).toBe(String(MAX_PENDING));
+
+    // The coalesced state is acknowledged by the next flush with exactly one notify.
+    store.flush();
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("unsubscribe stops further notifications", () => {

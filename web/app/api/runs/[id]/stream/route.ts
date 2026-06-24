@@ -1,11 +1,10 @@
 // web/app/api/runs/[id]/stream/route.ts
 // GET /api/runs/[id]/stream — SSE endpoint
-// Emits: hello snapshot first, then the dry-run events in order.
-// Each event is persisted by the daemon generator.
+// Emits: hello snapshot first, then the dry-run events in order, then a terminal
+// STREAM_END frame. Raw events are streamed; the client store reduces them.
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import { reducer } from "@/lib/contract/events";
 import type { SSEEvent } from "@/lib/contract/events";
 import { dryRun } from "@/lib/contract/fixture";
 import { getSnapshot } from "@/lib/store/persist";
@@ -16,7 +15,7 @@ function sseChunk(event: SSEEvent): string {
 }
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse | Response> {
   const { id } = await params;
@@ -34,25 +33,39 @@ export async function GET(
       const enqueue = (chunk: string) =>
         controller.enqueue(encoder.encode(chunk));
 
-      try {
-        // 1. Emit hello with current snapshot (the only resync path).
-        const helloEvent: SSEEvent = { type: "hello", run: snapshot };
-        enqueue(sseChunk(helloEvent));
+      // Stop the replay if the client disconnects — otherwise the 50ms timer
+      // chain runs to completion against a dead connection.
+      let aborted = req.signal.aborted;
+      const onAbort = () => {
+        aborted = true;
+      };
+      req.signal.addEventListener("abort", onAbort);
 
-        // 2. Replay the dry-run events, reducing state as we go.
-        let state = snapshot;
+      try {
+        if (aborted) return;
+        // 1. Emit hello with current snapshot (the only resync path).
+        enqueue(sseChunk({ type: "hello", run: snapshot }));
+
+        // 2. Replay the dry-run events (raw; the client store reduces them).
         for (const event of dryRun) {
+          if (aborted) return;
           if (event.type === "hello") continue; // already sent the real snapshot above
-          state = reducer(state, event);
           enqueue(sseChunk(event));
           await new Promise<void>((res) => setTimeout(res, 50));
         }
-        // Terminal frame: the dry run is finite. Without this the client's
+
+        // 3. Terminal frame: the dry run is finite. Without this the client's
         // EventSource would treat the close as an error and reconnect, re-replaying
         // the whole fixture forever.
+        if (aborted) return;
         enqueue(`data: ${JSON.stringify({ type: STREAM_END })}\n\n`);
       } finally {
-        controller.close();
+        req.signal.removeEventListener("abort", onAbort);
+        try {
+          controller.close();
+        } catch {
+          // already closed (e.g. client disconnected) — nothing to do.
+        }
       }
     },
   });

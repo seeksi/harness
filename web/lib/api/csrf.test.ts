@@ -43,4 +43,34 @@ describe("csrfOk", () => {
     });
     expect(csrfOk(req)).toBe(false);
   });
+
+  it("fails when origin scheme mismatches the served scheme (http origin, http host but https origin claimed)", () => {
+    // Request is served over http (see makeReq URL); an https origin must not pass.
+    const req = makeReq({
+      "x-umbrella-request": "1",
+      origin: "https://localhost:3000",
+      host: "localhost:3000",
+    });
+    expect(csrfOk(req)).toBe(false);
+  });
+
+  it("fails when Sec-Fetch-Site is cross-site", () => {
+    const req = makeReq({
+      "x-umbrella-request": "1",
+      origin: "http://localhost:3000",
+      host: "localhost:3000",
+      "sec-fetch-site": "cross-site",
+    });
+    expect(csrfOk(req)).toBe(false);
+  });
+
+  it("passes with Sec-Fetch-Site same-origin", () => {
+    const req = makeReq({
+      "x-umbrella-request": "1",
+      origin: "http://localhost:3000",
+      host: "localhost:3000",
+      "sec-fetch-site": "same-origin",
+    });
+    expect(csrfOk(req)).toBe(true);
+  });
 });
