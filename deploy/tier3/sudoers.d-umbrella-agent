@@ -20,6 +20,11 @@
 # agent. secure_path is restricted to trusted system dirs for the agent command context.
 Defaults!UMBRELLA_AGENT_EXEC env_reset
 Defaults!UMBRELLA_AGENT_EXEC secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Command-scoped env_keep (NOT a broad SETENV) so the sandbox's optional resourceLimits
+# survive env_reset and reach the wrapper. Bounded, validated NUMERIC values ONLY
+# (lib/sandbox validateLimits enforces ^\d+[KMGT]?$ / ^\d+% / positive-int-with-cap) —
+# never secrets. ponytail: the wrapper (provisioner chunk) reads these + clamps-to-default.
+Defaults!UMBRELLA_AGENT_EXEC env_keep += "SANDBOX_MEM_MAX SANDBOX_TASKS_MAX SANDBOX_CPU_QUOTA SANDBOX_CPU_SECONDS"
 
 # The single allowed command alias — exact absolute path, no wildcards.
 Cmnd_Alias UMBRELLA_AGENT_EXEC = /opt/umbrella/deploy/agent-exec-wrapper.sh

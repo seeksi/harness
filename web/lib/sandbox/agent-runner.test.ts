@@ -1,4 +1,4 @@
-// web/lib/daemon/agent-bridge.test.ts
+// web/lib/sandbox/agent-runner.test.ts
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
@@ -6,19 +6,22 @@ import type { ChildProcess } from "child_process";
 import path from "path";
 import {
   buildAgentArgs,
+  buildInvocation,
   spawnAgent,
+  runAgentInSandbox,
   containedWorktree,
   relocateTrace,
   parseAgentUsage,
+  validateLimits,
   DEFAULT_TOOLS,
   AgentExecError,
   type AgentSpec,
-} from "./agent-bridge";
-import { HarnessTimeoutError } from "./errors";
-import { mintLane, mintSession, _resetRegistry } from "./registry";
+} from "./agent-runner";
+import { HarnessTimeoutError } from "@/lib/daemon/errors";
+import { mintLane, mintSession, _resetRegistry } from "@/lib/daemon/registry";
 import { resetDb, getAuditLog } from "@/lib/store/persist";
 
-// Worktrees allow-dir, derived the same way agent-bridge does (cwd unchanged in tests).
+// Worktrees allow-dir, derived the same way the sandbox does (cwd unchanged in tests).
 const WT_BASE = path.resolve(process.cwd(), "..", `${path.basename(process.cwd())}.worktrees`);
 const wt = (slug: string) => path.join(WT_BASE, slug);
 
@@ -103,7 +106,7 @@ describe("buildInvocation — privilege drop (AGENT_USER)", () => {
 
   it("runs claude directly as the daemon user when AGENT_USER is unset (default)", async () => {
     vi.resetModules();
-    const mod = await import("./agent-bridge");
+    const mod = await import("./agent-runner");
     const inv = mod.buildInvocation("/abs/claude", ["-p", "x"]);
     expect(inv.cmd).toBe("/abs/claude");
     expect(inv.argv).toEqual(["-p", "x"]);
@@ -115,7 +118,7 @@ describe("buildInvocation — privilege drop (AGENT_USER)", () => {
     vi.stubEnv("AGENT_SUDO_PATH", "/usr/bin/sudo");
     vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
     vi.resetModules();
-    const mod = await import("./agent-bridge");
+    const mod = await import("./agent-runner");
     const inv = mod.buildInvocation("/abs/claude", ["-p", "x", "--model", "sonnet"]);
     expect(inv.cmd).toBe("/usr/bin/sudo");
     // argv0 after `--` is the claude binary itself → sudoers can scope to exactly it.
@@ -128,7 +131,7 @@ describe("buildInvocation — privilege drop (AGENT_USER)", () => {
   it("rejects a non-username AGENT_USER (argv-injection guard)", async () => {
     vi.stubEnv("AGENT_USER", "agent; rm -rf /");
     vi.resetModules();
-    const mod = await import("./agent-bridge");
+    const mod = await import("./agent-runner");
     expect(() => mod.buildInvocation("/abs/claude", ["-p", "x"])).toThrow(mod.AgentExecError);
   });
 
@@ -137,9 +140,87 @@ describe("buildInvocation — privilege drop (AGENT_USER)", () => {
     for (const [user, cli] of [["root", "/abs/claude"], [me, "/abs/claude"], ["agent", "claude"]] as const) {
       vi.stubEnv("AGENT_USER", user);
       vi.resetModules();
-      const mod = await import("./agent-bridge");
+      const mod = await import("./agent-runner");
       expect(() => mod.buildInvocation(cli, ["-p", "x"]), `${user} ${cli}`).toThrow(mod.AgentExecError);
     }
+  });
+});
+
+describe("buildInvocation — resourceLimits plumbing (SANDBOX_* env)", () => {
+  afterEach(() => vi.resetModules());
+
+  it("emits only the set SANDBOX_* vars in direct mode and leaves argv unchanged", () => {
+    const inv = buildInvocation("/abs/claude", ["-p", "x"], { memoryMax: "2G", tasksMax: 64, cpuQuota: "200%", cpuSeconds: 600 });
+    expect(inv.argv).toEqual(["-p", "x"]); // resource limits never touch the claude argv
+    expect(inv.spawnEnv.SANDBOX_MEM_MAX).toBe("2G");
+    expect(inv.spawnEnv.SANDBOX_TASKS_MAX).toBe("64");
+    expect(inv.spawnEnv.SANDBOX_CPU_QUOTA).toBe("200%");
+    expect(inv.spawnEnv.SANDBOX_CPU_SECONDS).toBe("600");
+  });
+
+  it("forwards SANDBOX_* through sudo via --preserve-env in drop mode", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x"], { memoryMax: "2G" });
+    expect(inv.argv).toEqual(["-n", "-H", "--preserve-env=SANDBOX_MEM_MAX", "-u", "agent", "--", "/abs/claude", "-p", "x"]);
+    expect(inv.spawnEnv.SANDBOX_MEM_MAX).toBe("2G");
+  });
+
+  it("does not alter argv or env when no resourceLimits are passed (no behavior change)", () => {
+    const inv = buildInvocation("/abs/claude", ["-p", "x"]);
+    expect(inv.argv).toEqual(["-p", "x"]);
+    expect(inv.spawnEnv).not.toHaveProperty("SANDBOX_MEM_MAX");
+  });
+
+  it("forwards a FULL valid limit set (all four SANDBOX_* keys) via --preserve-env in drop mode", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x"], {
+      memoryMax: "2G", tasksMax: 64, cpuQuota: "200%", cpuSeconds: 600,
+    });
+    expect(inv.argv).toEqual([
+      "-n", "-H", "--preserve-env=SANDBOX_MEM_MAX,SANDBOX_TASKS_MAX,SANDBOX_CPU_QUOTA,SANDBOX_CPU_SECONDS",
+      "-u", "agent", "--", "/abs/claude", "-p", "x",
+    ]);
+    expect(inv.spawnEnv).toMatchObject({
+      SANDBOX_MEM_MAX: "2G", SANDBOX_TASKS_MAX: "64", SANDBOX_CPU_QUOTA: "200%", SANDBOX_CPU_SECONDS: "600",
+    });
+  });
+});
+
+describe("validateLimits — fail-closed against injection / out-of-bounds", () => {
+  it("accepts a valid, canonicalized set", () => {
+    expect(validateLimits({ memoryMax: "1500M", tasksMax: 64, cpuQuota: "200%", cpuSeconds: 600, wallMs: 60000 })).toEqual({
+      memoryMax: "1500M", tasksMax: 64, cpuQuota: "200%", cpuSeconds: 600, wallMs: 60000,
+    });
+    expect(validateLimits({ memoryMax: "50%" })).toEqual({ memoryMax: "50%" }); // percentage form
+  });
+
+  it("REJECTS a shell-injection attempt in memoryMax/cpuQuota (never passed onward)", () => {
+    for (const bad of ["1500M; rm -rf /", "$(reboot)", "`id`", "2G && curl evil", "1500 M", "2GB", ""]) {
+      expect(() => validateLimits({ memoryMax: bad }), bad).toThrow(AgentExecError);
+    }
+    for (const bad of ["200%; rm -rf /", "200", "$(x)%", "-50%"]) {
+      expect(() => validateLimits({ cpuQuota: bad }), bad).toThrow(AgentExecError);
+    }
+  });
+
+  it("REJECTS out-of-bounds / non-integer numeric limits (fail closed)", () => {
+    expect(() => validateLimits({ tasksMax: 99999 })).toThrow(AgentExecError); // > MAX_TASKS
+    expect(() => validateLimits({ cpuSeconds: 99999 })).toThrow(AgentExecError); // > 1h
+    expect(() => validateLimits({ wallMs: 999_999_999 })).toThrow(AgentExecError); // > 1h
+    expect(() => validateLimits({ tasksMax: 0 })).toThrow(AgentExecError);
+    expect(() => validateLimits({ tasksMax: -5 })).toThrow(AgentExecError);
+    expect(() => validateLimits({ cpuSeconds: 1.5 as number })).toThrow(AgentExecError);
+    expect(() => validateLimits({ tasksMax: "64" as never })).toThrow(AgentExecError); // string, not int
+  });
+
+  it("an injected memoryMax never reaches the spawn env (buildInvocation throws before env is built)", () => {
+    expect(() => buildInvocation("/abs/claude", ["-p", "x"], { memoryMax: "2G; rm -rf /" })).toThrow(AgentExecError);
   });
 });
 
@@ -248,6 +329,88 @@ describe("spawnAgent", () => {
     expect(kill).toHaveBeenCalledWith("SIGTERM");
     expect(kill).toHaveBeenCalledWith("SIGKILL");
     expect(getAuditLog().map((r) => r.outcome)).toEqual(["timeout"]);
+  });
+});
+
+describe("runAgentInSandbox — public entrypoint", () => {
+  it("REFUSES (gate) and never spawns when ENABLE_AGENT_EXEC is unset", async () => {
+    mintLane("lane-x");
+    const spawnFn = vi.fn();
+    await expect(
+      runAgentInSandbox({ prompt: "x", cwd: wt("lane-x"), sessionId: "lane-x", spawnFn: spawnFn as never })
+    ).rejects.toBeInstanceOf(AgentExecError);
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(getAuditLog().map((r) => r.outcome)).toEqual(["refused"]);
+  });
+
+  it("runs, returns {exitCode, sessionId, usage, audit}, and the audit carries no prompt", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    mintLane("lane-x");
+    const spawnFn = fakeSpawn(['{"type":"result","subtype":"success","session_id":"sess-pub123","result":"ok"}']);
+    const res = await runAgentInSandbox({
+      prompt: "do TOPSECRET work",
+      cwd: wt("lane-x"),
+      sessionId: "lane-x",
+      model: "opus",
+      spawnFn: spawnFn as never,
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.sessionId).toBe("sess-pub123");
+    expect(res.usage).toBeNull();
+    expect(res.audit.argv).toEqual(["lane:lane-x", "model:opus", "session:sess-pub123"]);
+    expect(JSON.stringify(res.audit)).not.toContain("TOPSECRET");
+  });
+
+  it("defaults allowedTools to DEFAULT_TOOLS and keeps Bash unreachable", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    mintLane("lane-x");
+    let capturedArgs: string[] | undefined;
+    const spawnFn = vi.fn((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"session_id":"sess-tools01"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    await runAgentInSandbox({ prompt: "x", cwd: wt("lane-x"), sessionId: "lane-x", spawnFn: spawnFn as never });
+    const i = capturedArgs!.indexOf("--allowedTools");
+    expect(capturedArgs![i + 1]).toBe("Read,Edit,Write,Grep,Glob");
+    expect(capturedArgs![i + 1]).not.toContain("Bash");
+    // A Bash tool request is rejected before any spawn.
+    await expect(
+      runAgentInSandbox({ prompt: "x", cwd: wt("lane-x"), sessionId: "lane-x", allowedTools: ["Bash"], spawnFn: spawnFn as never })
+    ).rejects.toBeInstanceOf(AgentExecError);
+  });
+
+  it("threads resourceLimits all the way to the spawned child env (SANDBOX_* set)", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    mintLane("lane-x");
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawnFn = vi.fn((_cmd: string, _args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+      capturedEnv = options.env;
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"session_id":"sess-lim001"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    await runAgentInSandbox({
+      prompt: "x", cwd: wt("lane-x"), sessionId: "lane-x",
+      resourceLimits: { memoryMax: "2G", tasksMax: 64, cpuQuota: "200%", cpuSeconds: 600 },
+      spawnFn: spawnFn as never,
+    });
+    expect(capturedEnv).toMatchObject({
+      SANDBOX_MEM_MAX: "2G", SANDBOX_TASKS_MAX: "64", SANDBOX_CPU_QUOTA: "200%", SANDBOX_CPU_SECONDS: "600",
+    });
+  });
+
+  it("rejects an injected resourceLimit (fail closed) before spawning", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    mintLane("lane-x");
+    const spawnFn = vi.fn();
+    await expect(
+      runAgentInSandbox({ prompt: "x", cwd: wt("lane-x"), sessionId: "lane-x", resourceLimits: { memoryMax: "2G; rm -rf /" }, spawnFn: spawnFn as never })
+    ).rejects.toBeInstanceOf(AgentExecError);
+    expect(spawnFn).not.toHaveBeenCalled();
   });
 });
 

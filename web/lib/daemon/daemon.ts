@@ -29,7 +29,7 @@ import {
 } from "@/lib/store/persist";
 import { publish, complete } from "./broker";
 import { spawnHarness, containedPlanFile, type HarnessSubcommand, type SpawnHarnessOptions } from "./harness-bridge";
-import { spawnAgent, worktreePathFor, relocateTrace, type AgentSpec, type AgentUsage } from "./agent-bridge";
+import { runAgentInSandbox, worktreePathFor, relocateTrace, type AgentSpec, type AgentUsage } from "@/lib/sandbox";
 import { mintLane, mintSession, mintPlanFile } from "./registry";
 
 /** One lane to build: a worktree + the agent task that fills it. */
@@ -75,6 +75,24 @@ type RunAgentFn = (
   spec: AgentSpec,
   opts?: { spawnFn?: SpawnHarnessOptions["spawnFn"] }
 ) => Promise<{ code: number | null; sessionId: string | null; usage?: AgentUsage | null }>;
+
+/**
+ * Default agent runner: the safe sandbox entrypoint, adapted to the daemon's lane spec.
+ * Maps lane slug → sessionId, the lane worktree → cwd, the routed model, and the agent's
+ * tool allowlist, and folds the sandbox result back into the daemon's {code, sessionId,
+ * usage} shape. Same gate, same audit, same flow as the previous direct spawnAgent call.
+ */
+const defaultRunAgent: RunAgentFn = async (spec, runOpts) => {
+  const { exitCode, sessionId, usage } = await runAgentInSandbox({
+    prompt: spec.taskPrompt,
+    allowedTools: spec.allowedTools,
+    model: spec.model,
+    cwd: spec.worktreePath,
+    sessionId: spec.slug,
+    spawnFn: runOpts?.spawnFn as never,
+  });
+  return { code: exitCode, sessionId, usage };
+};
 
 /** Milliseconds between dry-run event yields (simulates a live stream). */
 const DRY_RUN_DELAY_MS = 50;
@@ -186,7 +204,7 @@ async function runLive(
     relocate?: (slug: string, session: string) => boolean;
   }
 ): Promise<void> {
-  const runAgent = opts.runAgent ?? spawnAgent;
+  const runAgent = opts.runAgent ?? defaultRunAgent;
   const writePlan = opts.writePlan ?? writePlanFile;
   const relocate = opts.relocate ?? relocateTrace;
 
