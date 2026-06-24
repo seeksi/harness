@@ -1,6 +1,6 @@
-// web/app/layout.tsx — (C) placeholder shell. Lane C owns this: RSC root, fonts
-// (Geist Sans/Mono, Space Grotesk), theme, mounts the scene + HUD shells. Lane 0
-// ships a minimal render only — zero behavior.
+// web/app/layout.tsx — Lane C sole writer.
+// RSC root shell. Fonts + theme mount here (Space Grotesk + Geist when fonts increment lands).
+// ponytail: font loading (next/font/google) — add when token/design-polish increment lands.
 import type { Metadata } from "next";
 import "./globals.css";
 
