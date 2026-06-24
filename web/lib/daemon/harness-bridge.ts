@@ -27,7 +27,8 @@ export type HarnessSubcommand =
   | { cmd: "integ-start" }
   | { cmd: "integ-merge"; slug: string }
   | { cmd: "trace"; session: string }
-  | { cmd: "promote" };
+  | { cmd: "promote" }
+  | { cmd: "reset-base" };
 
 // Re-exported for callers/tests that import them from the bridge; defined in
 // errors.ts to keep registry.ts ↔ harness-bridge.ts free of a circular dependency.
@@ -105,6 +106,8 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
       return ["trace", requireSession(sub.session)];
     case "promote":
       return ["promote"];
+    case "reset-base":
+      return ["reset-base"];
     default: {
       // exhaustiveness guard
       const _never: never = sub;

@@ -296,6 +296,28 @@ describe("harness.sh → parseHarnessLine contract", () => {
     expect(committedIgnore).toBe(".claude/traces/\n");
   });
 
+  it("reset-base: returns a repo stranded on integration back to the base branch", () => {
+    const repo = newRepo();
+    harness(repo, ["integ-start"]); // moves HEAD to integration (off main)
+    expect(
+      execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim()
+    ).toBe("integration");
+
+    harness(repo, ["reset-base"]); // human/git output → stderr; stdout may be empty (no events)
+    expect(
+      execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim()
+    ).toBe("main");
+  });
+
+  it("reset-base: a no-op on an already-base repo exits 0 cleanly", () => {
+    const repo = newRepo(); // fresh repo is already on main
+    // Must not throw (exit 0) and must leave HEAD on main.
+    expect(() => harness(repo, ["reset-base"])).not.toThrow();
+    expect(
+      execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim()
+    ).toBe("main");
+  });
+
   it("wt-verify: UNTRACKED (uncommitted) files raise Gate B even with prior commits", () => {
     const repo = newRepo();
     harness(repo, ["wt-new", "dirty"]);

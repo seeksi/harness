@@ -24,6 +24,7 @@
 #   harness.sh integ-merge <slug>    merge feat/<slug> into integration (--no-ff)
 #   harness.sh trace <session>       Gate D L2: check .claude/traces/<session>.jsonl
 #   harness.sh promote               guarded fast-forward of base to integration (run only after the human go)
+#   harness.sh reset-base            best-effort: return the main repo checkout to the base branch (idempotent; never fails the caller)
 #   harness.sh clean                 remove merged worktrees + delete integration
 set -eu
 
@@ -294,12 +295,35 @@ case "$cmd" in
       exit "$rc"
     fi
     ;;
+  reset-base)
+    # Best-effort cleanup so the deployed main repo never stays stranded on the
+    # integration branch after a run that finalized without promote (or any failure).
+    # A stranded HEAD breaks the next `git pull origin main` (can't fast-forward main
+    # while it isn't checked out). MUST NEVER fail the caller: slot release / run
+    # completion depend on this returning 0 even on a dirty tree. set -eu is in effect,
+    # so the checkout is guarded so a failure can't trip the errexit.
+    if on_branch "$BASE"; then
+      echo "harness: already on $BASE — nothing to reset" >&2
+    elif ! tree_clean; then
+      # A dirty integration tree would carry non-conflicting changes ONTO $BASE on
+      # checkout, dirtying the deployed main. Best-effort = never migrate junk to base:
+      # leave HEAD as-is and warn (a stranded HEAD is recoverable; a dirty main is worse).
+      echo "harness: warning: tree dirty — leaving HEAD as-is ($BASE not reset; best-effort)" >&2
+    elif git switch --no-guess "$BASE" >&2; then
+      # --no-guess: only switch to an existing LOCAL branch; never DWIM-create from a
+      # remote-tracking ref (a bad/missing BASE must fail to the warning, not guess).
+      echo "harness: reset checkout to $BASE" >&2
+    else
+      echo "harness: warning: could not reset to $BASE (left as-is; best-effort)" >&2
+    fi
+    exit 0
+    ;;
   clean)
     sh "$WT" clean "$BASE" >&2
     git branch -d integration 2>/dev/null && echo "deleted integration" >&2 || true
     ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | clean}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | reset-base | clean}" >&2
     exit 2
     ;;
 esac

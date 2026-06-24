@@ -71,6 +71,7 @@ describe("startRun — live per-lane interleave", () => {
       "wt-verify",
       "trace",
       "integ-merge",
+      "reset-base", // finalize cleanup: return the main repo checkout to base
     ]);
     expect(runAgent).toHaveBeenCalledTimes(1);
     expect(agentCalls[0]).toMatchObject({
@@ -97,8 +98,9 @@ describe("startRun — live per-lane interleave", () => {
     await runToCompletion("run-2", "x", { live: true, plan: onePlan, spawnFn, runAgent });
 
     expect(getSnapshot("run-2")?.task.state).toBe("failed");
-    // Got as far as wt-new; the agent failure stopped before integ-merge/trace.
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new"]);
+    // Got as far as wt-new; the agent failure stopped before integ-merge/trace, but the
+    // finalize cleanup still resets the checkout back to base on the failure path.
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "reset-base"]);
   });
 
   it("the agent step is gated: real spawnAgent refuses unless ENABLE_AGENT_EXEC=1", async () => {
@@ -110,7 +112,7 @@ describe("startRun — live per-lane interleave", () => {
     await runToCompletion("run-3", "x", { live: true, plan: onePlan, spawnFn });
 
     expect(getSnapshot("run-3")?.task.state).toBe("failed");
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new"]); // stopped at the agent
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "reset-base"]); // stopped at the agent; reset on finalize
     expect(getAuditLog().some((r) => r.cmd === "agent" && r.outcome === "refused")).toBe(true);
   });
 
@@ -120,7 +122,7 @@ describe("startRun — live per-lane interleave", () => {
 
     await runToCompletion("run-ns", "x", { live: true, plan: onePlan, spawnFn, runAgent });
 
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify", "integ-merge"]); // no trace
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify", "integ-merge", "reset-base"]); // no trace; reset on finalize
     expect(getSnapshot("run-ns")?.task.state).toBe("done");
   });
 
@@ -141,7 +143,8 @@ describe("startRun — live per-lane interleave", () => {
 
     expect(getSnapshot("run-noop")?.task.state).toBe("failed");
     // Stopped at wt-verify: integ-merge / trace never ran (wt-commit ran first, no-op).
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify"]);
+    // The finalize cleanup still resets the checkout back to base on this failure path.
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify", "reset-base"]);
   });
 
   it("rejects a second concurrent run (single slot)", async () => {
@@ -152,6 +155,41 @@ describe("startRun — live per-lane interleave", () => {
       startRun("run-b", "b", { live: true, plan: { planFile: "p.jsonl", lanes: [] }, spawnFn, runAgent })
     ).toThrow(SlotTakenError);
     await first;
+  });
+});
+
+describe("startRun — finalize reset-base cleanup", () => {
+  it("issues reset-base on the LIVE success path (return main repo to base)", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 0, sessionId: "s-ok" }));
+
+    await runToCompletion("run-rb-ok", "x", { live: true, plan: onePlan, spawnFn, runAgent });
+
+    expect(getSnapshot("run-rb-ok")?.task.state).toBe("done");
+    expect(calls.map((c) => c[0])).toContain("reset-base");
+    expect(calls[calls.length - 1][0]).toBe("reset-base"); // runs LAST, on finalize
+  });
+
+  it("issues reset-base on the LIVE failure path too", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 1, sessionId: null })); // agent fails
+
+    await runToCompletion("run-rb-fail", "x", { live: true, plan: onePlan, spawnFn, runAgent });
+
+    expect(getSnapshot("run-rb-fail")?.task.state).toBe("failed");
+    expect(calls.map((c) => c[0])).toContain("reset-base");
+    expect(calls[calls.length - 1][0]).toBe("reset-base");
+  });
+
+  it("does NOT issue reset-base on a dry-run (never touches git)", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0);
+
+    // No `live` → dry-run fixture path. spawnFn is provided but the dry-run never spawns.
+    await runToCompletion("run-rb-dry", "x", { live: false, spawnFn });
+
+    expect(isRunFinalized("run-rb-dry")).toBe(true);
+    expect(calls.map((c) => c[0])).not.toContain("reset-base");
+    expect(spawnFn).not.toHaveBeenCalled();
   });
 });
 

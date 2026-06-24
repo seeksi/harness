@@ -322,6 +322,19 @@ export function startRun(runId: string, brief: string, opts: StartRunOptions = {
       pipe.markFailed();
       finalizeRun(runId, "failed");
     } finally {
+      // Return the main repo checkout to BASE on EVERY live finalize (success-without-
+      // promote OR failure) so it's never left stranded on `integration` — that breaks
+      // the next `git pull origin main`. Best-effort: reset-base exits 0 even on a dirty
+      // tree, and we swallow anything else here so a reset failure can NEVER skip the
+      // slot release / completion below. Skip on dry-run (it never touches git). Runs via
+      // the same spawn seam so tests can record/inject it.
+      if (live) {
+        try {
+          await runSub({ cmd: "reset-base" }, pipe.ingest, testSeam ? opts.spawnFn : undefined);
+        } catch (e) {
+          console.error(`[daemon] run ${runId} reset-base failed:`, e instanceof Error ? e.message : String(e));
+        }
+      }
       // Release and completion are independent — a release error must not skip
       // notifying waiting SSE clients (or vice versa).
       try {
