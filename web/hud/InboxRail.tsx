@@ -38,6 +38,7 @@ export function InboxRail({
       <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
         {items.map((item, i) => {
           const active = i === 0;
+          const hue = statusColorForSeverity(item.severity);
           return (
             <li key={item.id} data-testid={`inbox-${item.id}`} style={{ marginBottom: 8 }}>
               <button
@@ -49,12 +50,16 @@ export function InboxRail({
                   textAlign: "left",
                   cursor: "pointer",
                   borderRadius: 6,
-                  border: `1px solid ${statusColorForSeverity(item.severity)}`,
-                  background: "transparent",
-                  color: "inherit",
+                  // left accent bar = the severity hue; full ring when active.
+                  border: `1px solid ${active ? hue : "var(--border)"}`,
+                  borderLeft: `3px solid ${hue}`,
+                  background: active ? "var(--surface-2)" : "var(--surface-1)",
+                  color: "var(--text)",
                   // 28px idle floor → ~36px active alert (extra breathing room).
                   padding: active ? "10px 12px" : "6px 12px",
+                  minHeight: active ? 36 : 28,
                   fontWeight: active ? 700 : 500,
+                  fontSize: 13,
                 }}
               >
                 {/* the single authoritative action line — exactly the four facts;

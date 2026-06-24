@@ -64,7 +64,13 @@ export function CommandPalette({ commands }: { commands: Command[] }) {
       onClick={close}
     >
       <div
-        style={{ ...glassSurface(), width: 520, borderRadius: 10, padding: 8 }}
+        style={{
+          ...glassSurface(),
+          width: 520,
+          borderRadius: 10,
+          padding: 8,
+          fontFamily: "var(--font-sans)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         <input
@@ -81,10 +87,12 @@ export function CommandPalette({ commands }: { commands: Command[] }) {
             width: "100%",
             boxSizing: "border-box",
             padding: "10px 12px",
-            background: "transparent",
-            border: "none",
+            borderRadius: 8,
+            background: "var(--surface-1)",
+            border: "1px solid var(--border)",
             outline: "none",
-            color: "inherit",
+            color: "var(--text)",
+            fontFamily: "var(--font-sans)",
             fontSize: 14,
           }}
         />
@@ -95,24 +103,34 @@ export function CommandPalette({ commands }: { commands: Command[] }) {
                 type="button"
                 data-testid={`command-${c.id}`}
                 onClick={() => runCommand(c)}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--surface-2)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                }}
                 style={{
                   width: "100%",
                   textAlign: "left",
                   padding: "8px 12px",
                   background: "transparent",
                   border: "none",
-                  color: "inherit",
+                  color: "var(--text)",
                   cursor: "pointer",
                   borderRadius: 6,
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 13,
                 }}
               >
                 {c.label}
-                {c.hint && <span style={{ opacity: 0.6 }}> — {c.hint}</span>}
+                {c.hint && (
+                  <span style={{ color: "var(--text-faint)" }}> — {c.hint}</span>
+                )}
               </button>
             </li>
           ))}
           {results.length === 0 && (
-            <li style={{ opacity: 0.6, padding: "8px 12px" }}>No commands</li>
+            <li style={{ color: "var(--text-faint)", padding: "8px 12px" }}>No commands</li>
           )}
         </ul>
       </div>

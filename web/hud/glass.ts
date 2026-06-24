@@ -15,6 +15,8 @@ export function glassSurface(alpha: number = GLASS_OPACITY_FLOOR): CSSProperties
     backgroundColor: `hsla(222, 14%, 9%, ${Math.max(alpha, GLASS_OPACITY_FLOOR)})`,
     backdropFilter: "blur(10px)",
     WebkitBackdropFilter: "blur(10px)",
-    border: "1px solid hsla(258, 35%, 45%, 0.25)",
+    border: "1px solid hsla(258, 35%, 45%, 0.25)", // accent-mid edge
+    color: "var(--text)",
+    boxShadow: "0 16px 48px -20px hsla(264, 82%, 30%, 0.55)", // indigo→violet lift
   } as CSSProperties;
 }

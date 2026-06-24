@@ -28,6 +28,7 @@ import { TraceDrawer } from "./TraceDrawer";
 import { Toast } from "./Toast";
 import { ApprovalStep } from "./ApprovalStep";
 import { glassSurface } from "./glass";
+import { statusColorForSeverity } from "./severity";
 import type { Command } from "./commands";
 
 interface HudShellProps {
@@ -165,18 +166,40 @@ export function HudShell({ store }: HudShellProps) {
             top: 16,
             left: 16,
             width: 360,
-            padding: 14,
+            padding: 16,
             borderRadius: 8,
+            borderLeft: `3px solid ${statusColorForSeverity(openDetail.severity)}`,
+            fontFamily: "var(--font-sans)",
           }}
         >
-          <header style={{ fontWeight: 700 }} data-testid="detail-line">
+          <header
+            style={{ fontWeight: 700, fontSize: 13, color: "var(--text)" }}
+            data-testid="detail-line"
+          >
             {openDetail.line}
           </header>
-          <p style={{ opacity: 0.8, fontSize: 13 }}>{openDetail.summary}</p>
+          <p style={{ color: "var(--text-dim)", fontSize: 13, margin: "8px 0 12px" }}>
+            {openDetail.summary}
+          </p>
           {approvalKind === "promote-to-main" || approvalKind === "decompose-split" ? (
             <ApprovalStep runId={state.task.id} kind={approvalKind} onDone={() => undefined} />
           ) : null}
-          <button type="button" data-testid="detail-close" onClick={() => setOpenDetail(null)}>
+          <button
+            type="button"
+            data-testid="detail-close"
+            onClick={() => setOpenDetail(null)}
+            style={{
+              marginTop: 12,
+              cursor: "pointer",
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: "1px solid var(--border)",
+              background: "var(--surface-2)",
+              color: "var(--text)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 12,
+            }}
+          >
             Close
           </button>
         </section>

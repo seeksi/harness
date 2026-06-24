@@ -36,13 +36,45 @@ export function Toast({
         zIndex: 40,
       }}
     >
-      <span>{message}</span>
+      <span style={{ fontFamily: "var(--font-sans)", fontSize: 13, color: "var(--text)" }}>
+        {message}
+      </span>
       {onAction && (
-        <button type="button" data-testid="toast-action" onClick={onAction}>
+        <button
+          type="button"
+          data-testid="toast-action"
+          onClick={onAction}
+          style={{
+            cursor: "pointer",
+            padding: "4px 12px",
+            borderRadius: 6,
+            border: "1px solid var(--accent-mid)",
+            background: "var(--accent-dim-fill)",
+            color: "var(--accent-vivid)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
           {actionLabel}
         </button>
       )}
-      <button type="button" aria-label="Dismiss" data-testid="toast-dismiss" onClick={onDismiss}>
+      <button
+        type="button"
+        aria-label="Dismiss"
+        data-testid="toast-dismiss"
+        onClick={onDismiss}
+        style={{
+          cursor: "pointer",
+          width: 24,
+          height: 24,
+          borderRadius: 6,
+          border: "1px solid var(--border)",
+          background: "transparent",
+          color: "var(--text-dim)",
+          lineHeight: 1,
+        }}
+      >
         ×
       </button>
     </div>

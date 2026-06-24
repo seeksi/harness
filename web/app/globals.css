@@ -1,39 +1,122 @@
 @import "tailwindcss";
 
 /*
- * Lane 0 declares the LOCKED token CSS-var NAMES from ADR 0001 §web-design with
- * empty/placeholder values. Lane C is the single token source-of-truth
- * (styles/tokens.css) and fills the real values when it lands. Names are frozen
- * here so every lane references the same vars and merges cannot disagree on them.
+ * Lane C is the single token source-of-truth (ADR 0001 §web-design). The LOCKED
+ * var NAMES are frozen by every lane; this file now AUTHORS their concrete values
+ * per the locked ramps (design package §A) — WCAG-AA verified on the 6% base at
+ * 12px mono. Other lanes (severity.ts, scene/tokens.ts, glass.ts) encode the same
+ * locked HSLs independently across the import boundary; these are the HUD chrome
+ * source of truth.
+ *
+ * WCAG contrast on --bg (HSL 222 11% 6%, the 6% void), verified:
+ *   --status-ok-text   152 62% 62%  → 11.07:1
+ *   --status-info-text 208 92% 66%  →  8.06:1
+ *   --status-warn-text  47 96% 62%  → 13.26:1
+ *   --status-crit-text   3 92% 68%  →  6.63:1   (3° not 0° for legibility; still "scarce red")
+ *   --text              220 14% 90% → 15.14:1
+ *   --text-dim          220 10% 64% →  7.33:1
+ * Hue separations held: amber 47° vs red 0–3° (warm-orange band left empty);
+ * cyan 208° vs emerald 152°; base undertone 222° never reads as the 208° status.
  */
 :root {
-  /* base surface — HSL 222 11% 6% */
-  --bg: ;
+  /* base surface — HSL 222 11% 6% (cool near-black, blue-grey undertone) */
+  --bg: hsl(222, 11%, 6%);
 
-  /* five-stop indigo→violet accent ramp (~258°→~274°) */
-  --accent-dim-fill: ;
-  --accent-rest-glow: ;
-  --accent-mid: ;
-  --accent-vivid: ;
-  --accent-neon: ;
+  /* derived surface / elevation steps — stay clearly off the 208° status hue */
+  --surface-1: hsl(222, 12%, 8%);   /* panels / rows */
+  --surface-2: hsl(222, 13%, 10%);  /* raised chrome */
+  --surface-3: hsl(222, 14%, 13%);  /* hover / active row */
+  --border: hsl(222, 12%, 18%);     /* hairline dividers */
 
-  /* 4 status hues × 2 tokens (fill/glow), +6–8% text bump variants */
-  --status-ok-fill: ;     /* emerald/teal ~150° */
-  --status-ok-glow: ;
-  --status-ok-text: ;
-  --status-info-fill: ;   /* cyan ~208° */
-  --status-info-glow: ;
-  --status-info-text: ;
-  --status-warn-fill: ;   /* amber ~46–48° */
-  --status-warn-glow: ;
-  --status-warn-text: ;
-  --status-crit-fill: ;   /* scarce red */
-  --status-crit-glow: ;
-  --status-crit-text: ;
+  /* base text */
+  --text: hsl(220, 14%, 90%);       /* body / UI */
+  --text-dim: hsl(220, 10%, 64%);   /* secondary / labels */
+  --text-faint: hsl(220, 8%, 44%);  /* tertiary / disabled */
 
-  /* glass opacity-floor — back-solved from neon-burst worst-case luminance (risk 1) */
-  --glass-opacity-floor: ;
+  /* five-stop indigo→violet accent ramp (~258°→~274°), hue-shifted by energy */
+  --accent-dim-fill: hsl(258, 30%, 14%);  /* glass HUD tint */
+  --accent-rest-glow: hsl(258, 45%, 30%); /* low-energy idle pulse */
+  --accent-mid: hsl(260, 60%, 50%);       /* border / ring */
+  --accent-vivid: hsl(264, 82%, 70%);     /* active label / icon (5.84:1 on base) */
+  --accent-neon: hsl(274, 95%, 72%);      /* emissive burst */
 
-  /* 4px grid spacing unit */
-  --space-unit: ;
+  /* 4 status hues × 2 tokens (fill/glow on the 6% base), +6–8% text-bump variants */
+  --status-ok-fill: hsl(152, 58%, 46%);     /* emerald/teal ~152° */
+  --status-ok-glow: hsl(152, 70%, 50%);
+  --status-ok-text: hsl(152, 62%, 62%);
+  --status-info-fill: hsl(208, 88%, 58%);   /* cyan ~208° */
+  --status-info-glow: hsl(208, 95%, 62%);
+  --status-info-text: hsl(208, 92%, 66%);
+  --status-warn-fill: hsl(47, 90%, 55%);    /* true/golden amber ~47° */
+  --status-warn-glow: hsl(47, 96%, 58%);
+  --status-warn-text: hsl(47, 96%, 62%);
+  --status-crit-fill: hsl(0, 75%, 56%);     /* scarce red ~0° */
+  --status-crit-glow: hsl(0, 85%, 60%);
+  --status-crit-text: hsl(3, 92%, 68%);
+
+  /* glass opacity-floor — back-solved from neon-burst worst-case luminance (risk 1).
+     Mirrors GLASS_OPACITY_FLOOR in hud/glass.ts; never composite a glass panel below it. */
+  --glass-opacity-floor: 0.82;
+  --glass-tint: hsla(222, 14%, 9%, 0.82); /* the floor as a ready surface color */
+
+  /* 4px grid spacing unit (restricted scale 4/8/12/16/24/32 derives off this) */
+  --space-unit: 4px;
+
+  /* fonts wired in layout.tsx via next/font (vars set on <body>) */
+  --font-sans: var(--font-geist-sans, system-ui, sans-serif);
+  --font-mono: var(--font-geist-mono, ui-monospace, "SFMono-Regular", monospace);
+  --font-display: var(--font-space-grotesk, var(--font-sans)); /* 3D node labels ONLY */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;          /* Geist Sans 13px UI/body */
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Data columns: Geist Mono 12px with tabular/lining figures so cost/time/ID align. */
+.mono,
+code,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-vivid);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-rest-glow);
+  color: var(--text);
+}
+
+/* Reduced motion — keep topology, freeze continuous motion (HUD transitions). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

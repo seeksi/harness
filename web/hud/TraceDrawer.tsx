@@ -24,16 +24,25 @@ export function TraceDrawer({ state, open }: { state: RunState; open: boolean })
         borderRadius: 8,
         fontFamily: "var(--font-geist-mono, ui-monospace, monospace)",
         fontSize: 12,
+        // tabular/lining so ts/tool columns align
+        fontVariantNumeric: "tabular-nums lining-nums",
       }}
     >
       {state.trace.length === 0 ? (
-        <p style={{ opacity: 0.6, margin: 0 }}>No trace ticks yet.</p>
+        <p style={{ color: "var(--text-faint)", margin: 0 }}>No trace ticks yet.</p>
       ) : (
         <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
           {state.trace.map((t, i) => (
-            <li key={i} data-testid="trace-row">
-              <span style={{ opacity: 0.7 }}>{t.tool}</span> {t.sig}
-              {t.subtaskId ? <span style={{ opacity: 0.5 }}> · {t.subtaskId}</span> : null}
+            <li
+              key={i}
+              data-testid="trace-row"
+              style={{ display: "flex", gap: 8, padding: "1px 0", color: "var(--text)" }}
+            >
+              <span style={{ color: "var(--accent-vivid)", minWidth: 96 }}>{t.tool}</span>
+              <span style={{ color: "var(--text-dim)" }}>{t.sig}</span>
+              {t.subtaskId ? (
+                <span style={{ color: "var(--text-faint)" }}> · {t.subtaskId}</span>
+              ) : null}
             </li>
           ))}
         </ul>

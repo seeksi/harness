@@ -33,7 +33,23 @@ function projectDom(state: RunState): React.ReactElement {
   const gateCount = raisedGateCount(state);
 
   return (
-    <section aria-label="Pipeline state mirror">
+    <section
+      aria-label="Pipeline state mirror"
+      // Visually-hidden but present for assistive tech (the WebGL scene is opaque to
+      // AT). Not display:none / hidden — that would drop it from the a11y tree.
+      style={{
+        position: "absolute",
+        width: 1,
+        height: 1,
+        overflow: "hidden",
+        clip: "rect(0 0 0 0)",
+        clipPath: "inset(50%)",
+        whiteSpace: "nowrap",
+        border: 0,
+        padding: 0,
+        margin: -1,
+      }}
+    >
       {/* Task identity */}
       <dl>
         <div>
