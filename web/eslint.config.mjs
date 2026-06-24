@@ -27,6 +27,11 @@ const HARNESS_SPAWN = {
   message:
     "The harness spawn is allowlisted (T9): only lib/daemon/daemon.ts may import harness-bridge. Routes/UI never spawn directly.",
 };
+const AGENT_SPAWN = {
+  group: ["**/lib/daemon/agent-bridge"],
+  message:
+    "The agent spawn (headless Claude Code) is allowlisted: only lib/daemon/daemon.ts may import agent-bridge. Routes/UI never spawn agents directly.",
+};
 
 export default [
   { ignores: [".next/**", "node_modules/**", "next-env.d.ts", "eslint.config.mjs"] },
@@ -44,7 +49,7 @@ export default [
       // ALLOWLIST (threat model §7 / T9): default-deny BOTH sensitive sinks. Sanctioned
       // files re-enable only their assigned sink in the override blocks below — a NEW
       // module can't slip past an enumerated denylist because the default is deny.
-      "no-restricted-imports": ["error", { patterns: [STORE_IMPL, HARNESS_SPAWN] }],
+      "no-restricted-imports": ["error", { patterns: [STORE_IMPL, HARNESS_SPAWN, AGENT_SPAWN] }],
       "import/no-restricted-paths": [
         "error",
         {
@@ -92,11 +97,11 @@ export default [
   // still can't reach the other (per-sink, not a blanket rule-off):
   //   • runtime/useRunSession.ts — composition root: may import the store impl;
   //     the harness spawn stays banned.
-  //   • lib/daemon/daemon.ts — single producer: may import the spawn; the store
-  //     impl stays banned.
+  //   • lib/daemon/daemon.ts — single producer: may import the harness + agent
+  //     spawns; the store impl stays banned.
   {
     files: ["runtime/useRunSession.ts"],
-    rules: { "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN] }] },
+    rules: { "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN, AGENT_SPAWN] }] },
   },
   {
     files: ["lib/daemon/daemon.ts"],

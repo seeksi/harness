@@ -16,3 +16,11 @@ export class HarnessTimeoutError extends Error {
     this.name = "HarnessTimeoutError";
   }
 }
+
+/** Invalid agent spec, or agent execution refused/failed (agent-exec threat model). */
+export class AgentExecError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "AgentExecError";
+  }
+}
