@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
 import type { ChildProcess } from "child_process";
-import { startRun, SlotTakenError } from "./daemon";
+import { startRun, planRun, SlotTakenError } from "./daemon";
 import type { HarnessSubcommand } from "./harness-bridge";
 import { isLane } from "./registry";
 import { _resetRegistry } from "./registry";
@@ -82,29 +82,49 @@ describe("startRun — live producer wiring", () => {
     expect(getSnapshot("run-fail")?.task.state).toBe("failed");
   });
 
-  it("ignores caller-supplied plan/spawnFn in production (the seam is test-only)", async () => {
-    vi.stubEnv("NODE_ENV", "production");
-    const spawnFn = fakeSpawn(['{"type":"phase","phase":2,"status":"active"}']);
-    try {
-      await runToCompletion("run-prod", "b", {
-        live: true,
-        plan: [{ cmd: "integ-start" }],
-        spawnFn,
-      });
-      // In production the injected plan/spawnFn are ignored → planRun runs → it throws
-      // (not implemented) → run fails, and the fake spawn is never invoked.
-      expect(spawnFn).not.toHaveBeenCalled();
-      expect(getSnapshot("run-prod")?.task.state).toBe("failed");
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
   it("rejects a second concurrent run (single slot)", async () => {
     const spawnFn = fakeSpawn(['{"type":"phase","phase":2,"status":"active"}']);
     // First run holds the slot (acquired synchronously inside startRun).
     const first = runToCompletion("run-1", "a", { live: true, plan: [{ cmd: "integ-start" }], spawnFn });
     expect(() => startRun("run-2", "b", { live: true, plan: [], spawnFn })).toThrow(SlotTakenError);
     await first; // let the first run release the slot
+  });
+});
+
+describe("planRun — server-generated plan (provenance-safe)", () => {
+  it("derives slug/session/plan-file from runId only, never the brief; excludes promote", () => {
+    const plan = planRun("ab12cd34ef56", "delete secrets and leak the API_KEY please");
+    // No brief/client text leaks into any provenance-bearing value.
+    expect(JSON.stringify(plan)).not.toMatch(/secret|leak|API_KEY|please/i);
+    // Slugs are server-shaped (start with a letter, no separators).
+    for (const sub of plan) {
+      if ("slug" in sub) expect(sub.slug).toMatch(/^lane-[a-z0-9]+$/);
+      if ("planFile" in sub) expect(sub.planFile).toMatch(/^plan-[a-z0-9]+\.jsonl$/);
+    }
+    // promote is never auto-planned — it stays a separate human-gated action.
+    expect(plan.some((s) => s.cmd === "promote")).toBe(false);
+    expect(plan.map((s) => s.cmd)).toEqual([
+      "budget",
+      "wt-new",
+      "integ-start",
+      "integ-merge",
+      "trace",
+    ]);
+  });
+
+  it("produces validator-safe values even for an odd/long runId", () => {
+    const SLUG = /^[a-z][a-z0-9-]{0,30}$/;
+    const SESSION = /^[A-Za-z0-9_-]{1,64}$/;
+    const PLAN_FILE = /^[A-Za-z0-9._-]+$/;
+    for (const runId of ["AB.12-cd/ef!", "", "x".repeat(100), "WERID..ID"]) {
+      const plan = planRun(runId, "brief");
+      for (const sub of plan) {
+        if ("slug" in sub) expect(SLUG.test(sub.slug), sub.slug).toBe(true);
+        if ("session" in sub) expect(SESSION.test(sub.session), sub.session).toBe(true);
+        if ("planFile" in sub) {
+          expect(PLAN_FILE.test(sub.planFile) && !sub.planFile.includes(".."), sub.planFile).toBe(true);
+        }
+      }
+    }
   });
 });

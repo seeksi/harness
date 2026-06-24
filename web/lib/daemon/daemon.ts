@@ -128,14 +128,32 @@ async function runLive(
 }
 
 /**
- * Decompose a brief into the harness subcommand sequence for a live run.
- * ponytail: not implemented — the brief→lanes→plan decomposition (and the plan
- * file the budget step prices) is the next increment. Until then, a live run with
- * no explicit opts.plan fails loudly rather than silently doing nothing. Slugs/
- * sessions it eventually produces MUST be server-generated, never echoed client text.
+ * Build the harness subcommand sequence for a live run. All provenance-bearing
+ * values (slug, session, plan file) are derived from the SERVER-minted runId — never
+ * from the brief/client text — so minting them is trustworthy (threat model T1).
+ * `promote` is intentionally excluded: it stays a separate, human-gated action.
+ *
+ * ponytail: single generic lane + the canonical gate sequence. Real multi-lane
+ * decomposition (brief → N lanes via the decompose agent) and the artifacts each
+ * step consumes (the route-cost plan file for `budget`, the agent's trace for
+ * `trace`) are the next pieces — until they exist, a live run will fail at the first
+ * step whose artifact is missing. Enabling HARNESS_LIVE without that is premature.
  */
-function planRun(_brief: string): HarnessSubcommand[] {
-  throw new Error("live run planning not implemented (brief→plan decomposition pending)");
+export function planRun(runId: string, _brief: string): HarnessSubcommand[] {
+  // Sanitize to the downstream validator charset so an odd/empty runId can never
+  // produce an unmintable value. Use the full id (not a short slice) so distinct
+  // runs can't collide on a lane slug / worktree branch.
+  const id = runId.toLowerCase().replace(/[^a-z0-9]/g, "") || "run";
+  const slug = `lane-${id.slice(0, 26)}`; // ≤31 chars for SLUG; starts with a letter
+  const session = id.slice(0, 64); // ≤64 chars for SESSION
+  const planFile = `plan-${id}.jsonl`; // PLAN_FILE: bare filename
+  return [
+    { cmd: "budget", planFile }, // Gate A: price the routed batch
+    { cmd: "wt-new", slug }, // create the lane worktree
+    { cmd: "integ-start" }, // open the integration branch
+    { cmd: "integ-merge", slug }, // merge the lane (Gate C)
+    { cmd: "trace", session }, // Gate D L2: trajectory check
+  ];
 }
 
 /**
@@ -171,7 +189,7 @@ export function startRun(runId: string, brief: string, opts: StartRunOptions = {
   void (async () => {
     try {
       if (live) {
-        const plan = (testSeam && opts.plan) || planRun(brief);
+        const plan = (testSeam && opts.plan) || planRun(runId, brief);
         await runLive(plan, pipe.ingest, { spawnFn: testSeam ? opts.spawnFn : undefined });
         pipe.markDone(); // live pipeline ran to completion → snapshot reflects done
       } else {
