@@ -1,17 +1,20 @@
-# Tier-3 / G4 — tinyproxy FQDN allowlist (FilterDefaultDeny Yes ⇒ only these match).
+# Tier-3 / G4 — tinyproxy FQDN allowlist (FilterDefaultDeny Yes => only these match).
 # POSIX-extended regex, anchored, matched against the CONNECT host (FilterExtended Yes).
 #
-# Hostnames the claude CLI / Max-plan session need:
-#   api.anthropic.com        — the Anthropic API (chat/messages). REQUIRED.
-# The Max-plan subscription auth flow and the CLI's normal operation egress to
-# api.anthropic.com. The two entries below also permit any *.anthropic.com sub-host in
-# case the CLI uses a regional/edge API hostname under the same domain — review the
-# CLI's actual egress (RUNBOOK Step 4 verify logs) and tighten to exactly the hosts seen.
+# Hosts the agent needs:
+#   api.anthropic.com  — the Anthropic API (inference). REQUIRED at runtime.
+#   *.anthropic.com    — regional/edge API + telemetry hosts under the same domain.
+#   *.claude.com       — Anthropic's OAuth/auth + platform domain. REQUIRED for
+#                        `claude auth login` and OAuth token REFRESH: the login flow runs
+#                        on claude.com with a platform.claude.com callback (NOT
+#                        anthropic.com). Confirmed on the first real login run (the proxy
+#                        returned 403 until this was added). Operator-approved widening
+#                        (still Anthropic-owned). Without it the agent fails closed when
+#                        its session expires (must re-login).
 #
-# If telemetry/error-reporting must be allowed (OFF by default — keep it denied unless
-# the CLI hard-fails without it), the candidate hosts would be statsig.anthropic.com and
-# a sentry ingest host; do NOT add them unless verified necessary. Prefer disabling CLI
-# telemetry over widening the allowlist.
+# Everything else is denied by FilterDefaultDeny. Review the proxy Connect log
+# (/var/log/tinyproxy/agent-proxy.log) and tighten if a host turns out unnecessary.
 
 ^api\.anthropic\.com$
 ^([a-z0-9-]+\.)*anthropic\.com$
+^([a-z0-9-]+\.)*claude\.com$
