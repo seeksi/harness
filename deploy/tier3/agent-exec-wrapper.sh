@@ -30,7 +30,10 @@ export HTTP_PROXY="$PROXY_URL"  http_proxy="$PROXY_URL"
 export NO_PROXY="" no_proxy=""   # nothing bypasses the proxy
 
 # --- G6 per-process ulimit caps (belt; the agent cannot raise them) -------------------
-ulimit -v 1572864     # address space (KB) ~= 1.5 GB per-process virtual memory
+# NOTE: do NOT cap virtual address space (`ulimit -v`). Node/V8 RESERVES many GB of
+# virtual memory at startup regardless of actual RSS, so a -v cap makes claude SIGABRT
+# (exit 134, core dumped) before it runs. Real memory is capped by the cgroup MemoryMax
+# in the systemd-run scope below — that is the correct knob, not ulimit -v.
 ulimit -u 256         # max user processes (fork-bomb guard) for the agent uid
 ulimit -t 1500        # CPU seconds (~25 min) — pairs with AGENT_TIMEOUT_MS wall clock
 ulimit -f 1048576     # max file size (KB) = 1 GB — caps disk write per file
