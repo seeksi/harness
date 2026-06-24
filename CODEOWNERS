@@ -1,0 +1,29 @@
+# CODEOWNERS — Umbrella Web UI per-lane ownership (ADR 0001 §3/§4, NOTES.md §3/§4).
+# Encodes the disjoint write-ownership of the 3 parallel-build lanes. Each path has
+# exactly ONE owning lane so the worktrees cannot semantically collide. Replace the
+# @lane-* placeholders with real GitHub handles/teams when the lanes are cut.
+#
+#   Lane A — daemon + control-plane API (PRODUCES the contract)
+#   Lane B — r3f 3D scene (CONSUMES the contract)
+#   Lane C — glass shadcn HUD + semantic-DOM mirror (CONSUMES the contract)
+
+# --- Lane A: api/**, lib/contract/**, lib/daemon/**, lib/store/persist.ts ---------
+/web/app/api/                 @lane-a-daemon
+/web/lib/contract/            @lane-a-daemon
+/web/lib/daemon/              @lane-a-daemon
+/web/lib/store/persist.ts     @lane-a-daemon
+
+# --- Lane B: scene/**, lib/store/{store,raf-flush}.ts -----------------------------
+/web/scene/                   @lane-b-scene
+/web/lib/store/store.ts       @lane-b-scene
+/web/lib/store/raf-flush.ts   @lane-b-scene
+
+# --- Lane C: hud/**, app shell, globals.css, store binding, sse/**, ui/**, styles/** -
+/web/hud/                     @lane-c-hud
+/web/app/layout.tsx           @lane-c-hud
+/web/app/page.tsx             @lane-c-hud
+/web/app/globals.css          @lane-c-hud
+/web/lib/store/useRunState.ts @lane-c-hud
+/web/lib/sse/                 @lane-c-hud
+/web/ui/                      @lane-c-hud
+/web/styles/                  @lane-c-hud

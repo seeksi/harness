@@ -1,0 +1,39 @@
+@import "tailwindcss";
+
+/*
+ * Lane 0 declares the LOCKED token CSS-var NAMES from ADR 0001 §web-design with
+ * empty/placeholder values. Lane C is the single token source-of-truth
+ * (styles/tokens.css) and fills the real values when it lands. Names are frozen
+ * here so every lane references the same vars and merges cannot disagree on them.
+ */
+:root {
+  /* base surface — HSL 222 11% 6% */
+  --bg: ;
+
+  /* five-stop indigo→violet accent ramp (~258°→~274°) */
+  --accent-dim-fill: ;
+  --accent-rest-glow: ;
+  --accent-mid: ;
+  --accent-vivid: ;
+  --accent-neon: ;
+
+  /* 4 status hues × 2 tokens (fill/glow), +6–8% text bump variants */
+  --status-ok-fill: ;     /* emerald/teal ~150° */
+  --status-ok-glow: ;
+  --status-ok-text: ;
+  --status-info-fill: ;   /* cyan ~208° */
+  --status-info-glow: ;
+  --status-info-text: ;
+  --status-warn-fill: ;   /* amber ~46–48° */
+  --status-warn-glow: ;
+  --status-warn-text: ;
+  --status-crit-fill: ;   /* scarce red */
+  --status-crit-glow: ;
+  --status-crit-text: ;
+
+  /* glass opacity-floor — back-solved from neon-burst worst-case luminance (risk 1) */
+  --glass-opacity-floor: ;
+
+  /* 4px grid spacing unit */
+  --space-unit: ;
+}
