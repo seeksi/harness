@@ -296,6 +296,25 @@ describe("harness.sh → parseHarnessLine contract", () => {
     expect(committedIgnore).toBe(".claude/traces/\n");
   });
 
+  it("wt-new: a bad-charset lane user arg is REJECTED before any ACL op (charset re-validation)", () => {
+    // harness.sh re-validates the lane user's charset (defense in depth beneath the bridge).
+    // An injection-shaped user must die before the sudo setfacl/chmod ever runs.
+    const repo = newRepo();
+    const { status } = harnessFails(repo, ["wt-new", "evil", "agent; rm -rf /"]);
+    expect(status, "non-zero exit on bad lane user").toBeGreaterThan(0);
+  });
+
+  it("wt-new: no user arg + no AGENT_USER skips the ACL/permission step entirely (dev/test unchanged)", () => {
+    // The 2-arg shape (or unset AGENT_USER) must behave exactly as before: create the
+    // worktree, emit `building`, and never attempt a privilege-requiring setfacl/chmod.
+    const repo = newRepo();
+    const out = harness(repo, ["wt-new", "plain"], { AGENT_USER: "" });
+    assertAllValidEvents(out);
+    expect(existsSync(wtPath(repo, "plain"))).toBe(true);
+    const events = out.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(events).toContainEqual(expect.objectContaining({ type: "subtask", id: "plain", status: "building" }));
+  });
+
   it("reset-base: returns a repo stranded on integration back to the base branch", () => {
     const repo = newRepo();
     harness(repo, ["integ-start"]); // moves HEAD to integration (off main)

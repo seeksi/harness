@@ -36,6 +36,13 @@ export interface AgentSpec {
   model?: AgentModel;
   /** Claude Code tool allowlist; conservative default (no unrestricted Bash). */
   allowedTools?: string[];
+  /**
+   * The resolved per-lane OS user the agent runs as (laneUser(i)). Undefined ⇒ fall back
+   * to AGENT_USER (the index-0 account) so single-lane is byte-identical. The build path
+   * runs the agent under this uid via `sudo -u`; its 0700 worktree is chowned to the same
+   * user, so concurrent lanes are isolated by uid.
+   */
+  user?: string;
 }
 
 /**
@@ -196,9 +203,52 @@ const DEFAULT_KILL_GRACE_MS = 5_000;
 // that dedicated low-priv OS account via `sudo -u` instead of the daemon's own user, so
 // a separate account whose only writable area is the worktrees dir is the real FS jail
 // (cwd alone is NOT). Unset ⇒ direct mode (daemon user) — allowed only OUTSIDE production.
+//
+// BASE_AGENT_USER is the existing single account (index-0, backward-compatible with the
+// live box). laneUser(i) derives the per-lane account from it: lane 0 → BASE, lane i>0 →
+// `${BASE}-${i}` — so concurrent lanes run under DISTINCT uids and a sibling lane's uid
+// can't touch another's 0700 worktree. (N-user provisioning is a later chunk; this only
+// resolves + validates the name.)
 const AGENT_USER = process.env.AGENT_USER;
+const BASE_AGENT_USER = AGENT_USER;
 const SUDO_PATH = process.env.AGENT_SUDO_PATH ?? "/usr/bin/sudo";
 const USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/; // POSIX-ish username, used in argv
+
+/**
+ * Validate a resolved lane username against the SAME guards buildInvocation enforces on
+ * AGENT_USER: a plain POSIX-ish username, never root, never the daemon's own user (no
+ * privilege drop otherwise). Throws AgentExecError (fail closed) — the result is used in
+ * argv (sudo -u) and a chown target, so a bad value must never pass.
+ */
+function validateLaneUser(user: string): string {
+  if (!USERNAME_RE.test(user)) {
+    throw new AgentExecError(`invalid lane user (must be a plain username): ${JSON.stringify(user)}`);
+  }
+  if (user === "root") {
+    throw new AgentExecError("lane user must not be root (a low-priv account is required)");
+  }
+  if (user === os.userInfo().username) {
+    throw new AgentExecError(`lane user must differ from the daemon user (${user}) — no privilege drop otherwise`);
+  }
+  return user;
+}
+
+/**
+ * SINGLE SOURCE OF TRUTH for the per-lane OS user. Lane index 0 → BASE_AGENT_USER (the
+ * existing `agent` account, byte-identical to single-lane today); lane i>0 → `${BASE}-${i}`
+ * (e.g. agent-1, agent-2…). Each distinct user owns its own 0700 worktree, so concurrent
+ * lanes are isolated by uid. Returns undefined ONLY when AGENT_USER is unset (dev/test:
+ * direct mode, no privilege drop — single-lane behavior unchanged). The resolved name is
+ * validated with the same not-root / not-daemon-user / username-shape checks as AGENT_USER.
+ */
+export function laneUser(index: number): string | undefined {
+  if (!BASE_AGENT_USER) return undefined; // direct mode (no AGENT_USER) — no per-lane user
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) {
+    throw new AgentExecError(`invalid lane index (must be a non-negative integer): ${JSON.stringify(index)}`);
+  }
+  const user = index === 0 ? BASE_AGENT_USER : `${BASE_AGENT_USER}-${index}`;
+  return validateLaneUser(user);
+}
 
 // Sane upper bounds — these values are destined for `systemd-run -p MemoryMax=…` /
 // ulimit in the future wrapper, so they are validated + clamped here (fail closed) so an
@@ -299,15 +349,21 @@ function agentEnv(limits?: ResourceLimits): NodeJS.ProcessEnv {
  * Resource-limit SANDBOX_* vars are forwarded in BOTH modes: in drop mode sudo's
  * env_reset would strip arbitrary vars, so they're added back via `--preserve-env` for
  * exactly those keys (the wrapper, run as the agent user, reads them).
+ *
+ * `user` is the resolved per-lane account (laneUser(i)) the agent runs as. It DEFAULTS to
+ * BASE_AGENT_USER (= AGENT_USER, the index-0 account) so a single-lane invocation is
+ * byte-identical to before. Every existing validation still runs on it (username shape /
+ * not-root / not-daemon-user), so a per-lane name is held to the same bar as AGENT_USER.
  */
 export function buildInvocation(
   cli: string,
   claudeArgs: string[],
-  limits?: ResourceLimits
+  limits?: ResourceLimits,
+  user: string | undefined = AGENT_USER
 ): { cmd: string; argv: string[]; spawnEnv: NodeJS.ProcessEnv } {
   const limitEnv = resourceLimitEnv(limits);
   const limitKeys = Object.keys(limitEnv);
-  if (!AGENT_USER) {
+  if (!user) {
     if (process.env.NODE_ENV === "production") {
       throw new AgentExecError(
         "AGENT_USER must be set in production: the agent requires a dedicated low-priv account (threat model §6)"
@@ -315,15 +371,15 @@ export function buildInvocation(
     }
     return { cmd: cli, argv: claudeArgs, spawnEnv: agentEnv(limits) };
   }
-  if (!USERNAME_RE.test(AGENT_USER)) {
-    throw new AgentExecError(`invalid AGENT_USER (must be a plain username): ${JSON.stringify(AGENT_USER)}`);
+  if (!USERNAME_RE.test(user)) {
+    throw new AgentExecError(`invalid agent user (must be a plain username): ${JSON.stringify(user)}`);
   }
-  if (AGENT_USER === "root") {
-    throw new AgentExecError("AGENT_USER must not be root (a low-priv account is required)");
+  if (user === "root") {
+    throw new AgentExecError("agent user must not be root (a low-priv account is required)");
   }
   const daemonUser = os.userInfo().username;
-  if (AGENT_USER === daemonUser) {
-    throw new AgentExecError(`AGENT_USER must differ from the daemon user (${daemonUser}) — no privilege drop otherwise`);
+  if (user === daemonUser) {
+    throw new AgentExecError(`agent user must differ from the daemon user (${daemonUser}) — no privilege drop otherwise`);
   }
   if (!path.isAbsolute(SUDO_PATH)) {
     throw new AgentExecError(`AGENT_SUDO_PATH must be an absolute path: ${JSON.stringify(SUDO_PATH)}`);
@@ -336,7 +392,7 @@ export function buildInvocation(
   const preserve = limitKeys.length > 0 ? [`--preserve-env=${limitKeys.join(",")}`] : [];
   return {
     cmd: SUDO_PATH,
-    argv: ["-n", "-H", ...preserve, "-u", AGENT_USER, "--", cli, ...claudeArgs],
+    argv: ["-n", "-H", ...preserve, "-u", user, "--", cli, ...claudeArgs],
     // The child's env is set by sudo (env_reset + -H); node only needs PATH to exist for
     // the (absolute) sudo invocation. The SANDBOX_* limit vars must exist in the spawn
     // env for --preserve-env to forward them. No daemon secret is forwarded.
@@ -396,7 +452,9 @@ export function spawnAgent(
 
     let inv: ReturnType<typeof buildInvocation>;
     try {
-      inv = buildInvocation(DEFAULT_AGENT_CLI, args, opts.resourceLimits); // drop to AGENT_USER via sudo if set
+      // Drop to the lane's user via sudo if set (spec.user, defaulting to AGENT_USER for
+      // single-lane). buildInvocation re-validates it with the same not-root/not-daemon checks.
+      inv = buildInvocation(DEFAULT_AGENT_CLI, args, opts.resourceLimits, spec.user);
     } catch (e) {
       audit("invalid-args", null, null);
       reject(e);
@@ -519,6 +577,11 @@ export interface RunAgentInSandboxOptions {
    * the daemon mints per lane.)
    */
   sessionId?: string;
+  /**
+   * The resolved per-lane OS user (laneUser(i)) the agent runs as. Undefined ⇒ AGENT_USER
+   * (index-0), keeping single-lane byte-identical. Used for the `sudo -u` privilege drop.
+   */
+  user?: string;
   /** TEST seam: injectable spawn (real nodeSpawn in prod). */
   spawnFn?: SpawnAgentOptions["spawnFn"];
 }
@@ -553,6 +616,7 @@ export async function runAgentInSandbox(opts: RunAgentInSandboxOptions): Promise
     taskPrompt: opts.prompt,
     model: opts.model,
     allowedTools: opts.allowedTools ?? DEFAULT_TOOLS,
+    user: opts.user,
   };
 
   // spawnAgent owns the single audit sink (appendAudit) and the throw semantics on the

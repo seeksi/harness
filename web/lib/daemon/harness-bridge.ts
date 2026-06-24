@@ -21,7 +21,7 @@ import { appendAudit } from "@/lib/store/persist";
 
 export type HarnessSubcommand =
   | { cmd: "budget"; planFile: string }
-  | { cmd: "wt-new"; slug: string }
+  | { cmd: "wt-new"; slug: string; user?: string }
   | { cmd: "wt-commit"; slug: string }
   | { cmd: "wt-verify"; slug: string }
   | { cmd: "integ-start" }
@@ -55,6 +55,18 @@ function requirePlanFile(name: string): string {
     throw new HarnessArgError(`unminted plan file (provenance check failed): ${JSON.stringify(name)}`);
   }
   return name;
+}
+
+// The per-lane OS user passed to `wt-new <slug> <user>` (the chown target). It is
+// SERVER-DERIVED (sandbox laneUser(i) off AGENT_USER), never a client string, but it lands
+// in harness.sh argv → a chown target, so charset-check it here the same way the slug is
+// (and harness.sh re-validates the charset as defense in depth). Same shape as a username.
+const LANE_USER_RE = /^[a-zA-Z0-9_-]+$/;
+function requireLaneUser(user: string): string {
+  if (typeof user !== "string" || !LANE_USER_RE.test(user)) {
+    throw new HarnessArgError(`invalid lane user (must be [a-zA-Z0-9_-]): ${JSON.stringify(user)}`);
+  }
+  return user;
 }
 
 // Fixed allow-dir for plan files, resolved ONCE at module load (not per call) so the
@@ -93,7 +105,12 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
       // provenance (minted) → then resolve+contain under the allow-dir (T5).
       return ["budget", containedPlanFile(requirePlanFile(sub.planFile))];
     case "wt-new":
-      return ["wt-new", requireLane(sub.slug)];
+      // Per-lane user is optional (dev/test pass none → harness.sh falls back to
+      // $AGENT_USER-or-skip). When present it's the chown target for the lane's 0700
+      // worktree, charset-checked so a sibling-uid lane can't read it.
+      return sub.user !== undefined
+        ? ["wt-new", requireLane(sub.slug), requireLaneUser(sub.user)]
+        : ["wt-new", requireLane(sub.slug)];
     case "wt-commit":
       return ["wt-commit", requireLane(sub.slug)];
     case "wt-verify":

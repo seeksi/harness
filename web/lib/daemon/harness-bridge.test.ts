@@ -44,6 +44,19 @@ describe("buildArgs — server-minted provenance → argv (no client strings, no
     ]);
   });
 
+  it("wt-new takes an optional per-lane user arg (chown target) and charset-checks it", () => {
+    mintLane("scene");
+    // No user → 2-arg shape (dev/test; harness.sh falls back to $AGENT_USER-or-skip).
+    expect(buildArgs({ cmd: "wt-new", slug: "scene" })).toEqual(["wt-new", "scene"]);
+    // With a user → 3-arg shape; the user lands in argv as the chown target.
+    expect(buildArgs({ cmd: "wt-new", slug: "scene", user: "agent" })).toEqual(["wt-new", "scene", "agent"]);
+    expect(buildArgs({ cmd: "wt-new", slug: "scene", user: "agent-1" })).toEqual(["wt-new", "scene", "agent-1"]);
+    // A bad-charset user (would reach a chown target) is rejected before any spawn.
+    for (const bad of ["agent; rm -rf /", "$(id)", "a/b", "a b", ""]) {
+      expect(() => buildArgs({ cmd: "wt-new", slug: "scene", user: bad }), bad).toThrow(HarnessArgError);
+    }
+  });
+
   it("contains plan files under the allow-dir and rejects escapes (T5)", () => {
     const baseAbs = path.resolve(process.env.HARNESS_REPO ?? process.cwd(), "data/plans");
     // A normal name resolves to a child of the allow-dir.

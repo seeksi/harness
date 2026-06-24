@@ -7,6 +7,7 @@ export {
   spawnAgent,
   buildAgentArgs,
   buildInvocation,
+  laneUser,
   parseAgentUsage,
   validateLimits,
   DEFAULT_TOOLS,

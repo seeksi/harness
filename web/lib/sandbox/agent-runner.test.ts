@@ -100,6 +100,49 @@ describe("relocateTrace", () => {
   });
 });
 
+describe("laneUser — per-lane OS user resolution (single source of truth)", () => {
+  // laneUser reads BASE_AGENT_USER at module load, so re-import with env set.
+  afterEach(() => vi.resetModules());
+
+  it("returns undefined when AGENT_USER is unset (dev/test direct mode)", async () => {
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    expect(mod.laneUser(0)).toBeUndefined();
+    expect(mod.laneUser(3)).toBeUndefined();
+  });
+
+  it("maps index 0 → the base user (agent) and i>0 → base-i (agent-1, agent-2…)", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    expect(mod.laneUser(0)).toBe("agent"); // index 0 is byte-identical to single-lane today
+    expect(mod.laneUser(1)).toBe("agent-1");
+    expect(mod.laneUser(2)).toBe("agent-2");
+  });
+
+  it("re-validates the resolved name (not root, not the daemon user, username shape)", async () => {
+    const me = (await import("os")).userInfo().username;
+    // base = root → index 0 is root → rejected.
+    vi.stubEnv("AGENT_USER", "root");
+    vi.resetModules();
+    let mod = await import("./agent-runner");
+    expect(() => mod.laneUser(0)).toThrow(mod.AgentExecError);
+    // base = the daemon's own user → no privilege drop → rejected.
+    vi.stubEnv("AGENT_USER", me);
+    vi.resetModules();
+    mod = await import("./agent-runner");
+    expect(() => mod.laneUser(0)).toThrow(mod.AgentExecError);
+  });
+
+  it("rejects a non-integer / negative lane index (fail closed)", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    expect(() => mod.laneUser(-1)).toThrow(mod.AgentExecError);
+    expect(() => mod.laneUser(1.5)).toThrow(mod.AgentExecError);
+  });
+});
+
 describe("buildInvocation — privilege drop (AGENT_USER)", () => {
   // AGENT_USER is read at module load (a fixed boundary), so re-import with env set.
   afterEach(() => vi.resetModules());
@@ -126,6 +169,19 @@ describe("buildInvocation — privilege drop (AGENT_USER)", () => {
     // sudo only needs PATH; no daemon env (and thus no secret) rides through spawnEnv.
     expect(Object.keys(inv.spawnEnv)).toEqual(["PATH"]);
     expect(inv.spawnEnv).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  it("uses the explicit per-lane `user` param over AGENT_USER for the sudo -u drop", async () => {
+    vi.stubEnv("AGENT_USER", "agent"); // base / index-0 user
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    // A lane-1 invocation drops to agent-1, not the base agent.
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x"], undefined, "agent-1");
+    expect(inv.argv).toEqual(["-n", "-H", "-u", "agent-1", "--", "/abs/claude", "-p", "x"]);
+    // Omitting the param falls back to AGENT_USER (single-lane byte-identical).
+    const inv0 = mod.buildInvocation("/abs/claude", ["-p", "x"]);
+    expect(inv0.argv).toEqual(["-n", "-H", "-u", "agent", "--", "/abs/claude", "-p", "x"]);
   });
 
   it("rejects a non-username AGENT_USER (argv-injection guard)", async () => {
@@ -307,6 +363,32 @@ describe("spawnAgent", () => {
     const res = await spawnAgent(spec(), { spawnFn: spawnFn as never });
     expect(res.sessionId).toBeNull(); // didn't match the strict session shape
     expect(getAuditLog()[0].argv).toContain("session:?");
+  });
+
+  it("threads spec.user to the sudo -u privilege drop (per-lane uid)", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.stubEnv("AGENT_CLI_PATH", "/abs/claude"); // absolute cli required in drop mode
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    (await import("@/lib/daemon/registry")).mintLane("lane-x");
+    let capturedCmd: string | undefined;
+    let capturedArgs: string[] | undefined;
+    const spawnFn = vi.fn((cmd: string, args: string[]) => {
+      capturedCmd = cmd;
+      capturedArgs = args;
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"session_id":"sess-lane001"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    await mod.spawnAgent(
+      { slug: "lane-x", worktreePath: wt("lane-x"), taskPrompt: "x", user: "agent-1" },
+      { spawnFn: spawnFn as never }
+    );
+    expect(capturedCmd).toBe("/usr/bin/sudo");
+    expect(capturedArgs!.slice(0, 4)).toEqual(["-n", "-H", "-u", "agent-1"]); // lane-1's uid
   });
 
   it("kills a hung agent and rejects HarnessTimeoutError", async () => {

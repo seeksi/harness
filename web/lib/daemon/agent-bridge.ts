@@ -13,6 +13,7 @@ export {
   spawnAgent,
   buildAgentArgs,
   buildInvocation,
+  laneUser,
   parseAgentUsage,
   worktreePathFor,
   containedWorktree,

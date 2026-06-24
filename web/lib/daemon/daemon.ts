@@ -29,7 +29,7 @@ import {
 } from "@/lib/store/persist";
 import { publish, complete } from "./broker";
 import { spawnHarness, containedPlanFile, type HarnessSubcommand, type SpawnHarnessOptions } from "./harness-bridge";
-import { runAgentInSandbox, worktreePathFor, relocateTrace, type AgentSpec, type AgentUsage } from "@/lib/sandbox";
+import { runAgentInSandbox, worktreePathFor, relocateTrace, laneUser, type AgentSpec, type AgentUsage } from "@/lib/sandbox";
 import { mintLane, mintSession, mintPlanFile } from "./registry";
 
 /** One lane to build: a worktree + the agent task that fills it. */
@@ -89,6 +89,7 @@ const defaultRunAgent: RunAgentFn = async (spec, runOpts) => {
     model: spec.model,
     cwd: spec.worktreePath,
     sessionId: spec.slug,
+    user: spec.user, // run the agent as this lane's resolved OS user (sudo -u)
     spawnFn: runOpts?.spawnFn as never,
   });
   return { code: exitCode, sessionId, usage };
@@ -273,10 +274,19 @@ async function runLive(
   await runSub({ cmd: "budget", planFile: plan.planFile }, onEvent, opts.spawnFn); // Gate A
   await runSub({ cmd: "integ-start" }, onEvent, opts.spawnFn);
 
+  // Each lane gets a DISTINCT OS user (laneUser(i)): index 0 → the existing `agent`
+  // account (single-lane is byte-identical), i>0 → agent-1/agent-2/… so concurrent lanes
+  // are isolated by uid. Undefined in dev/test (no AGENT_USER) → wt-new/build fall back to
+  // their existing $AGENT_USER-or-skip behavior. Resolved ONCE here so the SAME user is the
+  // chown target (Phase 1) AND the sudo -u the agent runs as (Phase 2).
+  const laneUsers = plan.lanes.map((_, i) => laneUser(i));
+
   // Phase 1 — CREATE WORKTREES: SERIAL, lane order. `git worktree add` mutates the
   // shared index + refs/admin of the single repo, so these can NEVER run concurrently.
-  for (const lane of plan.lanes) {
-    await runSub({ cmd: "wt-new", slug: lane.slug }, onEvent, opts.spawnFn);
+  // The lane's worktree is chowned to ITS user + chmod 0700 (in harness.sh) so a sibling
+  // lane's uid cannot read/write it.
+  for (let i = 0; i < plan.lanes.length; i++) {
+    await runSub({ cmd: "wt-new", slug: plan.lanes[i].slug, user: laneUsers[i] }, onEvent, opts.spawnFn);
   }
 
   // Phase 2 — BUILD AGENTS: CONCURRENT, capped at LANE_CONCURRENCY. Each agent only
@@ -285,12 +295,13 @@ async function runLive(
   // prod, an injected fake in tests). allSettled (NOT all) so one rejection never leaves
   // another's unhandled and the pool always drains before we inspect outcomes.
   type LaneBuild = Awaited<ReturnType<RunAgentFn>>;
-  const builds = await asyncPool<LaneStep, LaneBuild>(LANE_CONCURRENCY, plan.lanes, (lane) =>
+  const builds = await asyncPool<LaneStep, LaneBuild>(LANE_CONCURRENCY, plan.lanes, (lane, i) =>
     runAgent({
       slug: lane.slug,
       worktreePath: worktreePathFor(lane.slug),
       taskPrompt: lane.taskPrompt,
       model: lane.model,
+      user: laneUsers[i], // run as this lane's OS user — the same user that owns its 0700 worktree
     })
   );
 

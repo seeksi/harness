@@ -17,7 +17,7 @@
 #
 # Usage:
 #   harness.sh budget <plan.jsonl>   Gate A: price the routed batch (exit 1 if over ceiling)
-#   harness.sh wt-new <slug>         create feat/<slug> worktree off the base
+#   harness.sh wt-new <slug> [user]  create feat/<slug> worktree off the base; keep it deploy-owned but ACL-grant <user> (per-lane uid) rwX + deny siblings (falls back to $AGENT_USER when no <user> arg)
 #   harness.sh wt-commit <slug>      stage+commit the lane worktree IF dirty (no-op stays uncommitted)
 #   harness.sh wt-verify <slug>      Gate B: feat/<slug> committed + worktree clean (exit 1 if a no-op agent)
 #   harness.sh integ-start           create the integration branch off the base
@@ -43,16 +43,20 @@ die() { echo "harness: $*" >&2; exit 1; }
 on_branch() { [ "$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" = "$1" ]; }
 tree_clean() { git diff --quiet && git diff --cached --quiet; }
 
-# Reclaim the lane worktrees so the daemon user can tear them down. wt-new chowns each lane
-# to the agent so it can write its build; afterwards `git worktree remove` (run as the
-# daemon user) can't delete agent-owned files ("Permission denied"). Fix: chown only the
+# Reclaim the lane worktrees so the daemon user can tear them down. The worktree root stays
+# deploy-owned (wt-new grants the agent via ACL, not chown), but DIRECTORIES the agent
+# CREATES during its build are agent-owned; afterwards `git worktree remove` (run as the
+# daemon user) can't delete agent-owned dirs ("Permission denied"). Fix: chown only the
 # DIRECTORIES in the worktrees tree back to the current user — write+exec on a directory is
-# what permits deleting its contents, so this lets clean remove agent-owned lane files
+# what permits deleting its contents, so this lets clean remove agent-created lane dirs
 # WITHOUT touching any regular file (a hardlink the agent planted to a root-owned file is a
-# FILE, never chowned → no escalation). `-xdev` won't cross mountpoints; `find -type d`
-# won't traverse symlinks. Best-effort + does NOT depend on $AGENT_USER (promote is a
-# manual command that may run without the daemon's env). No-op when there's nothing to do
-# or no passwordless sudo (dev/test). Path computed exactly like wt-new/wt-commit.
+# FILE, never chowned → no escalation). This reclaims dirs owned by ANY lane user because it
+# chowns BY DIRECTORY, not by from-user — so per-lane uids (#16b) need no change here. `find`
+# traverses fine: it runs under sudo (root), and the worktree roots are deploy-owned anyway.
+# `-xdev` won't cross mountpoints; `find -type d` won't traverse symlinks. Best-effort + does
+# NOT depend on $AGENT_USER (promote is a manual command that may run without the daemon's
+# env). No-op when there's nothing to do or no passwordless sudo (dev/test). Path computed
+# like wt-new/wt-commit.
 reclaim_worktrees() {
   _rr=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
   _wt="$(cd "$_rr/.." && pwd)/$(basename "$_rr").worktrees"
@@ -113,25 +117,56 @@ case "$cmd" in
     [ -n "${2:-}" ] || die "wt-new needs a <slug>"
     emit_phase 2 active
     if sh "$WT" new "$2" "$BASE" >&2; then   # echoes the worktree path → stderr
-      # [#agent ownership] wt-new runs as the daemon user (deploy), so the new worktree
-      # checkout is deploy-owned. But the build agent runs as a SEPARATE low-priv user
-      # ($AGENT_USER) and must Write/Edit the lane files — it can't on a deploy-owned tree.
-      # So hand the checkout dir to the agent. Chown ONLY the worktree files, NEVER the
-      # main repo's .git: the linked gitdir admin must stay deploy-owned so wt-commit can
-      # trust it (wt-commit derives the gitdir from the main .git and never trusts
-      # $wt_path/.git). If $AGENT_USER is unset (dev/test/dry-run) skip entirely — no priv
-      # drop is in play, so no chown is needed and behavior is unchanged.
-      if [ -n "${AGENT_USER:-}" ]; then
-        case "$AGENT_USER" in *[!a-zA-Z0-9_-]*) die "wt-new: AGENT_USER must be [a-zA-Z0-9_-]";; esac
+      # [#per-lane access] THREE principals each need different access to a lane worktree:
+      #   - agent-i (the build agent's uid): rwx — Write/Edit the lane files
+      #   - deploy  (the daemon user):       rwx — wt-commit/wt-verify/relocateTrace all run
+      #                                            AS deploy (NOT root) and READ+WRITE the tree
+      #                                            (wt-commit even `git checkout -- .gitignore`s
+      #                                            into it; trace relocation copies out of it)
+      #   - agent-j (a SIBLING lane's uid):  none — isolation that makes concurrency safe
+      # A `chown agent-i` + `chmod 0700` would lock DEPLOY out and break the pipeline at
+      # runtime. So instead: KEEP the worktree deploy-owned (deploy stays owner → all its git
+      # steps keep full access, no git safe.directory issue, and wt-commit's trusted
+      # deploy-owned --git-dir is unaffected), and grant the agent via a POSIX ACL.
+      #
+      # The lane user is an EXPLICIT arg ($3) so concurrent lanes get DISTINCT uids (agent,
+      # agent-1, agent-2…). Falls back to $AGENT_USER when no $3 is passed (single-lane), and
+      # if BOTH are unset (dev/test/dry-run) skip entirely — no priv drop is in play, so no
+      # ACL is needed and behavior is unchanged (harness-contract tests pass no user).
+      #
+      # ponytail: requires the filesystem mounted with `acl` (ext4 default) + the `acl`
+      # package (setfacl). Provisioning that is the 17b chunk's job.
+      # skipped: setfacl availability/mount check; add when the 17b provisioner lands.
+      lane_user=${3:-${AGENT_USER:-}}
+      if [ -n "$lane_user" ]; then
+        case "$lane_user" in *[!a-zA-Z0-9_-]*) die "wt-new: lane user must be [a-zA-Z0-9_-]";; esac
         case "$2" in *[!a-zA-Z0-9_-]*) die "wt-new: slug must be [a-zA-Z0-9_-]";; esac
         repo_root=$(git rev-parse --show-toplevel)
         wt_path="$(cd "$repo_root/.." && pwd)/$(basename "$repo_root").worktrees/$2"
         [ -d "$wt_path" ] || die "wt-new: lane worktree missing for feat/$2"
-        # [#TOCTOU] The chown runs as root-equiv. `[ -d ]` follows symlinks, so reject a
-        # symlinked checkout dir outright, then chown with -h (never deref a symlink to its
-        # referent) and -- (stop option parsing) so a swapped entry can't redirect the chown.
-        [ ! -L "$wt_path" ] || die "wt-new: $wt_path is a symlink — refusing chown"
-        sudo -n chown -hR -- "$AGENT_USER" "$wt_path" || die "wt-new: chown to $AGENT_USER failed"
+        # [#TOCTOU] The ACL ops run as root-equiv. `[ -d ]` follows symlinks, so reject a
+        # symlinked checkout dir outright BEFORE any sudo op; every sudo command uses `--`
+        # (stop option parsing) so a swapped entry can't redirect it.
+        [ ! -L "$wt_path" ] || die "wt-new: $wt_path is a symlink — refusing to permission"
+        deploy_user=$(id -un)
+        # Deny "other" (sibling lane uids) FIRST — this MUST precede the default-ACL set.
+        # Otherwise `setfacl -d` derives `default:other::` from the dir's still-open mode
+        # (other r-x), and files the AGENT creates LATER inherit other-read → a sibling lane
+        # could read this lane's build output. Order is load-bearing (cross-review BLOCK).
+        sudo -n chmod -R o-rwx -- "$wt_path" || die "wt-new: chmod o-rwx of $wt_path failed"
+        # Access ACL + DEFAULT ACL with IDENTICAL explicit entries (X = exec only on dirs /
+        # already-exec files):
+        #   u:agent-i rwX  — the build agent edits the lane files
+        #   u:deploy  rwX  — wt-commit/verify/trace read+write; the DEFAULT u:deploy is what
+        #                    lets deploy reach files the agent CREATES (those are agent-owned)
+        #   g::---         — owning group (deploy) has no group-path access (deploy uses owner)
+        #   m::rwX         — mask permits the named rwX grants (else they'd be clamped)
+        #   o::---         — every other uid (sibling lanes) denied, on existing AND new files
+        _acl="u:$lane_user:rwX,u:$deploy_user:rwX,g::---,m::rwX,o::---"
+        sudo -n setfacl -R    -m "$_acl" -- "$wt_path" \
+          || die "wt-new: setfacl access ACL failed (acl mount/pkg? — see 17b)"
+        sudo -n setfacl -R -d -m "$_acl" -- "$wt_path" \
+          || die "wt-new: setfacl default ACL failed"
       fi
       emit_subtask "$2" building 2
     else

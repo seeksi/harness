@@ -336,6 +336,61 @@ describe("startRun — multi-lane concurrency + serial git", () => {
     }
   });
 
+  it("(b) assigns a DISTINCT OS user per lane: lane 0 → agent, lane 1 → agent-1, … (chown + sudo -u target)", async () => {
+    // laneUser reads AGENT_USER at module load, so stub it and re-import daemon fresh.
+    const prevUser = process.env.AGENT_USER;
+    const prevConc = process.env.LANE_CONCURRENCY;
+    process.env.AGENT_USER = "agent";
+    process.env.LANE_CONCURRENCY = "3";
+    vi.resetModules();
+    const { startRun: freshStart } = await import("./daemon");
+    const { subscribe: freshSub, onDone: freshDone } = await import("./broker");
+    const { resetDb: freshResetDb, getSnapshot: freshSnapshot } = await import("@/lib/store/persist");
+    const { _resetRegistry: freshResetReg } = await import("./registry");
+    freshResetDb(":memory:");
+    freshResetReg();
+    try {
+      const { fn: spawnFn, calls } = harnessFake(0);
+      const agentUsers: (string | undefined)[] = [];
+      const runAgent = vi.fn(async (spec: { slug: string; user?: string }) => {
+        agentUsers.push(spec.user);
+        return { code: 0, sessionId: `sess-${spec.slug}` };
+      });
+      await new Promise<void>((resolve) => {
+        const unsub = freshSub("run-users", () => {});
+        freshDone("run-users", () => {
+          unsub();
+          resolve();
+        });
+        freshStart("run-users", "x", {
+          live: true,
+          plan: threePlan,
+          spawnFn,
+          runAgent: runAgent as never,
+          writePlan: () => {},
+          relocate: () => true,
+        });
+      });
+
+      // The agent ran as the per-lane user, in lane order.
+      expect(agentUsers).toEqual(["agent", "agent-1", "agent-2"]);
+      // wt-new chowns to the SAME per-lane user (3rd argv element), in lane order.
+      const wtNewArgs = calls.filter((c) => c[0] === "wt-new");
+      expect(wtNewArgs).toEqual([
+        ["wt-new", "lane-a", "agent"],
+        ["wt-new", "lane-b", "agent-1"],
+        ["wt-new", "lane-c", "agent-2"],
+      ]);
+      expect(freshSnapshot("run-users")?.task.state).toBe("done");
+    } finally {
+      if (prevUser === undefined) delete process.env.AGENT_USER;
+      else process.env.AGENT_USER = prevUser;
+      if (prevConc === undefined) delete process.env.LANE_CONCURRENCY;
+      else process.env.LANE_CONCURRENCY = prevConc;
+      vi.resetModules();
+    }
+  });
+
   it("(c) one lane's agent failing (non-zero) BLOCKS the whole run BEFORE any integ-merge", async () => {
     const { fn: spawnFn, calls } = harnessFake(0);
     // lane-b's agent exits non-zero; the others succeed.
