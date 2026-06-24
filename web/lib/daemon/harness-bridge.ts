@@ -1,33 +1,158 @@
 // web/lib/daemon/harness-bridge.ts
-// Stub: maps harness.sh subcommand stdout → SSEEvent[]
+// Secure bridge from harness.sh subcommands → SSEEvents. The security-critical
+// core is buildArgs: it maps a typed, server-constructed HarnessSubcommand to a
+// fixed argv built ONLY from validated enums/patterns — NEVER raw client strings
+// as paths, branches, slugs, or shell fragments (harness.sh interpolates $2
+// unsanitized). spawnHarness runs with shell:false so the argv is never
+// re-parsed by a shell.
 //
-// ponytail: real implementation — each subcommand emits line-delimited JSON on
-// stdout; this module spawns the subcommand via child_process.spawn, reads lines,
-// and maps them to SSEEvents as follows:
-//
-//   budget <plan.jsonl>  → "gate" A event (exit 0 = clear, exit 1 = raised)
-//   wt-new <slug>        → "phase" + "subtask" events (pending → building)
-//   integ-start          → "phase" 5 active event
-//   integ-merge <slug>   → "subtask" merged or "gate" C (conflict) event
-//   trace <session>      → "gate" D event (LOOP/EXPLOSION/THRASH anomaly flags)
-//   promote              → "phase" 6 done + "approval" approved event (preview only)
-//
-// Security: subcommand args are ALWAYS built from validated server-side enums
-// (slug ∈ NOTES.md allowlist, session id validated to hex/alphanum) — never from
-// raw client strings. The mapping lives entirely in this module; routes only call
-// typed functions exported here.
+// NOT wired into the daemon's default path: the dry-run fixture remains the
+// producer. Enabling real execution needs (a) harness.sh emitting line-delimited
+// JSON events (parseHarnessLine consumes that contract; human text is ignored),
+// and (b) the locked threat model — promote stays preview-only until it passes.
+
+import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildProcess } from "child_process";
+import { createInterface } from "readline";
+import type { SSEEvent } from "@/lib/contract/events";
 
 export type HarnessSubcommand =
-  | { cmd: "budget"; planPath: string }
+  | { cmd: "budget"; planFile: string }
   | { cmd: "wt-new"; slug: string }
   | { cmd: "integ-start" }
   | { cmd: "integ-merge"; slug: string }
   | { cmd: "trace"; session: string }
   | { cmd: "promote" };
 
-// ponytail: add when real harness.sh spawning replaces the dry-run fixture.
-// upgrade path: import { spawn } from "child_process"; build args from HarnessSubcommand;
-// readline the stdout; parse JSON lines → SSEEvent[]; reject any unrecognized line.
-export function buildArgs(_sub: HarnessSubcommand): string[] {
-  throw new Error("harness-bridge: real spawn not implemented in this increment (dry-run only)");
+export class HarnessArgError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "HarnessArgError";
+  }
+}
+
+// Strict validators — anything outside these patterns is rejected outright.
+const SLUG = /^[a-z][a-z0-9-]{0,30}$/; // worktree/lane slug: lowercase, no separators
+const SESSION = /^[A-Za-z0-9_-]{1,64}$/; // trace session id: hex/alphanum
+const PLAN_FILE = /^[A-Za-z0-9._-]+$/; // bare filename only — no path separators, no ..
+
+function check(pattern: RegExp, value: string, what: string): string {
+  if (typeof value !== "string" || !pattern.test(value) || value.includes("..")) {
+    throw new HarnessArgError(`invalid ${what}: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+/**
+ * Build the exact argv for harness.sh from a validated subcommand. Throws
+ * HarnessArgError on any value that isn't a clean enum/pattern match. The result
+ * is passed to spawn with shell:false, so no value is ever shell-interpreted.
+ */
+export function buildArgs(sub: HarnessSubcommand): string[] {
+  switch (sub.cmd) {
+    case "budget":
+      return ["budget", check(PLAN_FILE, sub.planFile, "plan file")];
+    case "wt-new":
+      return ["wt-new", check(SLUG, sub.slug, "slug")];
+    case "integ-start":
+      return ["integ-start"];
+    case "integ-merge":
+      return ["integ-merge", check(SLUG, sub.slug, "slug")];
+    case "trace":
+      return ["trace", check(SESSION, sub.session, "session")];
+    case "promote":
+      return ["promote"];
+    default: {
+      // exhaustiveness guard
+      const _never: never = sub;
+      throw new HarnessArgError(`unknown subcommand: ${JSON.stringify(_never)}`);
+    }
+  }
+}
+
+const KNOWN_EVENT_TYPES = new Set([
+  "phase",
+  "subtask",
+  "gate",
+  "agentFire",
+  "trace",
+  "budget",
+  "approval",
+  "hello",
+]);
+
+/**
+ * Parse one stdout line into an SSEEvent. Expects line-delimited JSON (the
+ * harness.sh event contract); any non-JSON line or unknown `type` is ignored
+ * (returns null) so human-readable output never leaks to the client and unknown
+ * shapes can't be injected.
+ */
+export function parseHarnessLine(line: string): SSEEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as { type?: unknown }).type !== "string" ||
+    !KNOWN_EVENT_TYPES.has((parsed as { type: string }).type)
+  ) {
+    return null;
+  }
+  return parsed as SSEEvent;
+}
+
+export interface SpawnHarnessOptions {
+  scriptPath?: string;
+  cwd?: string;
+  /** Injectable for tests; defaults to child_process.spawn. */
+  spawnFn?: (cmd: string, args: string[], options: NodeSpawnOptions) => ChildProcess;
+}
+
+const DEFAULT_SCRIPT = process.env.HARNESS_SCRIPT_PATH ?? "../.claude/skills/harness/harness.sh";
+
+/**
+ * Spawn a harness.sh subcommand and stream its structured stdout to onEvent.
+ * shell:false + validated argv = no shell interpretation of any value. Raw output
+ * is never forwarded — only events that pass parseHarnessLine. Resolves with the
+ * exit code.
+ */
+export function spawnHarness(
+  sub: HarnessSubcommand,
+  onEvent: (event: SSEEvent) => void,
+  opts: SpawnHarnessOptions = {}
+): Promise<{ code: number | null }> {
+  return new Promise((resolve, reject) => {
+    let args: string[];
+    try {
+      args = buildArgs(sub); // validates BEFORE spawning; bad input → reject, never spawn
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const script = opts.scriptPath ?? DEFAULT_SCRIPT;
+    const spawnFn = opts.spawnFn ?? nodeSpawn;
+    const child = spawnFn(script, args, {
+      cwd: opts.cwd ?? process.env.HARNESS_REPO ?? process.cwd(),
+      shell: false, // CRITICAL: never let a shell re-parse the argv
+    });
+    if (!child.stdout) {
+      reject(new Error("harness spawn produced no stdout"));
+      return;
+    }
+    const rl = createInterface({ input: child.stdout });
+    rl.on("line", (line) => {
+      const event = parseHarnessLine(line);
+      if (event) onEvent(event);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      rl.close();
+      resolve({ code });
+    });
+  });
 }
