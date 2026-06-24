@@ -22,6 +22,7 @@ import { appendAudit } from "@/lib/store/persist";
 export type HarnessSubcommand =
   | { cmd: "budget"; planFile: string }
   | { cmd: "wt-new"; slug: string }
+  | { cmd: "wt-commit"; slug: string }
   | { cmd: "wt-verify"; slug: string }
   | { cmd: "integ-start" }
   | { cmd: "integ-merge"; slug: string }
@@ -92,6 +93,8 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
       return ["budget", containedPlanFile(requirePlanFile(sub.planFile))];
     case "wt-new":
       return ["wt-new", requireLane(sub.slug)];
+    case "wt-commit":
+      return ["wt-commit", requireLane(sub.slug)];
     case "wt-verify":
       return ["wt-verify", requireLane(sub.slug)];
     case "integ-start":

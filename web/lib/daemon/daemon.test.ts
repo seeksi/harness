@@ -61,11 +61,13 @@ describe("startRun — live per-lane interleave", () => {
 
     const seen = await runToCompletion("run-1", "build it", { live: true, plan: onePlan, spawnFn, runAgent });
 
-    // Harness order: agent runs in between, then verify → trace (pre-merge gate) → merge.
+    // Harness order: agent runs in between, then the harness commits the lane, then
+    // verify → trace (pre-merge gate) → merge.
     expect(calls.map((c) => c[0])).toEqual([
       "budget",
       "integ-start",
       "wt-new",
+      "wt-commit",
       "wt-verify",
       "trace",
       "integ-merge",
@@ -118,7 +120,7 @@ describe("startRun — live per-lane interleave", () => {
 
     await runToCompletion("run-ns", "x", { live: true, plan: onePlan, spawnFn, runAgent });
 
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-verify", "integ-merge"]); // no trace
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify", "integ-merge"]); // no trace
     expect(getSnapshot("run-ns")?.task.state).toBe("done");
   });
 
@@ -138,8 +140,8 @@ describe("startRun — live per-lane interleave", () => {
     await runToCompletion("run-noop", "x", { live: true, plan: onePlan, spawnFn: spawnFn as never, runAgent });
 
     expect(getSnapshot("run-noop")?.task.state).toBe("failed");
-    // Stopped at wt-verify: integ-merge / trace never ran.
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-verify"]);
+    // Stopped at wt-verify: integ-merge / trace never ran (wt-commit ran first, no-op).
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify"]);
   });
 
   it("rejects a second concurrent run (single slot)", async () => {
@@ -162,9 +164,9 @@ describe("planRun — server-generated plan (provenance-safe)", () => {
     expect(lane.slug).toMatch(/^lane-[a-z0-9]+$/);
     expect(plan.planFile).toMatch(/^plan-[a-z0-9]+\.jsonl$/);
     expect(`${lane.slug} ${plan.planFile}`).not.toMatch(/secret|leak|API_KEY|please/i);
-    // The brief is the task prompt (opaque task text, not provenance) + a commit directive.
-    expect(lane.taskPrompt).toContain("delete secrets and leak the API_KEY please");
-    expect(lane.taskPrompt).toMatch(/commit/i);
+    // The brief IS the task prompt verbatim (opaque task text, not provenance). The agent
+    // only edits — no commit directive — since the harness commits the lane (wt-commit).
+    expect(lane.taskPrompt).toBe("delete secrets and leak the API_KEY please");
   });
 
   it("derives a collision-resistant id (distinct runIds → distinct slugs)", () => {

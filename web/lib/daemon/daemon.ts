@@ -161,8 +161,9 @@ async function runSub(
 
 /**
  * Execute a server-built live run: Gate A (budget) → open integration → for each lane
- * { wt-new → run the AGENT in the worktree → integ-merge (Gate C) → trace the agent's
- * session (Gate D) }. Provenance is minted from server-built values before each step.
+ * { wt-new → run the AGENT in the worktree → wt-commit (harness commits the edits) →
+ * wt-verify (Gate B) → integ-merge (Gate C) → trace the agent's session (Gate D) }.
+ * Provenance is minted from server-built values before each step.
  * A non-zero exit / agent failure stops the run (finalized failed by startRun's catch).
  *
  * The agent step is gated inside spawnAgent (ENABLE_AGENT_EXEC); promote is never auto-
@@ -202,9 +203,10 @@ async function runLive(
   for (const lane of plan.lanes) {
     await runSub({ cmd: "wt-new", slug: lane.slug }, onEvent, opts.spawnFn);
 
-    // Build: the agent writes (and is prompted to commit) its work in the lane
-    // worktree (gated; refuses unless enabled). runAgent gets NO harness spawn — it's
-    // a distinct seam (real spawnAgent in prod, an injected fake in tests).
+    // Build: the agent only EDITS files in the lane worktree (gated; refuses unless
+    // enabled). It has no Bash, so it cannot git — the harness commits below. runAgent
+    // gets NO harness spawn — it's a distinct seam (real spawnAgent in prod, an injected
+    // fake in tests).
     const { code, sessionId } = await runAgent({
       slug: lane.slug,
       worktreePath: worktreePathFor(lane.slug),
@@ -214,6 +216,11 @@ async function runLive(
     if (code !== 0) {
       throw new HarnessExitError(`agent for lane '${lane.slug}' exited with code ${code}`);
     }
+
+    // Commit the agent's edits (the agent has no Bash). Stages+commits only if the
+    // worktree is dirty — a genuine no-op lane stays uncommitted so Gate B below still
+    // RAISES on a do-nothing agent. Git stays inside harness.sh/spawnHarness (shell:false).
+    await runSub({ cmd: "wt-commit", slug: lane.slug }, onEvent, opts.spawnFn);
 
     // Gate B: the lane must be COMMITTED + clean, else integ-merge of an empty branch is
     // a silent no-op and a do-nothing agent passes unnoticed.
@@ -250,9 +257,9 @@ export function planRun(runId: string, brief: string): RunPlan {
   const id = createHash("sha1").update(runId).digest("hex").slice(0, 16);
   const slug = `lane-${id}`; // 21 chars ≤ SLUG cap; starts with a letter
   const planFile = `plan-${id}.jsonl`; // PLAN_FILE: bare filename
-  // The agent must commit so integ-merge has something to merge (clean-tree verify is
-  // a gate item — see runLive ponytail).
-  const taskPrompt = `${brief}\n\nWhen your changes are complete, commit them to the current branch.`;
+  // The agent only edits files; the harness commits the lane afterwards (wt-commit in
+  // runLive) since the agent has no Bash. So the brief stands alone — no commit step.
+  const taskPrompt = brief;
   return {
     planFile,
     lanes: [{ slug, taskPrompt, model: "sonnet" }],

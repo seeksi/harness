@@ -18,6 +18,7 @@
 # Usage:
 #   harness.sh budget <plan.jsonl>   Gate A: price the routed batch (exit 1 if over ceiling)
 #   harness.sh wt-new <slug>         create feat/<slug> worktree off the base
+#   harness.sh wt-commit <slug>      stage+commit the lane worktree IF dirty (no-op stays uncommitted)
 #   harness.sh wt-verify <slug>      Gate B: feat/<slug> committed + worktree clean (exit 1 if a no-op agent)
 #   harness.sh integ-start           create the integration branch off the base
 #   harness.sh integ-merge <slug>    merge feat/<slug> into integration (--no-ff)
@@ -99,6 +100,91 @@ case "$cmd" in
       emit_phase 2 blocked
       exit "$rc"
     fi
+    ;;
+  wt-commit)
+    # The harness (NOT the agent — it has no Bash) commits the lane after the agent edits.
+    # The agent has Write/Edit INSIDE the worktree, so everything here is adversarial-input
+    # hardened: the target worktree+branch are validated from the TRUSTED main repo before
+    # any stage, and the commit pins identity/hooks/signing so it can't be steered or fail
+    # on a bare prod host. Commit ONLY if the index differs from HEAD: a genuine no-op lane
+    # stays uncommitted so Gate B (wt-verify) still RAISES on a do-nothing agent.
+    # [#env leak] Drop ambient GIT_* that could redirect any git below to an agent- or
+    # caller-chosen dir/config/index. Done FIRST, before any git op in this case. The
+    # per-commit GIT_AUTHOR_*/COMMITTER_* are set inline later, not here.
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG \
+      GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM 2>/dev/null || true
+    slug=${2:-}
+    [ -n "$slug" ] || die "wt-commit needs a <slug>"
+    case "$slug" in *[!a-zA-Z0-9_-]*) die "wt-commit: slug must be [a-zA-Z0-9_-]";; esac
+    emit_phase 2 active
+    repo_root=$(git rev-parse --show-toplevel)
+    wt_path="$(cd "$repo_root/.." && pwd)/$(basename "$repo_root").worktrees/$slug"
+    [ -d "$wt_path" ] || die "wt-commit: lane worktree missing for feat/$slug"
+    # [#1 .git repoint — belt] Validate from the TRUSTED main repo that $wt_path is the
+    # registered worktree for refs/heads/feat/$slug. `git worktree list --porcelain` emits
+    # blank-line-separated records of "worktree <path>" + "branch <ref>"; BOTH must match.
+    if ! git -C "$repo_root" worktree list --porcelain | awk -v p="$wt_path" -v b="refs/heads/feat/$slug" '
+        /^worktree /{w=substr($0,10)} /^branch /{br=substr($0,8)}
+        /^$/{if(w==p&&br==b)found=1; w="";br=""}
+        END{if(w==p&&br==b)found=1; exit found?0:1}'; then
+      die "wt-commit: $wt_path is not the registered worktree for feat/$slug (possible .git repoint)"
+    fi
+    # [#1 .git repoint — braces, the real close] NEVER trust $wt_path/.git (the agent has
+    # Write in the worktree and can repoint that file via TOCTOU). Derive the TRUSTED linked
+    # gitdir from the main repo's admin dirs, which live under the main .git (deploy-owned,
+    # agent can't write). Each $common/worktrees/<id>/gitdir contains the absolute path of
+    # the worktree's .git file; match it to OUR $wt_path/.git to find OUR admin dir. Then
+    # pin --git-dir/--work-tree on EVERY worktree git op so $wt_path/.git is never read.
+    # --path-format=absolute so this is independent of the caller's cwd (a bare
+    # --git-common-dir can return a relative ".git" that resolves against $PWD, not $repo_root).
+    common=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)
+    trusted_gitdir=""
+    for d in "$common"/worktrees/*/; do
+      [ -f "$d/gitdir" ] || continue
+      if [ "$(cat "$d/gitdir")" = "$wt_path/.git" ]; then trusted_gitdir="${d%/}"; break; fi
+    done
+    [ -n "$trusted_gitdir" ] || die "wt-commit: no registered gitdir for $wt_path"
+    # wtgit: run a git command against the TRUSTED admin gitdir + the worktree files,
+    # ignoring $wt_path/.git entirely (no TOCTOU on the agent-writable pointer).
+    wtgit() { git --git-dir="$trusted_gitdir" --work-tree="$wt_path" "$@"; }
+    # [#2 branch] HEAD (read from the trusted gitdir) must be exactly feat/$slug — rejects
+    # detached or wrong-branch state. symbolic-ref fails on detached HEAD, so guard it.
+    cur_branch=$(wtgit symbolic-ref --short HEAD 2>/dev/null || echo "")
+    [ "$cur_branch" = "feat/$slug" ] || die "wt-commit: worktree HEAD is '$cur_branch', expected feat/$slug"
+    # [#4 ignore/secret leak] The agent could have edited .gitignore to un-ignore secrets
+    # (e.g. .claude/traces/ prompts+contents). Restore the canonical ignore from the
+    # committed tree (so an ignored trace dir is honored), stage everything, then as a belt
+    # for repos that DON'T ignore traces, drop any staged trace path from the index. (A
+    # `:(exclude)` pathspec can't be used here: git hard-errors rc=1 when the excluded path
+    # is also gitignored — the two-step add+reset is robust in BOTH cases.)
+    wtgit checkout -- .gitignore 2>/dev/null || true
+    wtgit add -A
+    wtgit reset -q -- .claude/traces 2>/dev/null || true
+    # [#5 diff exit code] --cached --quiet: 0=no change (no-op), 1=staged changes (commit),
+    # >1=git error (must NOT be treated as "commit"). Capture rc explicitly.
+    rc=0; wtgit diff --cached --quiet || rc=$?
+    case "$rc" in
+      0) emit_subtask "$slug" building 2 ;;  # nothing staged → leave lane as-is for Gate B
+      1)
+        # [#3 identity/hooks/signing] Pin author identity (the prod `deploy` user may have
+        # no global user.name/email), disable signing, point hooksPath at /dev/null, and
+        # --no-verify so an inherited core.hooksPath / commit hook can't run or mutate the
+        # commit. Set identity via GIT_*_NAME/EMAIL env (not just -c user.*) because an
+        # empty inherited GIT_AUTHOR_NAME would otherwise override config and trip "empty
+        # ident name". Scoped to this one git call only.
+        GIT_AUTHOR_NAME="umbrella-harness" GIT_AUTHOR_EMAIL="harness@umbrella.local" \
+        GIT_COMMITTER_NAME="umbrella-harness" GIT_COMMITTER_EMAIL="harness@umbrella.local" \
+        wtgit \
+          -c user.name="umbrella-harness" \
+          -c user.email="harness@umbrella.local" \
+          -c commit.gpgsign=false \
+          -c core.hooksPath=/dev/null \
+          commit --no-verify -q -m "lane $slug: agent build" >&2
+        emit_subtask "$slug" building 2
+        ;;
+      *) die "wt-commit: git diff failed (rc=$rc)" ;;
+    esac
     ;;
   wt-verify)
     # Gate B: a lane must be COMMITTED before it can merge — otherwise integ-merge of
@@ -186,7 +272,7 @@ case "$cmd" in
     git branch -d integration 2>/dev/null && echo "deleted integration" >&2 || true
     ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | clean}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | clean}" >&2
     exit 2
     ;;
 esac
