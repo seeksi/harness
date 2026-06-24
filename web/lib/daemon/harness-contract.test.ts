@@ -318,6 +318,52 @@ describe("harness.sh → parseHarnessLine contract", () => {
     ).toBe("main");
   });
 
+  it("promote: from HEAD on base, switches to integration, fast-forwards, cleans up, leaving the next run startable", () => {
+    // Build a real lane merged into integration via the harness itself, then simulate the
+    // post-reset-base state (HEAD on base) and promote. Promote must switch to integration,
+    // ff base, delete integration + lane worktree, and leave the repo startable again.
+    const repo = newRepo();
+    harness(repo, ["wt-new", "lane"]); // feat/lane worktree off main
+    const wt = wtPath(repo, "lane");
+    writeFileSync(path.join(wt, "x.txt"), "lane work\n");
+    git(wt, ["add", "x.txt"]);
+    git(wt, ["commit", "-q", "-m", "lane work"]);
+    harness(repo, ["integ-start"]); // creates integration off main
+    harness(repo, ["integ-merge", "lane"]); // merges feat/lane into integration
+
+    const integTip = execFileSync("git", ["rev-parse", "integration"], { cwd: repo, encoding: "utf8" }).trim();
+
+    // Simulate post-reset-base: HEAD returned to base before the operator runs promote.
+    git(repo, ["switch", "--no-guess", "main"]);
+    expect(
+      execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim()
+    ).toBe("main");
+
+    const out = harness(repo, ["promote"]);
+    assertAllValidEvents(out);
+
+    // HEAD on base, base == old integration tip, integration branch deleted.
+    expect(
+      execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim()
+    ).toBe("main");
+    expect(execFileSync("git", ["rev-parse", "main"], { cwd: repo, encoding: "utf8" }).trim()).toBe(integTip);
+    expect(
+      execFileSync("git", ["branch", "--list", "integration"], { cwd: repo, encoding: "utf8" }).trim()
+    ).toBe("");
+
+    // The next run must be able to start: integ-start no longer dies "already exists".
+    expect(() => harness(repo, ["integ-start"])).not.toThrow();
+  });
+
+  it("promote: with no integration branch dies non-zero and does not mutate base", () => {
+    const repo = newRepo();
+    const baseBefore = execFileSync("git", ["rev-parse", "main"], { cwd: repo, encoding: "utf8" }).trim();
+
+    const { status } = harnessFails(repo, ["promote"]);
+    expect(status, "non-zero exit with no integration branch").toBeGreaterThan(0);
+    expect(execFileSync("git", ["rev-parse", "main"], { cwd: repo, encoding: "utf8" }).trim()).toBe(baseBefore);
+  });
+
   it("wt-verify: UNTRACKED (uncommitted) files raise Gate B even with prior commits", () => {
     const repo = newRepo();
     harness(repo, ["wt-new", "dirty"]);

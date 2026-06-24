@@ -278,17 +278,36 @@ case "$cmd" in
     fi
     ;;
   promote)
-    on_branch integration || die "promote must run on integration"
+    # promote is a manual operator command run after reset-base may have returned HEAD
+    # to BASE, so it must not assume it starts on integration — it switches there itself.
+    git show-ref --verify --quiet refs/heads/integration || die "no integration branch to promote"
+    git switch --no-guess integration >&2 || die "promote: could not switch to integration"
     tree_clean || die "integration tree is dirty — commit or stash first"
     git merge-base --is-ancestor "$BASE" integration || die "$BASE is not an ancestor of integration — not fast-forwardable"
     # NB: the approval event (promote-to-main awaiting→approved) is owned by the
     # control plane (the operator's human go), NOT this script — harness.sh must not
     # forge it. By the time promote runs, that gate has already passed upstream.
     emit_phase 6 active
-    if git checkout "$BASE" >&2 && git merge --ff-only integration >&2; then
+    # `git switch --no-guess "$BASE"` (NOT `checkout`): never DWIM-create or detach. If
+    # $BASE is missing the switch fails → the && short-circuits → else branch → integration
+    # is preserved and NOT cleaned. This matters because the cleanup below DELETES
+    # integration, so we must be certain base was actually advanced first.
+    if git switch --no-guess "$BASE" >&2 && git merge --ff-only integration >&2; then
       emit_agentfire promote promote low
       emit_phase 6 done
       echo "promoted integration -> $BASE (fast-forward)" >&2
+      # Tear down the now-merged lanes + integration so the next run's integ-start starts
+      # clean. HARD GUARD before anything destructive: we MUST be on $BASE and $BASE MUST
+      # contain integration's tip — else the ff didn't really land and deleting integration
+      # would lose work. Best-effort otherwise: a cleanup hiccup must NOT fail the
+      # already-succeeded promote (guards keep set -eu from tripping; the lane worktrees are
+      # disposable scratch — their commits are now in $BASE).
+      if on_branch "$BASE" && git merge-base --is-ancestor integration "$BASE"; then
+        sh "$WT" clean "$BASE" >&2 || echo "promote: post-promote worktree clean had issues (non-fatal)" >&2
+        git branch -d integration >/dev/null 2>&1 && echo "promote: deleted integration" >&2 || true
+      else
+        echo "promote: skipping cleanup — not safely on $BASE with integration merged" >&2
+      fi
     else
       rc=$?
       emit_phase 6 blocked
