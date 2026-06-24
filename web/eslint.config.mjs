@@ -62,10 +62,8 @@ export default [
       ],
     },
   },
-  // Tracked deferrals (NOT silent suppression). The scene increment (C11) replaces
-  // NodeGraph's read-snapshot-in-render with proper imperative mesh reconciliation;
   // HudShell's announcement effect intentionally diffs prev/next state to fire the
-  // aria-live messages screen readers depend on.
-  { files: ["scene/NodeGraph.tsx"], rules: { "react-hooks/refs": "off" } },
+  // aria-live messages screen readers depend on — a deliberate, documented pattern,
+  // not silent suppression.
   { files: ["hud/HudShell.tsx"], rules: { "react-hooks/set-state-in-effect": "off" } },
 ];
