@@ -10,6 +10,24 @@
 import nextCoreWebVitals from "eslint-config-next/core-web-vitals";
 import nextTypescript from "eslint-config-next/typescript";
 
+// T9 sink patterns. `**/lib/...` (not `@/lib/...`) so BOTH the path-alias form and a
+// relative `../../lib/...` import are caught; store-internal relative imports
+// (`./store`, `./raf-flush`) don't contain `lib/` so stay allowed.
+// Residual (accepted): specifier matching can't see dynamic import()/require(),
+// `.ts`-extension specifiers, or re-export laundering — eslint is a convention
+// tripwire here; the runtime controls (provenance/schema/credential gates) are the
+// actual security boundary.
+const STORE_IMPL = {
+  group: ["**/lib/store/store", "**/lib/store/raf-flush"],
+  message:
+    "Client store impl is allowlisted (T9): only runtime/useRunSession.ts (the composition root) may import it. Everyone else uses the interface in lib/contract/store.ts.",
+};
+const HARNESS_SPAWN = {
+  group: ["**/lib/daemon/harness-bridge"],
+  message:
+    "The harness spawn is allowlisted (T9): only lib/daemon/daemon.ts may import harness-bridge. Routes/UI never spawn directly.",
+};
+
 export default [
   { ignores: [".next/**", "node_modules/**", "next-env.d.ts", "eslint.config.mjs"] },
   ...nextCoreWebVitals,
@@ -23,6 +41,10 @@ export default [
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
       ],
+      // ALLOWLIST (threat model §7 / T9): default-deny BOTH sensitive sinks. Sanctioned
+      // files re-enable only their assigned sink in the override blocks below — a NEW
+      // module can't slip past an enumerated denylist because the default is deny.
+      "no-restricted-imports": ["error", { patterns: [STORE_IMPL, HARNESS_SPAWN] }],
       "import/no-restricted-paths": [
         "error",
         {
@@ -66,11 +88,25 @@ export default [
   // aria-live messages screen readers depend on — a deliberate, documented pattern,
   // not silent suppression.
   { files: ["hud/HudShell.tsx"], rules: { "react-hooks/set-state-in-effect": "off" } },
+  // T9 allowlist — each sanctioned file may import ONLY its assigned sink, so it
+  // still can't reach the other (per-sink, not a blanket rule-off):
+  //   • runtime/useRunSession.ts — composition root: may import the store impl;
+  //     the harness spawn stays banned.
+  //   • lib/daemon/daemon.ts — single producer: may import the spawn; the store
+  //     impl stays banned.
+  {
+    files: ["runtime/useRunSession.ts"],
+    rules: { "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN] }] },
+  },
+  {
+    files: ["lib/daemon/daemon.ts"],
+    rules: { "no-restricted-imports": ["error", { patterns: [STORE_IMPL] }] },
+  },
   // Test files legitimately wire across lane boundaries to construct scenarios
-  // (e.g. a scene test that creates a real store). The import-boundary enforces
-  // PRODUCTION lane isolation; production files remain checked.
+  // (e.g. a scene test that creates a real store, or a bridge spawn test). The
+  // boundaries enforce PRODUCTION isolation; production files remain checked.
   {
     files: ["**/*.test.{ts,tsx}", "**/__tests__/**"],
-    rules: { "import/no-restricted-paths": "off" },
+    rules: { "import/no-restricted-paths": "off", "no-restricted-imports": "off" },
   },
 ];

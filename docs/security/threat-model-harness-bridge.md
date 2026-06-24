@@ -78,7 +78,7 @@ must exist before live execution is enabled.
 | T6 | **Denial of service** — host hang / slot lockout | child fills stderr pipe; unbounded buffers; stuck slot; orphaned subprocess tree | **DONE** — stderr drained; SSE buffer bounded (`MAX_PENDING`); single-slot lock; `spawnHarness` deadline (`HARNESS_TIMEOUT_MS`, default 10 min) kills the whole **process group** (`detached` + `-pid`) SIGTERM→SIGKILL and settles only on `close` (slot held until the child truly exits → no overlap with the next run), rejecting `HarnessTimeoutError` so the daemon releases the slot + persists `failed` | Low | Done. |
 | T7 | **Repudiation** — no record of what ran | — | **DONE** — append-only `audit` table written on every `spawnHarness` settle (argv + outcome + ts + exit code). Mandatory (the SQLite write always runs; `onAudit` only observes). **Never stores stdout/stderr or the error message** — only the error CLASS name (+ safe errno), since the message can embed the rejected value | Low | Done. |
 | T8 | **SSRF** | client-supplied URL fetched server-side | none needed — no client input becomes an outbound URL | N/A | n/a |
-| T9 | **Elevation via boundary leak** — non-allowed code imports the store impl / bridge | a new module bypasses the eslint denylist | import-boundary zones (denylist) | Low | Tighten the eslint boundary to an **allowlist** so only sanctioned files import `lib/store` impl / harness-bridge spawn |
+| T9 | **Elevation via boundary leak** — non-allowed code imports the store impl / bridge | a new module bypasses the eslint denylist | **DONE** — `no-restricted-imports` default-denies the client store impl (`lib/store/{store,raf-flush}`) and the harness spawn (`lib/daemon/harness-bridge`) by `@/` specifier; only allowlisted files (`runtime/useRunSession.ts`, `lib/daemon/daemon.ts`) re-enable them, so a NEW module can't slip past an enumerated denylist. Lane B↔C isolation zones retained | Low | Done. |
 | T10 | **Supply chain** — `harness.sh` itself altered | local script tampered | trusted local code (TB-4) | Low | Out of scope here; covered by host integrity |
 
 ## 6. The `promote-to-main` deep-dive (T2, highest value)
@@ -105,7 +105,7 @@ remain the most guarded path:
 - [x] T5 — plan-file resolution constrained to a fixed allow-dir (`HARNESS_PLAN_DIR`, default `data/plans`) with a containment assertion (`containedPlanFile`); resolved to an absolute path that cannot escape the dir; unit-tested against traversal/absolute escapes.
 - [x] T6 — `spawnHarness` has a **timeout + kill** (deadline → SIGTERM → SIGKILL, rejects `HarnessTimeoutError`); a hung child releases the slot via the daemon's catch/finally. Default 10 min, override `HARNESS_TIMEOUT_MS`.
 - [x] T7 — **audit log** of every spawn (argv + outcome + ts + code, no secrets): append-only `audit` table in `persist.ts`, written by `spawnHarness` at every settle point (exit/timeout/error/refused/invalid-args), on by default.
-- [ ] T9 — eslint import-boundary converted to an **allowlist**.
+- [x] T9 — eslint import-boundary converted to an **allowlist** (`no-restricted-imports` default-deny on the store impl + harness spawn; only `runtime/useRunSession.ts` and `lib/daemon/daemon.ts` re-enabled). Verified a non-allowlisted importer errors.
 - [ ] TB-1 — Tailscale ACL reviewed; confirmed no public/LAN exposure.
 - [ ] `harness.sh` emits **line-delimited JSON events** (the contract `parseHarnessLine` consumes) — without this, live wiring has no structured channel.
 - [ ] This document reviewed and signed off (§8).
