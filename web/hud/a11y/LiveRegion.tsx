@@ -2,10 +2,10 @@
 // Two aria-live regions, decisively split:
 //   polite    → phase changes, gate raised (non-critical), subtask status
 //   assertive → ONLY severity:"critical" gate escalations (WCAG 2.1 guideline)
-// Never imports from scene/** (lint boundary enforced by .eslintrc.json).
+// Never imports from scene/** (lint boundary enforced by eslint.config.mjs).
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef } from "react";
 
 interface LiveRegionProps {
   /** Text announced to assistive technology. Changing this value triggers announcement. */

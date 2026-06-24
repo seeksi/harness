@@ -1,13 +1,13 @@
 // web/hud/HudShell.tsx — Lane C sole writer.
 // Minimal HUD container for the State Spine + Dry Run increment.
 // Mounts: DomMirror (accessible semantic projection) + HudLiveRegions (aria-live).
-// Does NOT import scene/** — lint boundary enforced by .eslintrc.json.
+// Does NOT import scene/** — lint boundary enforced by eslint.config.mjs.
 // Glass polish, ⌘K, inbox rail, trace drawer, toast → ponytail notes below.
 "use client";
 
-import { useMemo, useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect } from "react";
 import type { RunStore } from "@/lib/contract/store";
-import type { RunState, PhaseId, GateId, Severity } from "@/lib/contract/types";
+import type { RunState } from "@/lib/contract/types";
 import { useRunState } from "@/lib/store/useRunState";
 import { DomMirror } from "./a11y/DomMirror";
 import { HudLiveRegions } from "./a11y/LiveRegion";

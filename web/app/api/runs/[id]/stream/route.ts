@@ -6,7 +6,6 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import { reducer } from "@/lib/contract/events";
-import { initialRunState } from "@/lib/contract/types";
 import type { SSEEvent } from "@/lib/contract/events";
 import { dryRun } from "@/lib/contract/fixture";
 import { getSnapshot } from "@/lib/store/persist";

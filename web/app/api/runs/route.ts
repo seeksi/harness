@@ -19,7 +19,6 @@ function drainInBackground(handle: Awaited<ReturnType<typeof startRun>>): void {
   const { runId, events } = handle;
   activeHandle = { runId, gen: events };
   void (async () => {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     for await (const _ev of events) {
       // Persist is done inside the generator; nothing more needed here.
     }
