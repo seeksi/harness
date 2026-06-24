@@ -43,7 +43,7 @@ step() { echo; echo "=== $* ==="; }
 
 # Fail early if the artifacts aren't where we expect (e.g. repo not copied to the VPS).
 [ -d "$TIER3" ] || { echo "[provision] FATAL: $TIER3 not found — copy deploy/tier3 to the VPS first (RUNBOOK Prerequisites)" >&2; exit 1; }
-for f in 01-provision-agent-user.sh agent-exec-wrapper.sh sudoers.d-umbrella-agent \
+for f in 01-provision-agent-user.sh 01b-provision-lane-users.sh agent-exec-wrapper.sh sudoers.d-umbrella-agent \
          umbrella-agent.conf agent-egress.nft conformance.sh \
          egress-proxy/tinyproxy.conf egress-proxy/anthropic-allow.filter \
          egress-proxy/apparmor-local-tinyproxy egress-proxy/umbrella-egress-proxy.service; do
@@ -54,6 +54,13 @@ done
 # Delegate to the existing idempotent script rather than re-implement the user/linger/perms.
 step "Step 1 — agent user, HOME, worktrees, linger (G1)"
 bash "$TIER3/01-provision-agent-user.sh"
+
+# --- Step 1b — per-lane POOL users + acl pkg + ACL-mount assertion (G1, #17 17b) --------
+# Creates agent-1..agent-{MAX_LANES-1} (nologin, 0700 HOME, linger) and installs `acl` +
+# VERIFIES setfacl works on the worktrees FS (17a's wt-new dies without it). MAX_LANES is
+# parameterized (default 5). Idempotent; single-lane unaffected (lane 0 stays `agent`).
+step "Step 1b — lane pool users + acl package + ACL-mount check (#17 17b)"
+MAX_LANES="${MAX_LANES:-5}" bash "$TIER3/01b-provision-lane-users.sh"
 
 # --- Step 2 — install the wrapper root:root 0755 (G6) ----------------------------------
 step "Step 2 — install agent-exec-wrapper (root:root 0755, NOT agent-writable) (G6)"
@@ -131,8 +138,11 @@ if [ "$VERIFY" -eq 1 ]; then
   # do NOT claim success on a host where the sandbox doesn't actually hold.
   sudo bash "$TIER3/conformance.sh"
   say "CONFORMANCE PASSED — substrate isolation verified."
+  step "Verification — conformance-multilane.sh (per-lane isolation; #17 17b)"
+  MAX_LANES="${MAX_LANES:-5}" sudo -E bash "$TIER3/conformance-multilane.sh"
+  say "MULTI-LANE CONFORMANCE PASSED — per-lane ACL isolation verified."
 else
-  say "Run with --verify to execute conformance.sh now, or: sudo bash $TIER3/conformance.sh"
+  say "Run with --verify to execute conformance.sh + conformance-multilane.sh now, or run them directly."
 fi
 
 say "DONE."

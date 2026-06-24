@@ -61,6 +61,23 @@ sudo -u agent XDG_RUNTIME_DIR=/run/user/$(id -u agent) systemd-run --user --scop
   && echo "OK: agent can create a cgroup scope (G6)" || echo "BAD: no user scope — wrapper will refuse"
 ```
 
+### Step 1b — provision the lane POOL users  → G1 (#17 17b; needed ONLY for LANE_CONCURRENCY>1)
+```
+MAX_LANES=5 sudo -E bash /opt/umbrella/deploy/tier3/01b-provision-lane-users.sh
+```
+Creates `agent-1 .. agent-{MAX_LANES-1}` (system, nologin, 0700 HOME, linger), installs the
+`acl` package, and ASSERTS `setfacl` works on the worktrees filesystem (17a's `wt-new` FAILS
+CLOSED without it). Pool users own NO repo/worktrees — `wt-new` grants per-lane access via a
+POSIX ACL at runtime. Idempotent; single-lane (`agent` only) is unaffected. `provision.sh`
+runs this automatically as Step 1b.
+
+VERIFY:
+```
+for i in 1 2 3 4; do id agent-$i || echo "MISSING agent-$i"; \
+  stat -c "%U %a" /home/agent-$i; loginctl show-user agent-$i -p Linger; done
+setfacl -m u:agent-1:rwX /opt/umbrella.worktrees/.t 2>/dev/null && echo "OK: ACL FS" || echo "CHECK acl mount"
+```
+
 ### Step 2 — install the wrapper  → G6
 ```
 sudo install -m 0755 -o root -g root \
@@ -248,6 +265,54 @@ and the `tinyproxy-agent` user); `loginctl disable-linger agent`; and `userdel -
 (this deletes the Max-plan session — re-auth needed).
 
 ---
+
+## MULTI-LANE CUTOVER (#17 17c) — raise `LANE_CONCURRENCY` above 1
+
+Do this ONLY after the single-lane cutover above is validated AND the per-lane substrate is
+provisioned + conformant. Concurrent lanes are isolated by DISTINCT OS users (lane 0 =
+`agent`, lane i = `agent-i`); each runs the wrapper via its own sudo Runas entry, edits its
+own ACL-granted worktree, and uses its own private `~/.claude` session.
+
+1. **Provision the pool** (idempotent; `provision.sh` Step 1b does this, or run directly):
+   ```
+   MAX_LANES=5 sudo -E bash /opt/umbrella/deploy/tier3/01b-provision-lane-users.sh
+   ```
+2. **Bootstrap EACH pool user's Max-plan session** (per-user, interactive — like Step 5, but
+   for every lane). Each session is per-user and lands in that user's private 0700 HOME; no
+   token ever reaches env/script/git (G5 intact):
+   ```
+   for u in agent-1 agent-2 agent-3 agent-4; do
+     sudo -u "$u" -H HTTPS_PROXY=http://127.0.0.1:3128 /usr/local/bin/claude   # complete login
+   done
+   ```
+   (`agent` itself was bootstrapped in Step 5.) The sudoers Runas list already permits these.
+3. **Run multi-lane conformance** — MUST PASS or do not proceed:
+   ```
+   MAX_LANES=5 sudo -E bash /opt/umbrella/deploy/tier3/conformance-multilane.sh
+   ```
+   Proves: each pool user exists + non-root + 0700 HOME; and the CROSS-LANE ACL test —
+   `agent-1` can write its dir, `agent-2` canNOT read/traverse it, deploy can read both, and a
+   file `agent-1` CREATES is NOT readable by `agent-2` (the default-ACL leak is closed).
+4. **RAM bound — pick LANE_CONCURRENCY within the host's memory.** The per-lane cgroup scope
+   is PER-USER and does NOT aggregate across distinct uids (see GAPS.md G6-multilane), so the
+   real control is arithmetic:
+   ```
+   LANE_CONCURRENCY ≤ floor(1.6G / per-lane MemoryMax)
+   ```
+   The wrapper's per-lane `MemoryMax` default is **500M** ⇒ on the 2 GB host keep
+   **`LANE_CONCURRENCY ≤ 3`** (3 × 500M = 1.5G ≤ 1.6G, ~400M left for host+daemon). Lower the
+   per-lane cap (daemon `SANDBOX_MEM_MAX`) if you want more lanes.
+5. **Raise it** in the systemd drop-in, then reload:
+   ```
+   sudoedit /etc/systemd/system/umbrella.service.d/agent.conf   # add: Environment=LANE_CONCURRENCY=3
+   sudo systemctl daemon-reload && sudo systemctl restart umbrella
+   systemctl show umbrella -p Environment | grep LANE_CONCURRENCY
+   ```
+   Watch the FIRST concurrent multi-lane task closely; confirm `ps -eo user,cmd | grep claude`
+   shows distinct `agent`, `agent-1`, … uids and host RAM stays under the bound.
+
+ROLLBACK to sequential: remove the `LANE_CONCURRENCY` line (default is 1), daemon-reload +
+restart. The pool users / sudoers / ACLs can stay (inert at concurrency 1).
 
 ## Gate ID → step map
 

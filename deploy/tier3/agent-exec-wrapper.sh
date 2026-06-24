@@ -27,13 +27,32 @@ PROXY_URL="http://127.0.0.1:${PROXY_PORT}"
 # lib/sandbox `validateLimits` already shape-checks + bounds these (MemoryMax/CPUQuota
 # regex `^\d+[KMGT]?$|^\d+%$`, TasksMax/CPUSeconds positive ints) and they survive sudo
 # env_reset via the sudoers `env_keep`. So we TRUST the shape and only DEFAULT-when-empty
-# to the historical 2 GB-host values — but still quote them in every systemd-run/ulimit
-# arg (defence in depth; never let an unquoted value split an arg). An unset OR empty var
-# falls back to the default, so today's behavior is unchanged when the daemon sends none.
-MEM="${SANDBOX_MEM_MAX:-1500M}"
+# — but still quote them in every systemd-run/ulimit arg (defence in depth; never let an
+# unquoted value split an arg). An unset OR empty var falls back to the default, so the
+# daemon can override per-run while the fail-safe default is the multi-lane-safe value.
+#
+# RAM SAFETY (#17 17b): the per-lane MemoryMax default is 500M, NOT the old 1.5G. On a
+# 2 GB host the WORST CASE is LANE_CONCURRENCY concurrent agents each in their OWN per-USER
+# cgroup scope (different uids → different cgroup subtrees → the scopes do NOT aggregate;
+# see the harness.slice note at the bottom). So the only real aggregate control is
+# arithmetic:  LANE_CONCURRENCY × per-lane MemoryMax ≤ ~1.6G (leave ~400M for the host +
+# daemon). 500M × 3 lanes = 1.5G ≤ 1.6G. The operator MUST keep
+#   LANE_CONCURRENCY ≤ floor(1.6G / per-lane MemoryMax)   (= 3 at the 500M default)
+# This is documented in RUNBOOK.md (17c) and GAPS.md.
+MEM="${SANDBOX_MEM_MAX:-500M}"
 TASKS="${SANDBOX_TASKS_MAX:-256}"
 CPU_QUOTA="${SANDBOX_CPU_QUOTA:-180%}"
 CPU_SECONDS="${SANDBOX_CPU_SECONDS:-1500}"
+
+# Optional system-level ceiling slice. `harness.slice` (a system slice with MemoryMax=1600M,
+# installed by the 17b provisioner as a documented CEILING) is named here so the scope runs
+# UNDER it. HONEST CAVEAT: `systemd-run --user --scope --slice=` places the scope in the
+# invoking USER's slice subtree (user-<uid>.slice/…), so a slice referenced this way does
+# NOT aggregate memory across DIFFERENT users — it is a per-user ceiling, not a host-wide
+# one. We therefore do NOT rely on it for the cross-lane aggregate guarantee (the per-lane
+# cap × concurrency bound above is the real control). It is wired as best-effort belt for
+# the single-user (lane-0) case and as a forward hook. Unset HARNESS_SLICE to omit it.
+HARNESS_SLICE="${HARNESS_SLICE:-harness.slice}"
 
 # --- G4 egress: route all CLI HTTP(S) through the loopback FQDN proxy -----------------
 # The proxy holds the FQDN allowlist (api.anthropic.com …); nft prevents bypass.
@@ -77,19 +96,32 @@ if ! systemd-run --user --scope -q -- true >/dev/null 2>&1; then
   exit 78
 fi
 
+# Build the optional --slice arg only when HARNESS_SLICE is non-empty. Per-user scopes do
+# NOT aggregate across users (see note above), so this is a per-user ceiling/forward-hook,
+# not the cross-lane guarantee — the per-lane MemoryMax + LANE_CONCURRENCY bound is that.
+SLICE_ARG=()
+[ -n "$HARNESS_SLICE" ] && SLICE_ARG=(--slice="$HARNESS_SLICE")
+
 exec systemd-run --user --scope -q \
+  "${SLICE_ARG[@]}" \
   -p MemoryMax="$MEM" \
   -p MemorySwapMax=0 \
   -p TasksMax="$TASKS" \
   -p CPUQuota="$CPU_QUOTA" \
   -- "$REAL_CLAUDE" "$@"
 
-# ponytail: caps DEFAULT to the 2 GB host values (1.5 G mem, no swap, 256 tasks, 1.8 CPU)
-# and are overridden per-run by the validated SANDBOX_* env (lib/sandbox validateLimits).
-# Ceiling: one shared scope per invocation; concurrent lanes (none today — daemon is
-# single-slot) would each get their own scope but share host RAM. Upgrade path: a parent
-# slice (umbrella-agent.slice) with a host-wide MemoryMax so concurrent agents can't
-# collectively exhaust RAM.
+# ponytail: caps DEFAULT to the MULTI-LANE-SAFE 500M mem (no swap, 256 tasks, 1.8 CPU) and
+# are overridden per-run by the validated SANDBOX_* env (lib/sandbox validateLimits). The
+# real cross-lane RAM control is ARITHMETIC: LANE_CONCURRENCY × per-lane MemoryMax ≤ ~1.6G
+# (= 3 lanes at 500M on a 2 GB host), enforced by the operator bound, NOT by a slice.
+# Ceiling: `harness.slice` is wired (--slice=) but `systemd-run --user --scope` places the
+# scope in the INVOKING USER's slice subtree, so it does NOT aggregate across distinct lane
+# uids — it is a per-user ceiling/forward-hook only, not a host-wide guarantee. Upgrade
+# path for a true host-wide aggregate: run the scopes as SYSTEM scopes under one shared
+# system slice (needs a privileged transient-unit path, e.g. `systemd-run --scope
+# --slice=harness.slice` via a root helper), or move lanes into one container/pod with a
+# shared memory cgroup.
 #
 # skipped: seccomp/landlock FS pinning, add if worktree-confinement needs kernel enforcement.
-# skipped: parent slice host cap, add when >1 concurrent agent lane is introduced.
+# skipped: true host-wide aggregate RAM cap (system-slice scopes), add if the per-lane-cap ×
+#          concurrency-bound proves insufficient under real concurrent load.

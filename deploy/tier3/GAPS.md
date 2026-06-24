@@ -9,11 +9,13 @@ Legend: **covered** (artifact + verify) · **partial** (works, real ceiling) ·
 
 | §6 item | Status | Artifact | Residual risk |
 |---|---|---|---|
-| **G1** dedicated low-priv `agent` user, FS-confined to worktrees | covered | `01-provision-agent-user.sh`, `sudoers.d-umbrella-agent` | worktrees dir is shared `agent:deploy` (2775) — lanes are not isolated from each other or from deploy. Per-lane 0700 is the upgrade. |
+| **G1** dedicated low-priv `agent` user, FS-confined to worktrees | covered | `01-provision-agent-user.sh`, `sudoers.d-umbrella-agent` | single-lane: worktree is deploy-owned, ACL-granted to `agent`. |
+| **G1 multi-lane** per-lane uid isolation (#17 17b) | covered (17b) | `01b-provision-lane-users.sh` (pool `agent-1..N-1`), `sudoers.d-umbrella-agent` (Runas pool), 17a `wt-new` ACL, `conformance-multilane.sh` | each lane = distinct nologin uid + private 0700 HOME + its own ACL-granted worktree; cross-lane ACL isolation PROVEN by `conformance-multilane.sh` (sibling denied; agent-created file not sibling-readable — default-ACL leak closed). Residual: root can read all (single host). |
 | **G1/G9** tool allowlist (Bash off vs vetted command allowlist) | **OPEN** | code default `Read,Edit,Write,Grep,Glob` | **DECISION REQUIRED — see below.** Code ships no-Bash; whether the lane-builder can do real work without Bash is unproven. |
 | **G4** egress — agent reaches only Anthropic API | covered (council 2B: FQDN proxy) | `egress-proxy/` (tinyproxy unit + conf + filter) + `agent-egress.nft` backstop | proxy filters on the CONNECT host line, not TLS SNI (no MITM/cert check); a client lying about the host is still bounded because nft pins egress to the proxy and the proxy dials the real allowlisted name. Proxy uid holds broad egress to `*.anthropic.com`. |
 | **G5** session outside others-readable FS; absent from env/audit/browser | covered (code) + operator-action (login) | provision (HOME 0700), RUNBOOK Step 5/7 | session sits in `agent`'s own HOME; root can still read it (unavoidable on a single host). Login is manual by design. |
-| **G6** per-agent resource limits (cpu/mem/disk/pids) | covered (council 3B: cgroup scope) | `agent-exec-wrapper.sh` (systemd-run --user --scope MemoryMax/MemorySwapMax/TasksMax/CPUQuota) + ulimits + `AGENT_TIMEOUT_MS` | aggregate cap is per-INVOCATION scope; daemon is single-slot so one agent at a time, but concurrent lanes (future) would each get a scope and share host RAM — a parent slice is the upgrade. Fail-closed if the user scope is unavailable. |
+| **G6** per-agent resource limits (cpu/mem/disk/pids) | covered (council 3B: cgroup scope) | `agent-exec-wrapper.sh` (systemd-run --user --scope MemoryMax/MemorySwapMax/TasksMax/CPUQuota) + ulimits + `AGENT_TIMEOUT_MS` | per-INVOCATION scope. Per-lane MemoryMax default LOWERED to 500M (17b) so concurrency fits 2 GB. Fail-closed if the user scope is unavailable. |
+| **G6 multi-lane** aggregate RAM across concurrent lanes (#17 17b) | partial (arithmetic bound, NOT a slice) | `agent-exec-wrapper.sh` (500M default + `harness.slice` hook), RUNBOOK 17c | HONEST FINDING: `systemd-run --user --scope --slice=` places the scope in the INVOKING USER's slice subtree, so it does NOT aggregate memory across DISTINCT lane uids — a per-user `harness.slice` is a per-user ceiling/forward-hook, not a host-wide guarantee. The REAL control is arithmetic: `LANE_CONCURRENCY ≤ floor(1.6G / per-lane MemoryMax)` (= 3 at 500M on 2 GB), enforced by the operator bound. True host-wide aggregate needs SYSTEM-scope-under-one-slice (root helper) or a shared-cgroup container — deferred. |
 | **G6** trace gate (Gate D) wired | covered (code) | daemon `runLive` relocates trace + runs `trace` | none new — already authorized in code. |
 | **G7** trace collected into run record | covered (code) | `relocateTrace` (symlink/size-hardened) | none new. |
 | **G8** promote default-off + human diff review | covered | `umbrella-agent.conf` (flag commented), RUNBOOK cutover/rollback | relies on a human actually reading the diff; no automated poison-code detection beyond cross-review (Gate B). |
@@ -49,25 +51,26 @@ Option B once a curated git+test command allowlist is written and reviewed. Eith
 this is a code/config decision the operator must sign off — the draft cannot pick it
 unilaterally because it changes the daemon contract.
 
-### 2. Multi-lane concurrency (`LANE_CONCURRENCY > 1`) — gated on per-lane isolation
+### 2. Multi-lane concurrency (`LANE_CONCURRENCY > 1`) — per-lane isolation NOW LANDED (17a+17b)
 The daemon's build phase (`daemon.ts` `runLive`) can run N lane agents concurrently
-(capped by `LANE_CONCURRENCY`), but the prod **default is 1 (sequential)** and must stay
-there until per-lane isolation lands. Raising it above 1 on the current single-uid host is
-**BLOCKED by cross-review**: all lanes share one `agent` uid + one `~/.claude`
-session/cache (concurrent writers corrupt it), the same uid can write sibling worktrees
-(no lane-to-lane FS isolation — see G1), and N×MemoryMax (1500M) exceeds host RAM (the
-cgroup cap is per-invocation, not aggregate — see G6).
+(capped by `LANE_CONCURRENCY`); prod **default stays 1** until 17c validates on the host.
+The three cross-review BLOCKERS are now addressed:
+- **per-lane OS user + private HOME** — DONE (17b `01b-provision-lane-users.sh`: `agent-1..`
+  nologin users, 0700 HOME for an own `~/.claude`); lane-to-lane FS isolation via 17a's
+  per-lane ACL on a deploy-owned worktree (sibling denied, default-ACL leak closed) — PROVEN
+  by `conformance-multilane.sh`.
+- **aggregate RAM** — addressed by the per-lane MemoryMax default LOWERED to 500M + the
+  operator bound `LANE_CONCURRENCY ≤ floor(1.6G / per-lane MemoryMax)` (= 3 on 2 GB). Honest:
+  a per-user `harness.slice` does NOT give a host-wide aggregate (see G6-multilane row);
+  the arithmetic bound is the real control.
+- **tinyproxy `MaxClients`** — already `20` in `egress-proxy/tinyproxy.conf`, well above any
+  RAM-bounded `LANE_CONCURRENCY` (≤3) × a few connections each; no change needed. Revisit only
+  if the per-lane cap is dropped to allow many more lanes.
 
-`LANE_CONCURRENCY > 1` REQUIRES, before it is enabled:
-- a **per-lane OS user + HOME** (or a userns/landlock jail per lane) so each agent has its
-  own `~/.claude` session/cache and cannot write another lane's worktree;
-- a **parent `umbrella-agent.slice` aggregate cgroup cap** so N concurrent scopes share a
-  host-wide `MemoryMax` (N×per-lane MemoryMax must not exceed host RAM);
-- **raised tinyproxy `MaxClients`** so N simultaneous agents aren't throttled at the egress
-  proxy.
-
-Until then prod runs sequentially (default 1). The asyncPool + phased-merge machinery is
-correct and stays; only the default is constrained.
+17c (RUNBOOK "MULTI-LANE CUTOVER") is the remaining operator sequence: provision pool →
+bootstrap each user's Max-plan session → run `conformance-multilane.sh` → set
+`LANE_CONCURRENCY` within the RAM bound. The asyncPool + phased-merge machinery is correct
+and unchanged; only the prod default remains constrained until 17c validates.
 
 ## Resolved by council (this revision)
 
@@ -95,6 +98,5 @@ verified in RUNBOOK Step 2.
 - No containerization (operator already chose hardened-host in the threat model §107).
 - Nothing executed on the VPS; nothing committed.
 
-skipped: per-lane FS isolation (per-lane user+HOME / userns), add to unblock LANE_CONCURRENCY>1 (Decision 2).
 skipped: SNI-aware egress inspection, add if the allowlist must bind to TLS SNI not the CONNECT host.
-skipped: parent umbrella-agent.slice (host-wide MemoryMax) + raised tinyproxy MaxClients, add to unblock LANE_CONCURRENCY>1 (Decision 2).
+skipped: true host-wide aggregate RAM cap (system-scope under one slice / shared-cgroup container), add if the per-lane-cap × concurrency-bound proves insufficient under load.

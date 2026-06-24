@@ -9,12 +9,18 @@
 #   $ sudo visudo -cf /etc/sudoers.d/umbrella-agent     # must print: parsed OK
 #   (visudo -c checks the whole /etc/sudoers tree incl. this drop-in.)
 #
-# Contract from agent-bridge.ts buildInvocation:
-#   sudo -n -H -u agent -- /opt/umbrella/deploy/agent-exec-wrapper.sh <args...>
-#   -n  never prompt (fail closed)      -H  HOME from agent's passwd (its ~/.claude)
+# Contract from the sandbox buildInvocation (laneUser(i)):
+#   sudo -n -H -u agent[-i] -- /opt/umbrella/deploy/agent-exec-wrapper.sh <args...>
+#   -n  never prompt (fail closed)      -H  HOME from the lane user's passwd (its ~/.claude)
 # The Cmnd is the wrapper's ABSOLUTE path with NO args, so deploy may pass ANY args to
-# THIS ONE binary as agent — but cannot run anything else as agent, and cannot swap the
+# THIS ONE binary as a POOL user — but cannot run anything else as them, and cannot swap the
 # binary (agent-bridge pins AGENT_CLI_PATH; this rule pins the path sudo will accept).
+#
+# POOL (#17 17b): concurrent lanes run as DISTINCT uids — lane 0 = agent, lane i>0 = agent-i.
+# The Runas list below enumerates the pool (default MAX_LANES=5 → agent + agent-1..agent-4).
+# It is a CLOSED list (no wildcard): deploy may become ONLY these named users, nothing else.
+# If MAX_LANES is raised in 01b-provision-lane-users.sh, extend this list to match and re-run
+# `visudo -cf` (an agent-N with no Runas entry here would fail closed at the sudo call).
 
 # env_reset (sudo default) drops deploy's environment so no daemon env/secret reaches the
 # agent. secure_path is restricted to trusted system dirs for the agent command context.
@@ -29,8 +35,9 @@ Defaults!UMBRELLA_AGENT_EXEC env_keep += "SANDBOX_MEM_MAX SANDBOX_TASKS_MAX SAND
 # The single allowed command alias — exact absolute path, no wildcards.
 Cmnd_Alias UMBRELLA_AGENT_EXEC = /opt/umbrella/deploy/agent-exec-wrapper.sh
 
-# deploy may run that wrapper as agent only, password-less. NOTHING else is granted here.
-deploy ALL=(agent) NOPASSWD: UMBRELLA_AGENT_EXEC
+# deploy may run that wrapper as ANY pool user only, password-less. NOTHING else is granted.
+# Closed Runas list (MAX_LANES=5): agent + agent-1..agent-4. Extend if MAX_LANES grows.
+deploy ALL=(agent,agent-1,agent-2,agent-3,agent-4) NOPASSWD: UMBRELLA_AGENT_EXEC
 
 # ponytail: the rule trusts the wrapper file's integrity. Ceiling: if the wrapper were
 # agent-writable the agent could rewrite its own limits. Upgrade path: keep the wrapper
