@@ -25,6 +25,9 @@ import { onGateArrival } from "./sacred";
 import { InboxRail } from "./InboxRail";
 import { CommandPalette } from "./CommandPalette";
 import { TraceDrawer } from "./TraceDrawer";
+import { ToolRegistry } from "./ToolRegistry";
+import { MemoryGauge } from "./MemoryGauge";
+import { TaskLoop } from "./TaskLoop";
 import { Toast } from "./Toast";
 import { ApprovalStep } from "./ApprovalStep";
 import { glassSurface } from "./glass";
@@ -89,6 +92,10 @@ export function HudShell({ store }: HudShellProps) {
 
   const [openDetail, setOpenDetail] = useState<InboxItem | null>(null);
   const [traceOpen, setTraceOpen] = useState(false);
+  // Observability HUD panels — toggleable surfaces, default hidden (like the trace drawer).
+  const [registryOpen, setRegistryOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [taskLoopOpen, setTaskLoopOpen] = useState(false);
   const [toast, setToast] = useState<{ message: string; item: InboxItem | null } | null>(null);
 
   const inbox = useMemo(() => deriveInbox(state), [state]);
@@ -131,6 +138,9 @@ export function HudShell({ store }: HudShellProps) {
 
   const commands: Command[] = [
     { id: "trace", label: "Toggle trace drawer", hint: "logs", run: () => setTraceOpen((o) => !o) },
+    { id: "registry", label: "Toggle tool registry", hint: "tools · mcp", run: () => setRegistryOpen((o) => !o) },
+    { id: "memory", label: "Toggle memory gauge", hint: "context · cost", run: () => setMemoryOpen((o) => !o) },
+    { id: "taskloop", label: "Toggle task loop", hint: "now · planned", run: () => setTaskLoopOpen((o) => !o) },
     { id: "close-detail", label: "Close detail", run: () => setOpenDetail(null) },
   ];
 
@@ -147,6 +157,9 @@ export function HudShell({ store }: HudShellProps) {
       <InboxRail state={state} onSelect={setOpenDetail} />
       <CommandPalette commands={commands} />
       <TraceDrawer state={state} open={traceOpen} />
+      <ToolRegistry open={registryOpen} />
+      <MemoryGauge state={state} open={memoryOpen} />
+      <TaskLoop state={state} open={taskLoopOpen} />
       <Toast
         message={toast?.message ?? null}
         onAction={() => {
