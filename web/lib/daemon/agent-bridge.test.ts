@@ -1,5 +1,5 @@
 // web/lib/daemon/agent-bridge.test.ts
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
 import type { ChildProcess } from "child_process";
@@ -83,6 +83,52 @@ describe("relocateTrace", () => {
     mintSession("sess-none123");
     // No worktree/trace exists for this lane → existsSync is false → no copy, no throw.
     expect(relocateTrace("lane-x", "sess-none123")).toBe(false);
+  });
+});
+
+describe("buildInvocation — privilege drop (AGENT_USER)", () => {
+  // AGENT_USER is read at module load (a fixed boundary), so re-import with env set.
+  afterEach(() => vi.resetModules());
+
+  it("runs claude directly as the daemon user when AGENT_USER is unset (default)", async () => {
+    vi.resetModules();
+    const mod = await import("./agent-bridge");
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x"]);
+    expect(inv.cmd).toBe("/abs/claude");
+    expect(inv.argv).toEqual(["-p", "x"]);
+    expect(inv.spawnEnv).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  it("wraps in `sudo -n -H -u <user> -- <abs-claude> …` when AGENT_USER is set (claude is argv0)", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.stubEnv("AGENT_SUDO_PATH", "/usr/bin/sudo");
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-bridge");
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x", "--model", "sonnet"]);
+    expect(inv.cmd).toBe("/usr/bin/sudo");
+    // argv0 after `--` is the claude binary itself → sudoers can scope to exactly it.
+    expect(inv.argv).toEqual(["-n", "-H", "-u", "agent", "--", "/abs/claude", "-p", "x", "--model", "sonnet"]);
+    // sudo only needs PATH; no daemon env (and thus no secret) rides through spawnEnv.
+    expect(Object.keys(inv.spawnEnv)).toEqual(["PATH"]);
+    expect(inv.spawnEnv).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  it("rejects a non-username AGENT_USER (argv-injection guard)", async () => {
+    vi.stubEnv("AGENT_USER", "agent; rm -rf /");
+    vi.resetModules();
+    const mod = await import("./agent-bridge");
+    expect(() => mod.buildInvocation("/abs/claude", ["-p", "x"])).toThrow(mod.AgentExecError);
+  });
+
+  it("rejects root, the daemon's own user, and a relative cli (no real privilege drop / PATH hijack)", async () => {
+    const me = (await import("os")).userInfo().username;
+    for (const [user, cli] of [["root", "/abs/claude"], [me, "/abs/claude"], ["agent", "claude"]] as const) {
+      vi.stubEnv("AGENT_USER", user);
+      vi.resetModules();
+      const mod = await import("./agent-bridge");
+      expect(() => mod.buildInvocation(cli, ["-p", "x"]), `${user} ${cli}`).toThrow(mod.AgentExecError);
+    }
   });
 });
 

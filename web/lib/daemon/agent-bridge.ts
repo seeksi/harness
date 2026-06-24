@@ -13,6 +13,7 @@
 import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import { isLane, isSession } from "./registry";
 import { AgentExecError, HarnessTimeoutError } from "./errors";
 import { appendAudit } from "@/lib/store/persist";
@@ -184,6 +185,14 @@ const DEFAULT_AGENT_CLI = process.env.AGENT_CLI_PATH ?? "claude";
 const DEFAULT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS) || 1_800_000; // 30 min
 const DEFAULT_KILL_GRACE_MS = 5_000;
 
+// Privilege drop (threat model §6): when AGENT_USER is set, the agent is launched as
+// that dedicated low-priv OS account via `sudo -u` instead of the daemon's own user, so
+// a separate account whose only writable area is the worktrees dir is the real FS jail
+// (cwd alone is NOT). Unset ⇒ direct mode (daemon user) — allowed only OUTSIDE production.
+const AGENT_USER = process.env.AGENT_USER;
+const SUDO_PATH = process.env.AGENT_SUDO_PATH ?? "/usr/bin/sudo";
+const USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/; // POSIX-ish username, used in argv
+
 /**
  * Minimal env for the agent child — an explicit ALLOWLIST, never the server's full
  * process.env (which could carry tokens/secrets). No ANTHROPIC_API_KEY (Max-plan; the
@@ -196,6 +205,58 @@ function agentEnv(): NodeJS.ProcessEnv {
     LANG: process.env.LANG ?? "C.UTF-8",
   };
   return env as NodeJS.ProcessEnv;
+}
+
+/**
+ * Resolve the real (command, argv, spawn-env) for the agent.
+ *
+ * Direct mode (AGENT_USER unset): run `claude` as the daemon's own user. This keeps the
+ * daemon user's privileges, so it is REFUSED in production — §6 requires a dedicated
+ * account, and a silent privilege-keep would be a dangerous misconfig.
+ *
+ * Drop mode (AGENT_USER set): `sudo -n -H -u <user> -- <abs-claude> …`. `-n` never
+ * prompts (fail closed); argv0 is the claude binary itself (NOT an `env` wrapper) so the
+ * sudoers grant can be scoped to exactly that binary; `-H` sets HOME from the agent
+ * user's own passwd (its own ~/.claude Max-plan session); sudo's default env_reset drops
+ * the daemon's environment, and the spawn env we pass is minimal — so no daemon secret
+ * reaches the agent two ways over. shell:false still holds. The target must be a real,
+ * non-root account distinct from the daemon user, and the cli an absolute trusted path.
+ */
+export function buildInvocation(
+  cli: string,
+  claudeArgs: string[]
+): { cmd: string; argv: string[]; spawnEnv: NodeJS.ProcessEnv } {
+  if (!AGENT_USER) {
+    if (process.env.NODE_ENV === "production") {
+      throw new AgentExecError(
+        "AGENT_USER must be set in production: the agent requires a dedicated low-priv account (threat model §6)"
+      );
+    }
+    return { cmd: cli, argv: claudeArgs, spawnEnv: agentEnv() };
+  }
+  if (!USERNAME_RE.test(AGENT_USER)) {
+    throw new AgentExecError(`invalid AGENT_USER (must be a plain username): ${JSON.stringify(AGENT_USER)}`);
+  }
+  if (AGENT_USER === "root") {
+    throw new AgentExecError("AGENT_USER must not be root (a low-priv account is required)");
+  }
+  const daemonUser = os.userInfo().username;
+  if (AGENT_USER === daemonUser) {
+    throw new AgentExecError(`AGENT_USER must differ from the daemon user (${daemonUser}) — no privilege drop otherwise`);
+  }
+  if (!path.isAbsolute(SUDO_PATH)) {
+    throw new AgentExecError(`AGENT_SUDO_PATH must be an absolute path: ${JSON.stringify(SUDO_PATH)}`);
+  }
+  if (!path.isAbsolute(cli)) {
+    throw new AgentExecError("AGENT_CLI_PATH must be an absolute path when AGENT_USER is set (no PATH-based hijack)");
+  }
+  return {
+    cmd: SUDO_PATH,
+    argv: ["-n", "-H", "-u", AGENT_USER, "--", cli, ...claudeArgs],
+    // The child's env is set by sudo (env_reset + -H); node only needs PATH to exist for
+    // the (absolute) sudo invocation. No daemon env — and thus no secret — is forwarded.
+    spawnEnv: { PATH: process.env.AGENT_PATH ?? "/usr/local/bin:/usr/bin:/bin" } as unknown as NodeJS.ProcessEnv,
+  };
 }
 
 /**
@@ -245,15 +306,22 @@ export function spawnAgent(
       return;
     }
 
-    const cli = DEFAULT_AGENT_CLI;
+    let inv: ReturnType<typeof buildInvocation>;
+    try {
+      inv = buildInvocation(DEFAULT_AGENT_CLI, args); // drop to AGENT_USER via sudo if set
+    } catch (e) {
+      audit("invalid-args", null, null);
+      reject(e);
+      return;
+    }
     const spawnFn = opts.spawnFn ?? nodeSpawn;
     let child: ChildProcess;
     try {
-      child = spawnFn(cli, args, {
+      child = spawnFn(inv.cmd, inv.argv, {
         cwd, // confine the agent to the lane worktree
         shell: false, // CRITICAL: never let a shell re-parse the argv/prompt
         detached: true, // own process group → timeout can kill the whole tree
-        env: agentEnv(), // minimal allowlist env — no secrets reach the agent
+        env: inv.spawnEnv, // minimal allowlist env — no secrets reach the agent
       });
     } catch (e) {
       audit("error", null, null);

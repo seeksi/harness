@@ -79,12 +79,14 @@ exist before `ENABLE_AGENT_EXEC=1`.
 ## 6. Gate checklist — ALL required before `ENABLE_AGENT_EXEC=1`
 
 - [ ] G1 — agent runs as a **dedicated low-priv `agent` user** (not `deploy`/root), FS-confined to the worktrees dir.
+  - _Code: done._ `agent-bridge.buildInvocation` runs the agent via `sudo -n -H -u $AGENT_USER -- <abs claude>` when `AGENT_USER` is set (rejects root / the daemon user / a relative cli; refuses direct mode in production). _Deploy-time still required:_ create the `agent` user; a sudoers rule letting `deploy` run **only** that claude binary as `agent` NOPASSWD; `chown` the worktrees dir to `agent`; `AGENT_USER`/`AGENT_CLI_PATH` in the unit.
 - [ ] G1/G9 — Claude Code **tool allowlist** finalized; Bash only via a vetted command allowlist (or off).
 - [ ] G4 — **egress firewall**: the agent user can reach only the Anthropic API; all other outbound denied.
 - [ ] G5 — Max-plan **session credential** stored outside the agent's readable FS; verified absent from the agent env + audit + browser path.
+  - _Code: hardened._ sudo `env_reset` + minimal spawn env mean no daemon env reaches the agent; `-H` points HOME at the agent's own `~/.claude` session.
 - [ ] G6 — per-agent **resource limits** (cgroup/ulimit: cpu, mem, disk, pids) in addition to the spawn timeout.
-- [ ] G6 — `harness.sh trace` (Gate D) wired to the agent's worktree trace so loops are caught.
-- [ ] G7 — worktree trace collected into the run/audit record.
+- [x] G6 — `harness.sh trace` (Gate D) wired to the agent's worktree trace so loops are caught. _(daemon `runLive` relocates the worktree trace + runs Gate D before merge.)_
+- [x] G7 — worktree trace collected into the run/audit record. _(relocated to repo `.claude/traces`; symlink/size-hardened.)_
 - [ ] G8 — promote stays default-off + human diff review before any agent-built code reaches `main`.
 - [ ] Max-plan auth set up on the VPS (the agent authenticates via subscription, no API key).
 - [ ] This document reviewed and signed off (§7).
