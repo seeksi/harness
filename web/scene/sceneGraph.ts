@@ -10,8 +10,8 @@
 // graphify field, NO instancing layout, NO bloom/motion — those are later
 // increments (see ponytail notes at the bottom).
 
-import type { RunState, PhaseId, SubtaskStatus } from "@/lib/contract/types";
-import { selectActivePhase } from "@/lib/contract/selectors";
+import type { RunState, PhaseId } from "@/lib/contract/types";
+import { selectActivePhase, selectActiveSubtask } from "@/lib/contract/selectors";
 
 export interface SceneNode {
   id: string;
@@ -46,18 +46,6 @@ export interface SceneGraph {
 const PHASE_SPACING = 2;
 const SUBTASK_SPACING = 1.5;
 
-// "active" = the subtask currently being worked: the first one that is building,
-// else the first non-terminal one. Pure heuristic, deterministic over the array.
-const ACTIVE_ORDER: SubtaskStatus[] = ["building", "blocked", "reviewed", "pending"];
-
-function pickActiveSubtask(state: RunState): string | null {
-  for (const status of ACTIVE_ORDER) {
-    const hit = state.subtasks.find((s) => s.status === status);
-    if (hit) return hit.id;
-  }
-  return state.subtasks[0]?.id ?? null;
-}
-
 export function project_scene(state: RunState): SceneGraph {
   const raisedGateCount = state.gates.filter((g) => g.status === "raised").length;
   // Shared selector — same derivation the DOM mirror uses, so the two projections
@@ -65,7 +53,7 @@ export function project_scene(state: RunState): SceneGraph {
   const currentPhase = selectActivePhase(state);
   const currentPhaseLabel =
     state.phases.find((p) => p.id === currentPhase)?.label ?? String(currentPhase);
-  const activeSubtask = pickActiveSubtask(state);
+  const activeSubtask = selectActiveSubtask(state)?.id ?? null;
 
   const nodes: SceneNode[] = [];
   const edges: SceneEdge[] = [];

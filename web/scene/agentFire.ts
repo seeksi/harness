@@ -27,19 +27,38 @@ export interface FireDescriptor {
   peakOffsetMs: number;
 }
 
+// Fires whose firedAt fall within this window are treated as one co-fire batch.
+// The stagger applies WITHIN a batch; separate batches each start at offset 0 so a
+// lone later burst is never delayed by earlier (retained) fires.
+const CO_FIRE_WINDOW_S = 0.2;
+
 /**
- * Order co-fires by severity desc (then firedAt) and assign each a peak offset
- * coFireStaggerMs apart, so the highest-severity flare leads and co-fires stay
- * individually readable.
+ * Group fires into co-fire batches by firedAt proximity; within each batch order
+ * by severity desc (then firedAt) and assign peaks coFireStaggerMs apart, so the
+ * highest-severity flare leads and simultaneous flares stay individually readable.
  */
 export function staggerFires(events: AgentEvent[]): FireDescriptor[] {
-  const sorted = [...events].sort(
-    (a, b) => severityRank(b.severity) - severityRank(a.severity) || a.firedAt - b.firedAt
-  );
-  return sorted.map((e, i) => ({
-    id: e.id,
-    subtaskId: e.subtaskId,
-    severity: e.severity,
-    peakOffsetMs: i * MOTION.coFireStaggerMs,
-  }));
+  const byTime = [...events].sort((a, b) => a.firedAt - b.firedAt);
+  const out: FireDescriptor[] = [];
+
+  let i = 0;
+  while (i < byTime.length) {
+    const start = byTime[i].firedAt;
+    const batch: AgentEvent[] = [];
+    while (i < byTime.length && byTime[i].firedAt - start <= CO_FIRE_WINDOW_S) {
+      batch.push(byTime[i]);
+      i++;
+    }
+    batch
+      .sort((a, b) => severityRank(b.severity) - severityRank(a.severity) || a.firedAt - b.firedAt)
+      .forEach((e, idx) =>
+        out.push({
+          id: e.id,
+          subtaskId: e.subtaskId,
+          severity: e.severity,
+          peakOffsetMs: idx * MOTION.coFireStaggerMs,
+        })
+      );
+  }
+  return out;
 }

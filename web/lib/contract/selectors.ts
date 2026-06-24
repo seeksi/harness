@@ -5,7 +5,7 @@
 // projection drift). Lives in the contract seam, importable by scene/** and
 // hud/** alike.
 
-import type { RunState, PhaseId } from "./types";
+import type { RunState, PhaseId, Subtask } from "./types";
 
 /**
  * Current phase: the last phase in array order currently "active", else the
@@ -17,4 +17,13 @@ export function selectActivePhase(state: RunState): PhaseId {
     if (state.phases[i].status === "active") return state.phases[i].id;
   }
   return state.task.phase;
+}
+
+/**
+ * The currently-active subtask: the first one that is "building", else null.
+ * Shared by BOTH projections (scene + DOM mirror) so they never disagree on what
+ * is active.
+ */
+export function selectActiveSubtask(state: RunState): Subtask | null {
+  return state.subtasks.find((s) => s.status === "building") ?? null;
 }

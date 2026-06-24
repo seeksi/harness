@@ -63,7 +63,7 @@ describe("project_scene", () => {
     };
     const g = project_scene(state);
     expect(g.summary.currentPhaseLabel).toBe("eval+promote");
-    // no building/blocked/reviewed/pending → falls back to first subtask
-    expect(g.summary.activeSubtask).toBe("st-a");
+    // shared selector: active = first "building", else null (none building here)
+    expect(g.summary.activeSubtask).toBeNull();
   });
 });

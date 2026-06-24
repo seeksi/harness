@@ -33,6 +33,8 @@ interface HudShellProps {
   store: RunStore;
 }
 
+const SEV: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+
 /** Track the previous RunState to diff phase/gate changes for announcements. */
 function useAnnouncements(state: RunState) {
   const prev = useRef<RunState>(state);
@@ -89,25 +91,34 @@ export function HudShell({ store }: HudShellProps) {
   const queued = useRef<InboxItem[]>([]);
 
   useEffect(() => {
+    // inbox is severity-ordered; the first new gate surfaces (if no detail open),
+    // the rest queue — one surface per batch, no overwrite.
+    let canSurface = openDetail === null;
     for (const item of inbox) {
       if (item.kind !== "gate" || seenRaised.current.has(item.id)) continue;
       seenRaised.current.add(item.id);
-      const action = onGateArrival(item.id, openDetail !== null);
-      if (action.type === "surface") setOpenDetail(item);
-      else queued.current.push(item);
+      const action = onGateArrival(item.id, !canSurface);
+      if (action.type === "surface") {
+        setOpenDetail(item);
+        canSurface = false;
+      } else {
+        queued.current.push(item);
+      }
     }
-    // drop ids that are no longer raised so re-fires surface again later
+    // forget gates no longer raised (so a re-fire surfaces again) and drop them
+    // from the queue so we never toast a resolved gate.
     const live = new Set(inbox.map((i) => i.id));
     for (const id of [...seenRaised.current]) if (!live.has(id)) seenRaised.current.delete(id);
+    queued.current = queued.current.filter((q) => live.has(q.id));
   }, [inbox, openDetail]);
 
-  // When the detail closes, offer a toast for the most-recent queued gate.
+  // On close, offer a toast for the highest-severity still-queued gate — without
+  // dropping the other queued items.
   useEffect(() => {
-    if (openDetail === null && queued.current.length > 0) {
-      const item = queued.current.pop()!;
-      queued.current = [];
-      setToast({ message: `Queued: ${item.line}`, item });
-    }
+    if (openDetail !== null || queued.current.length === 0) return;
+    const next = [...queued.current].sort((a, b) => SEV[b.severity] - SEV[a.severity])[0];
+    queued.current = queued.current.filter((q) => q.id !== next.id);
+    setToast({ message: `Queued: ${next.line}`, item: next });
   }, [openDetail]);
 
   const commands: Command[] = [

@@ -7,7 +7,7 @@
 
 import React from "react";
 import type { RunState } from "@/lib/contract/types";
-import { selectActivePhase } from "@/lib/contract/selectors";
+import { selectActivePhase, selectActiveSubtask } from "@/lib/contract/selectors";
 import { PHASE_LABELS, STATUS_BADGE } from "./announce";
 
 // Re-export so callers have a named function matching the contract name.
@@ -15,11 +15,6 @@ export { projectDom as project_dom };
 
 interface DomMirrorProps {
   state: RunState;
-}
-
-/** Active subtask: first subtask whose status is "building". */
-function activeSubtask(state: RunState) {
-  return state.subtasks.find((s) => s.status === "building") ?? null;
 }
 
 /** Raised gates count (not yet resolved). */
@@ -34,7 +29,7 @@ function raisedGateCount(state: RunState): number {
 function projectDom(state: RunState): React.ReactElement {
   const phase = selectActivePhase(state);
   const phaseLabel = PHASE_LABELS[phase];
-  const subtask = activeSubtask(state);
+  const subtask = selectActiveSubtask(state);
   const gateCount = raisedGateCount(state);
 
   return (

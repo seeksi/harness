@@ -51,6 +51,13 @@ export function AgentFireLayer({ store }: { store: RunStore }) {
       const mat = mesh.material as MeshStandardMaterial;
       mat.emissiveIntensity = env * 2.5;
     }
+    // prune arrival times for fires that have aged out of state.agentEvents
+    if (firstSeen.current.size > fires.length) {
+      const live = new Set(fires.map((f) => f.id));
+      for (const id of [...firstSeen.current.keys()]) {
+        if (!live.has(id)) firstSeen.current.delete(id);
+      }
+    }
   });
 
   return (

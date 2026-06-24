@@ -112,6 +112,15 @@ export function currentSlot(): string | null {
   return row?.run_id ?? null;
 }
 
+/** True once a run has a terminal outcome persisted (ended_at set). */
+export function isRunFinalized(runId: string): boolean {
+  const db = getDb();
+  const row = db.prepare("SELECT ended_at FROM runs WHERE id = ?").get(runId) as
+    | { ended_at: number | null }
+    | undefined;
+  return row?.ended_at != null;
+}
+
 /** Returns the latest snapshot for a run, or null if unknown. */
 export function getSnapshot(runId: string): RunState | null {
   const db = getDb();

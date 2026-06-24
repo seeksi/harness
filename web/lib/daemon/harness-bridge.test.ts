@@ -59,6 +59,10 @@ describe("parseHarnessLine — structured-only, ignores human output", () => {
     expect(parseHarnessLine("{not json")).toBeNull();
     expect(parseHarnessLine("")).toBeNull();
   });
+
+  it("rejects hello — the stream route owns the resync snapshot", () => {
+    expect(parseHarnessLine('{"type":"hello","run":{}}')).toBeNull();
+  });
 });
 
 describe("spawnHarness — shell:false + validated argv + structured-only events", () => {
@@ -95,5 +99,19 @@ describe("spawnHarness — shell:false + validated argv + structured-only events
       spawnHarness({ cmd: "wt-new", slug: "../bad" }, () => {}, { spawnFn: fakeSpawn as never })
     ).rejects.toBeInstanceOf(HarnessArgError);
     expect(fakeSpawn).not.toHaveBeenCalled();
+  });
+
+  it("refuses to spawn promote unless the default-off flag is set", async () => {
+    const fakeSpawn = vi.fn();
+    const prev = process.env.ENABLE_PROMOTE_TO_MAIN;
+    delete process.env.ENABLE_PROMOTE_TO_MAIN;
+    try {
+      await expect(
+        spawnHarness({ cmd: "promote" }, () => {}, { spawnFn: fakeSpawn as never })
+      ).rejects.toBeInstanceOf(HarnessArgError);
+      expect(fakeSpawn).not.toHaveBeenCalled();
+    } finally {
+      if (prev !== undefined) process.env.ENABLE_PROMOTE_TO_MAIN = prev;
+    }
   });
 });

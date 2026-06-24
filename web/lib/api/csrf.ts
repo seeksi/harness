@@ -12,12 +12,10 @@
 export function csrfOk(request: Request): boolean {
   if (request.headers.get("x-umbrella-request") !== "1") return false;
 
-  // Sec-Fetch-Site is sent by all current browsers for fetch/XHR. If present, it
-  // must indicate a same-origin/same-site request (or a direct navigation).
+  // Sec-Fetch-Site is sent by all current browsers for fetch/XHR. When present it
+  // must be exactly same-origin (no CORS, no subdomains in this single-origin tool).
   const site = request.headers.get("sec-fetch-site");
-  if (site && site !== "same-origin" && site !== "same-site" && site !== "none") {
-    return false;
-  }
+  if (site !== null && site !== "same-origin") return false;
 
   const origin = request.headers.get("origin");
   const host = request.headers.get("host");

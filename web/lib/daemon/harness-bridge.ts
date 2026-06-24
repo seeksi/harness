@@ -69,6 +69,8 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
   }
 }
 
+// `hello` is intentionally excluded — the SSE stream route owns the resync
+// snapshot; the harness producer only emits deltas.
 const KNOWN_EVENT_TYPES = new Set([
   "phase",
   "subtask",
@@ -77,7 +79,6 @@ const KNOWN_EVENT_TYPES = new Set([
   "trace",
   "budget",
   "approval",
-  "hello",
 ]);
 
 /**
@@ -127,6 +128,13 @@ export function spawnHarness(
   opts: SpawnHarnessOptions = {}
 ): Promise<{ code: number | null }> {
   return new Promise((resolve, reject) => {
+    // promote stays preview-only until a threat model passes: refuse to spawn it
+    // unless the default-off flag is explicitly enabled (defense in depth alongside
+    // the approve route's own gate).
+    if (sub.cmd === "promote" && process.env.ENABLE_PROMOTE_TO_MAIN !== "1") {
+      reject(new HarnessArgError("promote is disabled (ENABLE_PROMOTE_TO_MAIN not set)"));
+      return;
+    }
     let args: string[];
     try {
       args = buildArgs(sub); // validates BEFORE spawning; bad input → reject, never spawn
@@ -144,6 +152,9 @@ export function spawnHarness(
       reject(new Error("harness spawn produced no stdout"));
       return;
     }
+    // Drain stderr so a verbose child can't fill the pipe buffer and deadlock.
+    // Not forwarded to the client (may contain noise); bounded by discarding.
+    child.stderr?.resume();
     const rl = createInterface({ input: child.stdout });
     rl.on("line", (line) => {
       const event = parseHarnessLine(line);

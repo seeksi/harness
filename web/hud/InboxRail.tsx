@@ -57,10 +57,11 @@ export function InboxRail({
                   fontWeight: active ? 700 : 500,
                 }}
               >
+                {/* the single authoritative action line — exactly the four facts;
+                    dense evidence (summary) lives in the detail panel on click. */}
                 <span data-testid={`inbox-line-${item.id}`} style={{ display: "block" }}>
                   {item.line}
                 </span>
-                <span style={{ display: "block", opacity: 0.7, fontSize: 12 }}>{item.summary}</span>
               </button>
             </li>
           );

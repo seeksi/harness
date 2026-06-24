@@ -7,7 +7,7 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import type { SSEEvent } from "@/lib/contract/events";
-import { getSnapshot } from "@/lib/store/persist";
+import { getSnapshot, isRunFinalized } from "@/lib/store/persist";
 import { STREAM_END } from "@/lib/sse/client";
 import { subscribe, onDone, isDone } from "@/lib/daemon/broker";
 
@@ -55,8 +55,9 @@ export async function GET(
       // snapshot and the live subscription join with no gap.
       enqueue(sseChunk({ type: "hello", run: getSnapshot(id)! }));
 
-      // Run already finished before this client connected → end immediately.
-      if (isDone(id)) {
+      // Run already finished before this client connected (in-memory broker done,
+      // or a terminal outcome persisted — e.g. after a process restart) → end now.
+      if (isDone(id) || isRunFinalized(id)) {
         enqueue(END_FRAME);
         close();
         return;

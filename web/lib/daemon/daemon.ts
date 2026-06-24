@@ -66,6 +66,12 @@ export function startRun(runId: string, brief: string): void {
         await delay(DRY_RUN_DELAY_MS);
       }
       finalizeRun(runId, "done");
+    } catch {
+      // Producer failed mid-run: persist a terminal failed outcome so clients
+      // don't see a forever-"running" snapshot.
+      state = { ...state, task: { ...state.task, state: "failed" } };
+      upsertSnapshot(runId, state);
+      finalizeRun(runId, "failed");
     } finally {
       releaseSlot(runId);
       complete(runId);
