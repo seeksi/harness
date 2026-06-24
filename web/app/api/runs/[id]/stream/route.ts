@@ -10,6 +10,7 @@ import type { SSEEvent } from "@/lib/contract/events";
 import { getSnapshot, isRunFinalized } from "@/lib/store/persist";
 import { STREAM_END } from "@/lib/sse/client";
 import { subscribe, onDone, isDone } from "@/lib/daemon/broker";
+import { assertNoCredential } from "@/lib/security/credentials";
 
 function sseChunk(event: SSEEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
@@ -53,7 +54,10 @@ export async function GET(
       // Read the snapshot and subscribe synchronously in the same tick, so the
       // daemon's timer-driven publish cannot interleave between them — the hello
       // snapshot and the live subscription join with no gap.
-      enqueue(sseChunk({ type: "hello", run: getSnapshot(id)! }));
+      const helloEvent: SSEEvent = { type: "hello", run: getSnapshot(id)! };
+      // Fail-closed guard (T4b): never serialize a credential to the browser.
+      assertNoCredential(helloEvent);
+      enqueue(sseChunk(helloEvent));
 
       // Run already finished before this client connected (in-memory broker done,
       // or a terminal outcome persisted — e.g. after a process restart) → end now.
