@@ -16,6 +16,7 @@ import { createInterface } from "readline";
 import type { SSEEvent } from "@/lib/contract/events";
 import { isLane, isSession, isPlanFile } from "./registry";
 import { HarnessArgError, HarnessTimeoutError } from "./errors";
+import { appendAudit } from "@/lib/store/persist";
 
 export type HarnessSubcommand =
   | { cmd: "budget"; planFile: string }
@@ -209,6 +210,23 @@ export interface SpawnHarnessOptions {
   timeoutMs?: number;
   /** Grace after SIGTERM before SIGKILL. */
   killGraceMs?: number;
+  /**
+   * Additional audit observer (T7). The persisted append-only SQLite audit is ALWAYS
+   * written regardless — this hook can't replace it (so a caller can't disable the
+   * mandatory record); it only observes (tests, extra sinks). Best-effort.
+   */
+  onAudit?: (record: HarnessAuditRecord) => void;
+}
+
+/** One audit record per spawn attempt (threat model T7) — argv + outcome + ts, no secrets. */
+export interface HarnessAuditRecord {
+  ts: number; // epoch seconds
+  cmd: HarnessSubcommand["cmd"];
+  argv: string[]; // exact argv passed to harness.sh ([] if never built)
+  outcome: "exit" | "timeout" | "error" | "refused" | "invalid-args";
+  code?: number | null; // exit code when outcome === "exit"
+  /** error CLASS name only (+ safe errno) — never the message, which can embed the rejected value. */
+  error?: string;
 }
 
 const DEFAULT_SCRIPT = process.env.HARNESS_SCRIPT_PATH ?? "../.claude/skills/harness/harness.sh";
@@ -231,10 +249,36 @@ export function spawnHarness(
   opts: SpawnHarnessOptions = {}
 ): Promise<{ code: number | null }> {
   return new Promise((resolve, reject) => {
+    // Audit (T7): the persisted append-only log is ALWAYS written (mandatory,
+    // best-effort so a logging failure never changes control flow); onAudit is an
+    // additional observer only. argv/outcome only — never stdout.
+    const audit = (r: Omit<HarnessAuditRecord, "ts">) => {
+      const record: HarnessAuditRecord = { ts: Math.floor(Date.now() / 1000), ...r };
+      try {
+        appendAudit(record);
+      } catch {
+        // mandatory audit is best-effort; never break the run on a logging failure
+      }
+      try {
+        opts.onAudit?.(record);
+      } catch {
+        // observer is best-effort too
+      }
+    };
+    // CRITICAL: log the error CLASS only — never the message. HarnessArgError embeds
+    // the rejected value in its message, which could be sensitive; the audit must
+    // never carry it. A safe errno code (E*) is allowed for forensic context.
+    const errLabel = (e: unknown): string => {
+      if (!(e instanceof Error)) return "Error";
+      const code = (e as NodeJS.ErrnoException).code;
+      return code && /^E[A-Z]+$/.test(code) ? `${e.name}:${code}` : e.name;
+    };
+
     // promote stays preview-only until a threat model passes: refuse to spawn it
     // unless the default-off flag is explicitly enabled (defense in depth alongside
     // the approve route's own gate).
     if (sub.cmd === "promote" && process.env.ENABLE_PROMOTE_TO_MAIN !== "1") {
+      audit({ cmd: sub.cmd, argv: [sub.cmd], outcome: "refused" });
       reject(new HarnessArgError("promote is disabled (ENABLE_PROMOTE_TO_MAIN not set)"));
       return;
     }
@@ -242,19 +286,29 @@ export function spawnHarness(
     try {
       args = buildArgs(sub); // validates BEFORE spawning; bad input → reject, never spawn
     } catch (e) {
+      audit({ cmd: sub.cmd, argv: [], outcome: "invalid-args", error: errLabel(e) });
       reject(e);
       return;
     }
     const script = opts.scriptPath ?? DEFAULT_SCRIPT;
     const spawnFn = opts.spawnFn ?? nodeSpawn;
-    const child = spawnFn(script, args, {
-      cwd: opts.cwd ?? process.env.HARNESS_REPO ?? process.cwd(),
-      shell: false, // CRITICAL: never let a shell re-parse the argv
-      // Own process group so a timeout can kill the whole tree (harness.sh spawns
-      // git/python children); without this only the shell PID dies and children leak.
-      detached: true,
-    });
+    let child: ChildProcess;
+    try {
+      child = spawnFn(script, args, {
+        cwd: opts.cwd ?? process.env.HARNESS_REPO ?? process.cwd(),
+        shell: false, // CRITICAL: never let a shell re-parse the argv
+        // Own process group so a timeout can kill the whole tree (harness.sh spawns
+        // git/python children); without this only the shell PID dies and children leak.
+        detached: true,
+      });
+    } catch (e) {
+      // A synchronous spawn throw (bad options, etc.) must still be audited.
+      audit({ cmd: sub.cmd, argv: args, outcome: "error", error: errLabel(e) });
+      reject(e);
+      return;
+    }
     if (!child.stdout) {
+      audit({ cmd: sub.cmd, argv: args, outcome: "error", error: "no stdout" });
       reject(new Error("harness spawn produced no stdout"));
       return;
     }
@@ -304,13 +358,22 @@ export function spawnHarness(
     }, timeoutMs);
     deadline.unref?.();
 
-    child.on("error", (e) => finish(() => reject(e)));
+    child.on("error", (e) =>
+      finish(() => {
+        audit({ cmd: sub.cmd, argv: args, outcome: "error", error: errLabel(e) });
+        reject(e);
+      })
+    );
     child.on("close", (code) =>
-      finish(() =>
-        timedOut
-          ? reject(new HarnessTimeoutError(`harness '${sub.cmd}' timed out after ${timeoutMs}ms`))
-          : resolve({ code })
-      )
+      finish(() => {
+        if (timedOut) {
+          audit({ cmd: sub.cmd, argv: args, outcome: "timeout" });
+          reject(new HarnessTimeoutError(`harness '${sub.cmd}' timed out after ${timeoutMs}ms`));
+        } else {
+          audit({ cmd: sub.cmd, argv: args, outcome: "exit", code });
+          resolve({ code });
+        }
+      })
     );
   });
 }

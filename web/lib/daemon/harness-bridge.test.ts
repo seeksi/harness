@@ -11,8 +11,14 @@ import {
   HarnessTimeoutError,
 } from "./harness-bridge";
 import { mintLane, mintSession, mintPlanFile, _resetRegistry } from "./registry";
+import { resetDb, getAuditLog } from "@/lib/store/persist";
 
-beforeEach(() => _resetRegistry());
+beforeEach(() => {
+  _resetRegistry();
+  // Fresh in-memory DB per test so the default audit sink (T7) is isolated and
+  // never touches the real ./data/umbrella.db file.
+  resetDb(":memory:");
+});
 
 describe("buildArgs — server-minted provenance → argv (no client strings, no shell)", () => {
   it("builds clean argv for minted slugs/sessions/plan-files + static subcommands", () => {
@@ -182,6 +188,85 @@ describe("spawnHarness — shell:false + validated argv + structured-only events
     ).rejects.toBeInstanceOf(HarnessTimeoutError);
     expect(kill).toHaveBeenCalledWith("SIGTERM");
     expect(kill).toHaveBeenCalledWith("SIGKILL"); // escalated after grace
+    expect(getAuditLog().map((r) => r.outcome)).toEqual(["timeout"]); // T7: timeout audited
+  });
+
+  it("writes an audit record (argv + outcome + ts, never stdout/secrets) per spawn (T7)", async () => {
+    const fakeSpawn = vi.fn(() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from([
+        '{"type":"phase","phase":1,"status":"active"}\n',
+        "secret token sk-leak-should-never-be-audited\n", // stdout must NOT reach the audit
+      ]);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+
+    mintLane("scene");
+    await spawnHarness({ cmd: "wt-new", slug: "scene" }, () => {}, {
+      spawnFn: fakeSpawn as never,
+      scriptPath: "/x/harness.sh",
+    });
+
+    const log = getAuditLog();
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({ cmd: "wt-new", argv: ["wt-new", "scene"], outcome: "exit", code: 0 });
+    expect(typeof log[0].ts).toBe("number");
+    // The audit captures argv + outcome only — no stdout content, ever.
+    expect(JSON.stringify(log[0])).not.toContain("sk-leak");
+  });
+
+  it("audits refused promote and invalid args without spawning (T7)", async () => {
+    const fakeSpawn = vi.fn();
+    const prev = process.env.ENABLE_PROMOTE_TO_MAIN;
+    delete process.env.ENABLE_PROMOTE_TO_MAIN;
+    try {
+      await expect(
+        spawnHarness({ cmd: "promote" }, () => {}, { spawnFn: fakeSpawn as never })
+      ).rejects.toBeInstanceOf(HarnessArgError);
+      await expect(
+        spawnHarness({ cmd: "wt-new", slug: "../bad" }, () => {}, { spawnFn: fakeSpawn as never })
+      ).rejects.toBeInstanceOf(HarnessArgError);
+    } finally {
+      if (prev !== undefined) process.env.ENABLE_PROMOTE_TO_MAIN = prev;
+    }
+
+    expect(fakeSpawn).not.toHaveBeenCalled();
+    const log = getAuditLog();
+    expect(log.map((r) => r.outcome).sort()).toEqual(["invalid-args", "refused"]);
+    // refused promote records the exact argv; no error message leaks the rejected value.
+    const refused = log.find((r) => r.outcome === "refused")!;
+    expect(refused.argv).toEqual(["promote"]);
+    const invalid = log.find((r) => r.outcome === "invalid-args")!;
+    expect(invalid.error).toBe("HarnessArgError"); // class name only, not the message
+    expect(invalid.error).not.toContain("bad"); // the rejected value never appears
+  });
+
+  it("audits a synchronous spawn throw, and an audit observer failure never breaks the run (T7)", async () => {
+    // (1) sync spawn throw → still audited as error, then rejects.
+    const throwingSpawn = vi.fn(() => {
+      throw new Error("spawn boom");
+    });
+    mintLane("scene");
+    await expect(
+      spawnHarness({ cmd: "wt-new", slug: "scene" }, () => {}, { spawnFn: throwingSpawn as never })
+    ).rejects.toThrow("spawn boom");
+    expect(getAuditLog().map((r) => r.outcome)).toEqual(["error"]);
+
+    // (2) a throwing onAudit observer must not change the outcome (best-effort).
+    const okSpawn = vi.fn(() => {
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"type":"phase","phase":1,"status":"done"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    const result = await spawnHarness({ cmd: "wt-new", slug: "scene" }, () => {}, {
+      spawnFn: okSpawn as never,
+      onAudit: () => {
+        throw new Error("observer boom");
+      },
+    });
+    expect(result.code).toBe(0); // observer threw, but the run still resolved
   });
 
   it("completes before the deadline → resolves, no kill, single settle (T6 race)", async () => {

@@ -53,9 +53,64 @@ function initSchema(db: Database.Database): void {
       run_id  TEXT
     );
 
+    -- Append-only audit of every harness.sh spawn (threat model T7): the exact argv,
+    -- outcome, and timestamp. NEVER store stdout/stderr or secrets — only the
+    -- server-constructed argv (already provenance-gated) and a controlled outcome.
+    CREATE TABLE IF NOT EXISTS audit (
+      seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts       INTEGER NOT NULL,
+      cmd      TEXT NOT NULL,
+      argv     TEXT NOT NULL,   -- JSON array of the exact argv
+      outcome  TEXT NOT NULL,   -- exit | timeout | error | refused | invalid-args
+      code     INTEGER,         -- exit code when outcome = exit
+      error    TEXT             -- controlled error string (no secrets) when applicable
+    );
+
     -- Ensure the single slot row exists
     INSERT OR IGNORE INTO slot (id, run_id) VALUES (1, NULL);
   `);
+}
+
+export interface AuditRow {
+  ts: number;
+  cmd: string;
+  argv: string[];
+  outcome: string;
+  code?: number | null;
+  error?: string;
+}
+
+/** Append one harness-spawn audit record (T7). Never pass stdout/stderr or secrets. */
+export function appendAudit(r: AuditRow): void {
+  const db = getDb();
+  db.prepare(
+    "INSERT INTO audit (ts, cmd, argv, outcome, code, error) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(r.ts, r.cmd, JSON.stringify(r.argv), r.outcome, r.code ?? null, r.error ?? null);
+}
+
+/** Most-recent-first audit records (for an audit view / forensic check). */
+export function getAuditLog(limit = 100): AuditRow[] {
+  const db = getDb();
+  // Clamp so a bad caller can't request the whole append-only table (or a negative).
+  const n = Math.min(Math.max(1, Math.floor(limit) || 1), 1000);
+  const rows = db
+    .prepare("SELECT ts, cmd, argv, outcome, code, error FROM audit ORDER BY seq DESC LIMIT ?")
+    .all(n) as Array<{
+    ts: number;
+    cmd: string;
+    argv: string;
+    outcome: string;
+    code: number | null;
+    error: string | null;
+  }>;
+  return rows.map((r) => ({
+    ts: r.ts,
+    cmd: r.cmd,
+    argv: JSON.parse(r.argv) as string[],
+    outcome: r.outcome,
+    code: r.code,
+    error: r.error ?? undefined,
+  }));
 }
 
 export function appendEvent(runId: string, event: SSEEvent): void {
