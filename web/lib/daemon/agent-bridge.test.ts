@@ -42,7 +42,16 @@ describe("buildAgentArgs / containedWorktree", () => {
       "opus",
       "--allowedTools",
       "Read,Edit,Write,Grep,Glob",
+      "--strict-mcp-config",
     ]);
+  });
+
+  it("passes --strict-mcp-config to isolate the agent from inherited MCP servers", () => {
+    mintLane("lane-x");
+    // No --mcp-config is ever passed, so --strict-mcp-config => zero MCP servers loaded.
+    const args = buildAgentArgs(spec());
+    expect(args).toContain("--strict-mcp-config");
+    expect(args).not.toContain("--mcp-config");
   });
 
   it("rejects an unminted lane (provenance)", () => {

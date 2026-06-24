@@ -169,6 +169,11 @@ export function buildAgentArgs(spec: AgentSpec): string[] {
     model,
     "--allowedTools",
     tools.join(","),
+    // Isolate the agent from ALL inherited MCP connectors. With no --mcp-config passed,
+    // --strict-mcp-config makes claude load ZERO MCP servers — ignoring the Max-plan
+    // account-synced servers (Gmail/Drive/Calendar/…), global, and project .mcp.json.
+    // The tool allowlist blocks CALLING mcp__* tools; this blocks CONNECTING at all.
+    "--strict-mcp-config",
   ];
 }
 
