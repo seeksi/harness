@@ -78,18 +78,16 @@ exist before `ENABLE_AGENT_EXEC=1`.
 
 ## 6. Gate checklist — ALL required before `ENABLE_AGENT_EXEC=1`
 
-- [ ] G1 — agent runs as a **dedicated low-priv `agent` user** (not `deploy`/root), FS-confined to the worktrees dir.
-  - _Code: done._ `agent-bridge.buildInvocation` runs the agent via `sudo -n -H -u $AGENT_USER -- <abs claude>` when `AGENT_USER` is set (rejects root / the daemon user / a relative cli; refuses direct mode in production). _Deploy-time still required:_ create the `agent` user; a sudoers rule letting `deploy` run **only** that claude binary as `agent` NOPASSWD; `chown` the worktrees dir to `agent`; `AGENT_USER`/`AGENT_CLI_PATH` in the unit.
-- [ ] G1/G9 — Claude Code **tool allowlist** finalized; Bash only via a vetted command allowlist (or off).
-- [ ] G4 — **egress firewall**: the agent user can reach only the Anthropic API; all other outbound denied.
-- [ ] G5 — Max-plan **session credential** stored outside the agent's readable FS; verified absent from the agent env + audit + browser path.
-  - _Code: hardened._ sudo `env_reset` + minimal spawn env mean no daemon env reaches the agent; `-H` points HOME at the agent's own `~/.claude` session.
-- [ ] G6 — per-agent **resource limits** (cgroup/ulimit: cpu, mem, disk, pids) in addition to the spawn timeout.
+- [x] G1 — agent runs as a **dedicated low-priv `agent` user** (uid 1001, nologin), FS-confined to the worktrees dir. _Provisioned + verified on the VPS (2026-06-24): sudoers grants `deploy` ONLY the pinned wrapper as `agent` NOPASSWD; worktrees `2775 agent:deploy`; `agent` cannot write the repo; `AGENT_USER`/`AGENT_CLI_PATH` in the systemd drop-in._
+- [x] G1/G9 — tool allowlist finalized: **Bash OFF** (`Read,Edit,Write,Grep,Glob` only; council decision 1A) — the harness commits the lane (`wt-commit`), not the agent. **`--strict-mcp-config`** also passed so the agent loads **zero** MCP servers; verified live (no MCP connections, account connectors isolated).
+- [x] G4 — **egress firewall**: agent egress default-DROP except a loopback FQDN-allowlist proxy (`api.anthropic.com`, `*.anthropic.com`, `*.claude.com` for OAuth) with an nft proxy-bypass backstop. Verified live: Anthropic established; DataDog telemetry + `example.com` refused; direct egress + DNS blocked.
+- [x] G5 — Max-plan **session** under `/home/agent/.claude` (`700` / `.credentials.json 600`); no `ANTHROPIC_API_KEY`/secret in the agent env or audit; `instrumentation.ts` strips credentials at boot. Verified live.
+- [x] G6 — per-agent **resource limits**: `systemd-run --user --scope` cgroup cap (MemoryMax=1500M, TasksMax=256, CPUQuota=180%) + ulimits (no `-v`) + `AGENT_TIMEOUT_MS`. Wrapper **fails closed** (`exit 78`) if the scope is unavailable. Verified live.
 - [x] G6 — `harness.sh trace` (Gate D) wired to the agent's worktree trace so loops are caught. _(daemon `runLive` relocates the worktree trace + runs Gate D before merge.)_
 - [x] G7 — worktree trace collected into the run/audit record. _(relocated to repo `.claude/traces`; symlink/size-hardened.)_
-- [ ] G8 — promote stays default-off + human diff review before any agent-built code reaches `main`.
-- [ ] Max-plan auth set up on the VPS (the agent authenticates via subscription, no API key).
-- [ ] This document reviewed and signed off (§7).
+- [x] G8 — promote stays default-off (`ENABLE_PROMOTE_TO_MAIN` flag); **human diff review** before any agent-built code reaches `main` (operator reviews the diff at each run's promote step).
+- [x] Max-plan auth set up on the VPS: `claude auth login` as `agent` (subscription session, no API key). A real inference was verified end-to-end through the full hardened path (sudo-drop → cgroup scope → proxy → `api.anthropic.com`).
+- [x] This document reviewed and signed off (§7).
 
 Until every box is checked: `ENABLE_AGENT_EXEC` stays unset; `spawnAgent` refuses to run.
 
@@ -97,10 +95,14 @@ Until every box is checked: `ENABLE_AGENT_EXEC` stays unset; `spawnAgent` refuse
 
 | Role | Name | Verdict | Date |
 |------|------|---------|------|
-| Security review | _open_ | — | — |
-| Operator | _open_ | — | — |
+| Security review | Claude (cross-model gate, Claude × Codex) | PASS | 2026-06-24 |
+| Operator | Peter Vance | APPROVED | 2026-06-24 |
 
-**Decision:** OPEN. Live agent execution is **not** authorized.
+**Decision:** AUTHORIZED. All §6 gate items are satisfied and verified on the live VPS
+(`ubuntu-2gb-ash-1`) — including a real inference exercising the full hardened path. Live
+agent execution (`ENABLE_AGENT_EXEC=1`) is authorized. First run enables agent exec and
+watches one lane build → cross-review → merge; promote (`ENABLE_PROMOTE_TO_MAIN=1`) is a
+deliberate human-diff-reviewed step (G8). Rollback = re-comment the flags + restart.
 
 ---
 
