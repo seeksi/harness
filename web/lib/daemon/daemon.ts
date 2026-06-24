@@ -12,6 +12,7 @@
 // Live stays OFF by default until the threat-model gate owner enables it (it also
 // needs Max-plan auth on the host); promote remains gated inside spawnHarness.
 
+import { createHash } from "crypto";
 import { reducer } from "@/lib/contract/events";
 import { initialRunState } from "@/lib/contract/types";
 import type { RunState } from "@/lib/contract/types";
@@ -26,7 +27,27 @@ import {
 } from "@/lib/store/persist";
 import { publish, complete } from "./broker";
 import { spawnHarness, type HarnessSubcommand, type SpawnHarnessOptions } from "./harness-bridge";
+import { spawnAgent, worktreePathFor, type AgentSpec } from "./agent-bridge";
 import { mintLane, mintSession, mintPlanFile } from "./registry";
+
+/** One lane to build: a worktree + the agent task that fills it. */
+export interface LaneStep {
+  slug: string; // server-generated (planRun); minted before use
+  taskPrompt: string; // the task for the agent (may be the brief — opaque to provenance)
+  model?: "haiku" | "sonnet" | "opus";
+}
+
+/** A server-built live run: the budget plan file + the lanes to build sequentially. */
+export interface RunPlan {
+  planFile: string; // for Gate A (budget)
+  lanes: LaneStep[];
+}
+
+/** Agent runner signature (so tests can inject a fake without spawning claude). */
+type RunAgentFn = (
+  spec: AgentSpec,
+  opts?: { spawnFn?: SpawnHarnessOptions["spawnFn"] }
+) => Promise<{ code: number | null; sessionId: string | null }>;
 
 /** Milliseconds between dry-run event yields (simulates a live stream). */
 const DRY_RUN_DELAY_MS = 50;
@@ -54,13 +75,15 @@ export interface StartRunOptions {
   /** Force live harness execution. Defaults to HARNESS_LIVE === "1" (else dry-run). */
   live?: boolean;
   /**
-   * TEST-ONLY seam: a pre-built subcommand sequence. IGNORED unless NODE_ENV==="test".
-   * In production the plan comes ONLY from planRun (server) so caller/brief input can
-   * never become provenance — see mintProvenance / threat model T1.
+   * TEST-ONLY seam: a pre-built run plan. IGNORED unless NODE_ENV==="test". In
+   * production the plan comes ONLY from planRun (server) so caller/brief input can
+   * never become provenance — threat model T1.
    */
-  plan?: HarnessSubcommand[];
-  /** TEST-ONLY seam: injectable spawn. IGNORED unless NODE_ENV==="test". */
+  plan?: RunPlan;
+  /** TEST-ONLY seam: injectable harness child spawn. IGNORED unless NODE_ENV==="test". */
   spawnFn?: SpawnHarnessOptions["spawnFn"];
+  /** TEST-ONLY seam: injectable agent runner. IGNORED unless NODE_ENV==="test". */
+  runAgent?: RunAgentFn;
 }
 
 /**
@@ -90,70 +113,104 @@ function makeIngest(runId: string, seed: RunState) {
   };
 }
 
-/** Mint provenance for a subcommand's slug/session/plan-file before buildArgs (T1). */
-function mintProvenance(sub: HarnessSubcommand): void {
-  switch (sub.cmd) {
-    case "budget":
-      mintPlanFile(sub.planFile);
-      break;
-    case "wt-new":
-    case "integ-merge":
-      mintLane(sub.slug);
-      break;
-    case "trace":
-      mintSession(sub.session);
-      break;
-    // integ-start / promote take no provenance-bearing arg.
+/**
+ * Run one harness.sh subcommand through the pipeline; throw on a non-zero exit
+ * (raised gate / conflict / anomaly — the gate event has already streamed).
+ */
+async function runSub(
+  sub: HarnessSubcommand,
+  onEvent: (event: SSEEvent) => void,
+  spawnFn?: SpawnHarnessOptions["spawnFn"]
+): Promise<void> {
+  const { code } = await spawnHarness(sub, onEvent, { spawnFn });
+  if (code !== 0) {
+    throw new HarnessExitError(`harness '${sub.cmd}' exited with code ${code}`);
   }
 }
 
 /**
- * Run a server-built plan live: execute each harness.sh subcommand in order via
- * spawnHarness, piping its structured events into the shared pipeline. A non-zero
- * exit (raised gate, merge conflict, trace anomaly) stops the run — the gate event
- * has already streamed; the run finalizes failed.
+ * Execute a server-built live run: Gate A (budget) → open integration → for each lane
+ * { wt-new → run the AGENT in the worktree → integ-merge (Gate C) → trace the agent's
+ * session (Gate D) }. Provenance is minted from server-built values before each step.
+ * A non-zero exit / agent failure stops the run (finalized failed by startRun's catch).
+ *
+ * The agent step is gated inside spawnAgent (ENABLE_AGENT_EXEC); promote is never auto-
+ * run. The session for the trace gate is the one the agent actually reported.
+ *
+ * ponytail (runtime gate-checklist items, validated on the VPS against a real agent):
+ *   - budget needs the route-cost plan.jsonl on disk; trace needs the agent's worktree
+ *     trace relocated to the repo's .claude/traces.
+ *   - integ-merge assumes the lane is COMMITTED: the agent is prompted to commit, but a
+ *     post-agent clean-tree / lane-has-commits verification (harness `wt-verify`) should
+ *     gate the merge.
+ *   - on failure, the worktree + feat/integration branches are left dangling; cleanup is
+ *     `harness.sh clean` (destructive — intentionally manual, not auto-run here).
+ * Until these land a real live run fails at the first missing artifact (gated off).
  */
 async function runLive(
-  plan: HarnessSubcommand[],
+  plan: RunPlan,
   onEvent: (event: SSEEvent) => void,
-  opts: { spawnFn?: SpawnHarnessOptions["spawnFn"] }
+  opts: { spawnFn?: SpawnHarnessOptions["spawnFn"]; runAgent?: RunAgentFn }
 ): Promise<void> {
-  for (const sub of plan) {
-    mintProvenance(sub); // values are server-built (planRun), never raw client input
-    const { code } = await spawnHarness(sub, onEvent, { spawnFn: opts.spawnFn });
+  const runAgent = opts.runAgent ?? spawnAgent;
+
+  // Pre-mint ALL provenance up front, so a malformed plan fails BEFORE any harness
+  // side effect (no half-created worktrees from a bad later lane).
+  mintPlanFile(plan.planFile);
+  for (const lane of plan.lanes) mintLane(lane.slug);
+
+  await runSub({ cmd: "budget", planFile: plan.planFile }, onEvent, opts.spawnFn); // Gate A
+  await runSub({ cmd: "integ-start" }, onEvent, opts.spawnFn);
+
+  for (const lane of plan.lanes) {
+    await runSub({ cmd: "wt-new", slug: lane.slug }, onEvent, opts.spawnFn);
+
+    // Build: the agent writes (and is prompted to commit) its work in the lane
+    // worktree (gated; refuses unless enabled). runAgent gets NO harness spawn — it's
+    // a distinct seam (real spawnAgent in prod, an injected fake in tests).
+    const { code, sessionId } = await runAgent({
+      slug: lane.slug,
+      worktreePath: worktreePathFor(lane.slug),
+      taskPrompt: lane.taskPrompt,
+      model: lane.model,
+    });
     if (code !== 0) {
-      throw new HarnessExitError(`harness '${sub.cmd}' exited with code ${code}`);
+      throw new HarnessExitError(`agent for lane '${lane.slug}' exited with code ${code}`);
+    }
+
+    await runSub({ cmd: "integ-merge", slug: lane.slug }, onEvent, opts.spawnFn); // Gate C
+
+    // Gate D: trajectory check on the agent's actual session (skip if it reported none).
+    if (sessionId) {
+      mintSession(sessionId);
+      await runSub({ cmd: "trace", session: sessionId }, onEvent, opts.spawnFn);
     }
   }
 }
 
 /**
- * Build the harness subcommand sequence for a live run. All provenance-bearing
- * values (slug, session, plan file) are derived from the SERVER-minted runId — never
- * from the brief/client text — so minting them is trustworthy (threat model T1).
- * `promote` is intentionally excluded: it stays a separate, human-gated action.
+ * Build the live RunPlan from a brief. Provenance-bearing values (lane slug, plan
+ * file) are derived from the SERVER-minted runId — never the brief — so minting them
+ * is trustworthy (T1). The taskPrompt is the brief (opaque task text; not provenance).
+ * `promote` is never planned (separate human-gated action).
  *
- * ponytail: single generic lane + the canonical gate sequence. Real multi-lane
- * decomposition (brief → N lanes via the decompose agent) and the artifacts each
- * step consumes (the route-cost plan file for `budget`, the agent's trace for
- * `trace`) are the next pieces — until they exist, a live run will fail at the first
- * step whose artifact is missing. Enabling HARNESS_LIVE without that is premature.
+ * ponytail: single generic lane. Real multi-lane decomposition (brief → N lanes via
+ * the decompose agent) is a later increment.
  */
-export function planRun(runId: string, _brief: string): HarnessSubcommand[] {
-  // Sanitize to the downstream validator charset so an odd/empty runId can never
-  // produce an unmintable value. Use the full id (not a short slice) so distinct
-  // runs can't collide on a lane slug / worktree branch.
-  const id = runId.toLowerCase().replace(/[^a-z0-9]/g, "") || "run";
-  const slug = `lane-${id.slice(0, 26)}`; // ≤31 chars for SLUG; starts with a letter
-  const session = id.slice(0, 64); // ≤64 chars for SESSION
+export function planRun(runId: string, brief: string): RunPlan {
+  // Hash the FULL runId → a fixed-length, collision-resistant, validator-safe id, so
+  // distinct runs can never collide on a lane slug / worktree branch (no lossy
+  // truncation of an odd runId).
+  const id = createHash("sha1").update(runId).digest("hex").slice(0, 16);
+  const slug = `lane-${id}`; // 21 chars ≤ SLUG cap; starts with a letter
   const planFile = `plan-${id}.jsonl`; // PLAN_FILE: bare filename
-  return [
-    { cmd: "budget", planFile }, // Gate A: price the routed batch
-    { cmd: "wt-new", slug }, // create the lane worktree
-    { cmd: "integ-start" }, // open the integration branch
-    { cmd: "integ-merge", slug }, // merge the lane (Gate C)
-    { cmd: "trace", session }, // Gate D L2: trajectory check
-  ];
+  // The agent must commit so integ-merge has something to merge (clean-tree verify is
+  // a gate item — see runLive ponytail).
+  const taskPrompt = `${brief}\n\nWhen your changes are complete, commit them to the current branch.`;
+  return {
+    planFile,
+    lanes: [{ slug, taskPrompt, model: "sonnet" }],
+  };
 }
 
 /**
@@ -190,7 +247,10 @@ export function startRun(runId: string, brief: string, opts: StartRunOptions = {
     try {
       if (live) {
         const plan = (testSeam && opts.plan) || planRun(runId, brief);
-        await runLive(plan, pipe.ingest, { spawnFn: testSeam ? opts.spawnFn : undefined });
+        await runLive(plan, pipe.ingest, {
+          spawnFn: testSeam ? opts.spawnFn : undefined,
+          runAgent: testSeam ? opts.runAgent : undefined,
+        });
         pipe.markDone(); // live pipeline ran to completion → snapshot reflects done
       } else {
         for (const event of dryRun) {

@@ -51,6 +51,11 @@ const WORKTREES_DIR_ABS = (() => {
   return path.resolve(repoRoot, "..", `${path.basename(repoRoot)}.worktrees`);
 })();
 
+/** The deterministic worktree path for a lane (matches wt.sh's ../<repo>.worktrees/<slug>). */
+export function worktreePathFor(slug: string): string {
+  return path.join(WORKTREES_DIR_ABS, slug);
+}
+
 /**
  * Resolve + assert a worktree path is exactly the lane's entry under the allow-dir
  * (provenance: the slug must be minted; containment: the path can't escape — lexically

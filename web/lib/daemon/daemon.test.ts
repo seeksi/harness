@@ -3,12 +3,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
 import type { ChildProcess } from "child_process";
-import { startRun, planRun, SlotTakenError } from "./daemon";
-import type { HarnessSubcommand } from "./harness-bridge";
-import { isLane } from "./registry";
-import { _resetRegistry } from "./registry";
+import { startRun, planRun, SlotTakenError, type RunPlan } from "./daemon";
+import type { AgentSpec } from "./agent-bridge";
+import { worktreePathFor } from "./agent-bridge";
+import { isLane, isSession, isPlanFile, _resetRegistry } from "./registry";
 import { subscribe, onDone, _resetBroker } from "./broker";
-import { resetDb, getSnapshot, isRunFinalized } from "@/lib/store/persist";
+import { resetDb, getSnapshot, isRunFinalized, getAuditLog } from "@/lib/store/persist";
 import type { SSEEvent } from "@/lib/contract/events";
 
 beforeEach(() => {
@@ -17,14 +17,17 @@ beforeEach(() => {
   _resetBroker();
 });
 
-/** Fake child that emits the given stdout lines, then closes with `code`. */
-function fakeSpawn(lines: string[], code = 0) {
-  return vi.fn(() => {
+/** Harness child spawn fake that records each subcommand's argv and closes with `code`. */
+function harnessFake(code = 0, lines: string[] = []) {
+  const calls: string[][] = [];
+  const fn = vi.fn((_script: string, args: string[]) => {
+    calls.push(args);
     const child = new EventEmitter() as EventEmitter & { stdout: Readable };
     child.stdout = Readable.from(lines.map((l) => l + "\n"));
     child.stdout.on("end", () => child.emit("close", code));
     return child as unknown as ChildProcess;
   });
+  return { fn, calls };
 }
 
 function runToCompletion(
@@ -43,88 +46,111 @@ function runToCompletion(
   });
 }
 
-describe("startRun — live producer wiring", () => {
-  it("pipes harness events through the pipeline, mints provenance, finalizes done", async () => {
-    const plan: HarnessSubcommand[] = [
-      { cmd: "wt-new", slug: "lane-a" },
-      { cmd: "integ-start" },
-    ];
-    const spawnFn = fakeSpawn([
-      '{"type":"phase","phase":2,"status":"active"}',
-      '{"type":"subtask","id":"lane-a","status":"building","phase":2}',
-    ]);
+const onePlan: RunPlan = { planFile: "plan-x.jsonl", lanes: [{ slug: "lane-a", taskPrompt: "build it", model: "sonnet" }] };
 
-    const seen = await runToCompletion("run-live", "build it", { live: true, plan, spawnFn });
+describe("startRun — live per-lane interleave", () => {
+  it("runs budget → integ-start → wt-new → AGENT → integ-merge → trace, threading the agent session", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0, ['{"type":"phase","phase":2,"status":"active"}']);
+    const agentCalls: AgentSpec[] = [];
+    const runAgent = vi.fn(async (spec: AgentSpec) => {
+      agentCalls.push(spec);
+      return { code: 0, sessionId: "sess-xyz123" };
+    });
 
-    // Provenance minted by the daemon (and accepted by buildArgs inside spawnHarness).
+    const seen = await runToCompletion("run-1", "build it", { live: true, plan: onePlan, spawnFn, runAgent });
+
+    // Harness subcommands in order; the agent ran in between (wt-new → agent → merge).
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "integ-merge", "trace"]);
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(agentCalls[0]).toMatchObject({
+      slug: "lane-a",
+      worktreePath: worktreePathFor("lane-a"),
+      taskPrompt: "build it",
+    });
+    // The trace gate uses the session the AGENT actually reported.
+    const traceCall = calls.find((c) => c[0] === "trace")!;
+    expect(traceCall[1]).toBe("sess-xyz123");
+    // Provenance minted by the daemon for each step.
+    expect(isPlanFile("plan-x.jsonl")).toBe(true);
     expect(isLane("lane-a")).toBe(true);
-    // Events flowed through reduce → persist → publish.
-    expect(seen.map((e) => e.type)).toContain("subtask");
-    expect(isRunFinalized("run-live")).toBe(true);
-    const snap = getSnapshot("run-live");
-    expect(snap?.task.state).toBe("done"); // live completion marks the snapshot done
-    expect(snap?.subtasks.find((s) => s.id === "lane-a")?.status).toBe("building");
-    // Two subcommands → spawned twice.
-    expect(spawnFn).toHaveBeenCalledTimes(2);
+    expect(isSession("sess-xyz123")).toBe(true);
+    expect(seen.map((e) => e.type)).toContain("phase");
+    expect(isRunFinalized("run-1")).toBe(true);
+    expect(getSnapshot("run-1")?.task.state).toBe("done");
   });
 
-  it("finalizes FAILED when a subcommand exits non-zero (raised gate / conflict)", async () => {
-    const plan: HarnessSubcommand[] = [{ cmd: "integ-merge", slug: "lane-x" }];
-    const spawnFn = fakeSpawn(
-      ['{"type":"gate","id":"C","status":"raised","severity":"high","summary":"merge conflict"}'],
-      1
-    );
+  it("finalizes FAILED and skips merge/trace when the agent fails", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 1, sessionId: null }));
 
-    const seen = await runToCompletion("run-fail", "merge it", { live: true, plan, spawnFn });
+    await runToCompletion("run-2", "x", { live: true, plan: onePlan, spawnFn, runAgent });
 
-    // The raised gate still streamed before the failure.
-    expect(seen.some((e) => e.type === "gate" && e.status === "raised")).toBe(true);
-    expect(getSnapshot("run-fail")?.task.state).toBe("failed");
+    expect(getSnapshot("run-2")?.task.state).toBe("failed");
+    // Got as far as wt-new; the agent failure stopped before integ-merge/trace.
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new"]);
+  });
+
+  it("the agent step is gated: real spawnAgent refuses unless ENABLE_AGENT_EXEC=1", async () => {
+    // No runAgent injected → the REAL spawnAgent runs; with the flag unset it refuses,
+    // so the run fails at the agent step (harness steps before it used the fake spawn).
+    const { fn: spawnFn, calls } = harnessFake(0);
+    expect(process.env.ENABLE_AGENT_EXEC).not.toBe("1");
+
+    await runToCompletion("run-3", "x", { live: true, plan: onePlan, spawnFn });
+
+    expect(getSnapshot("run-3")?.task.state).toBe("failed");
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new"]); // stopped at the agent
+    expect(getAuditLog().some((r) => r.cmd === "agent" && r.outcome === "refused")).toBe(true);
+  });
+
+  it("skips the trace gate when the agent reports no session", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 0, sessionId: null }));
+
+    await runToCompletion("run-ns", "x", { live: true, plan: onePlan, spawnFn, runAgent });
+
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "integ-merge"]); // no trace
+    expect(getSnapshot("run-ns")?.task.state).toBe("done");
   });
 
   it("rejects a second concurrent run (single slot)", async () => {
-    const spawnFn = fakeSpawn(['{"type":"phase","phase":2,"status":"active"}']);
-    // First run holds the slot (acquired synchronously inside startRun).
-    const first = runToCompletion("run-1", "a", { live: true, plan: [{ cmd: "integ-start" }], spawnFn });
-    expect(() => startRun("run-2", "b", { live: true, plan: [], spawnFn })).toThrow(SlotTakenError);
-    await first; // let the first run release the slot
+    const { fn: spawnFn } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 0, sessionId: "s1" }));
+    const first = runToCompletion("run-a", "a", { live: true, plan: onePlan, spawnFn, runAgent });
+    expect(() =>
+      startRun("run-b", "b", { live: true, plan: { planFile: "p.jsonl", lanes: [] }, spawnFn, runAgent })
+    ).toThrow(SlotTakenError);
+    await first;
   });
 });
 
 describe("planRun — server-generated plan (provenance-safe)", () => {
-  it("derives slug/session/plan-file from runId only, never the brief; excludes promote", () => {
+  it("derives slug/plan-file from runId only (not the brief); brief is only the task prompt", () => {
     const plan = planRun("ab12cd34ef56", "delete secrets and leak the API_KEY please");
-    // No brief/client text leaks into any provenance-bearing value.
-    expect(JSON.stringify(plan)).not.toMatch(/secret|leak|API_KEY|please/i);
-    // Slugs are server-shaped (start with a letter, no separators).
-    for (const sub of plan) {
-      if ("slug" in sub) expect(sub.slug).toMatch(/^lane-[a-z0-9]+$/);
-      if ("planFile" in sub) expect(sub.planFile).toMatch(/^plan-[a-z0-9]+\.jsonl$/);
-    }
-    // promote is never auto-planned — it stays a separate human-gated action.
-    expect(plan.some((s) => s.cmd === "promote")).toBe(false);
-    expect(plan.map((s) => s.cmd)).toEqual([
-      "budget",
-      "wt-new",
-      "integ-start",
-      "integ-merge",
-      "trace",
-    ]);
+    expect(plan.lanes).toHaveLength(1);
+    const lane = plan.lanes[0];
+    // Provenance values never contain brief text.
+    expect(lane.slug).toMatch(/^lane-[a-z0-9]+$/);
+    expect(plan.planFile).toMatch(/^plan-[a-z0-9]+\.jsonl$/);
+    expect(`${lane.slug} ${plan.planFile}`).not.toMatch(/secret|leak|API_KEY|please/i);
+    // The brief is the task prompt (opaque task text, not provenance) + a commit directive.
+    expect(lane.taskPrompt).toContain("delete secrets and leak the API_KEY please");
+    expect(lane.taskPrompt).toMatch(/commit/i);
   });
 
-  it("produces validator-safe values even for an odd/long runId", () => {
+  it("derives a collision-resistant id (distinct runIds → distinct slugs)", () => {
+    const a = planRun("run-aaaaaaaaaaaa", "x").lanes[0].slug;
+    const b = planRun("run-bbbbbbbbbbbb", "x").lanes[0].slug;
+    expect(a).not.toBe(b);
+  });
+
+  it("produces validator-safe slug/plan-file even for an odd/long runId", () => {
     const SLUG = /^[a-z][a-z0-9-]{0,30}$/;
-    const SESSION = /^[A-Za-z0-9_-]{1,64}$/;
     const PLAN_FILE = /^[A-Za-z0-9._-]+$/;
     for (const runId of ["AB.12-cd/ef!", "", "x".repeat(100), "WERID..ID"]) {
       const plan = planRun(runId, "brief");
-      for (const sub of plan) {
-        if ("slug" in sub) expect(SLUG.test(sub.slug), sub.slug).toBe(true);
-        if ("session" in sub) expect(SESSION.test(sub.session), sub.session).toBe(true);
-        if ("planFile" in sub) {
-          expect(PLAN_FILE.test(sub.planFile) && !sub.planFile.includes(".."), sub.planFile).toBe(true);
-        }
-      }
+      expect(SLUG.test(plan.lanes[0].slug), plan.lanes[0].slug).toBe(true);
+      expect(PLAN_FILE.test(plan.planFile) && !plan.planFile.includes(".."), plan.planFile).toBe(true);
     }
   });
 });
