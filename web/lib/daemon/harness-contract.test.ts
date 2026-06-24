@@ -47,8 +47,26 @@ function assertAllValidEvents(stdout: string): string[] {
 }
 
 afterAll(() => {
-  for (const r of repos) rmSync(r, { recursive: true, force: true });
+  for (const r of repos) {
+    rmSync(r, { recursive: true, force: true });
+    rmSync(`${r}.worktrees`, { recursive: true, force: true }); // wt.sh sibling dir
+  }
 });
+
+/** Worktree path wt.sh/harness.sh derive for a slug: ../<repo>.worktrees/<slug>. */
+function wtPath(repo: string, slug: string): string {
+  return path.join(`${repo}.worktrees`, slug);
+}
+/** Run harness expecting a non-zero exit; return its stdout + status. */
+function harnessFails(cwd: string, args: string[]): { stdout: string; status?: number } {
+  try {
+    harness(cwd, args);
+    throw new Error(`expected harness ${args.join(" ")} to exit non-zero`);
+  } catch (e) {
+    const err = e as { stdout?: string; status?: number };
+    return { stdout: err.stdout ?? "", status: err.status };
+  }
+}
 
 describe("harness.sh → parseHarnessLine contract", () => {
   it("exists at the resolved path", () => {
@@ -105,5 +123,48 @@ describe("harness.sh → parseHarnessLine contract", () => {
     );
     expect(types).toContain("subtask");
     expect(types).toContain("phase");
+  });
+
+  it("wt-verify: a committed, clean lane emits a valid cleared Gate B and exits 0", () => {
+    const repo = newRepo();
+    harness(repo, ["wt-new", "built"]); // creates feat/built worktree off main
+    const wt = wtPath(repo, "built");
+    writeFileSync(path.join(wt, "x.txt"), "agent work\n");
+    git(wt, ["add", "x.txt"]);
+    git(wt, ["commit", "-q", "-m", "agent work"]);
+
+    const stdout = harness(repo, ["wt-verify", "built"]);
+    assertAllValidEvents(stdout); // every emitted line is a schema-valid event
+    const events = stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(events).toContainEqual(expect.objectContaining({ type: "gate", id: "B", status: "clear" }));
+  });
+
+  it("wt-verify: a no-op lane (no commits beyond base) raises Gate B and exits non-zero", () => {
+    const repo = newRepo();
+    harness(repo, ["wt-new", "noop"]); // worktree created but the agent committed nothing
+
+    const { stdout, status } = harnessFails(repo, ["wt-verify", "noop"]);
+    expect(status, "non-zero exit").toBeGreaterThan(0);
+    const events = stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "gate", id: "B", status: "raised", severity: "high" })
+    );
+  });
+
+  it("wt-verify: UNTRACKED (uncommitted) files raise Gate B even with prior commits", () => {
+    const repo = newRepo();
+    harness(repo, ["wt-new", "dirty"]);
+    const wt = wtPath(repo, "dirty");
+    writeFileSync(path.join(wt, "a.txt"), "committed\n");
+    git(wt, ["add", "a.txt"]);
+    git(wt, ["commit", "-q", "-m", "real work"]);
+    writeFileSync(path.join(wt, "leftover.txt"), "never added\n"); // untracked, not committed
+
+    const { stdout, status } = harnessFails(repo, ["wt-verify", "dirty"]);
+    expect(status, "non-zero exit on untracked").toBeGreaterThan(0);
+    const events = stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "gate", id: "B", status: "raised", severity: "high" })
+    );
   });
 });

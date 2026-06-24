@@ -42,7 +42,9 @@ function runToCompletion(
       unsub();
       resolve(seen);
     });
-    startRun(runId, brief, opts);
+    // Default the fs seams to hermetic fakes (no real plan.jsonl write / trace copy);
+    // a test can still override either by passing it in opts.
+    startRun(runId, brief, { writePlan: () => {}, relocate: () => true, ...opts });
   });
 }
 
@@ -59,8 +61,15 @@ describe("startRun — live per-lane interleave", () => {
 
     const seen = await runToCompletion("run-1", "build it", { live: true, plan: onePlan, spawnFn, runAgent });
 
-    // Harness subcommands in order; the agent ran in between (wt-new → agent → merge).
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "integ-merge", "trace"]);
+    // Harness order: agent runs in between, then verify → trace (pre-merge gate) → merge.
+    expect(calls.map((c) => c[0])).toEqual([
+      "budget",
+      "integ-start",
+      "wt-new",
+      "wt-verify",
+      "trace",
+      "integ-merge",
+    ]);
     expect(runAgent).toHaveBeenCalledTimes(1);
     expect(agentCalls[0]).toMatchObject({
       slug: "lane-a",
@@ -109,8 +118,28 @@ describe("startRun — live per-lane interleave", () => {
 
     await runToCompletion("run-ns", "x", { live: true, plan: onePlan, spawnFn, runAgent });
 
-    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "integ-merge"]); // no trace
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-verify", "integ-merge"]); // no trace
     expect(getSnapshot("run-ns")?.task.state).toBe("done");
+  });
+
+  it("fails the run when wt-verify raises (a no-op agent never committed) — no merge", async () => {
+    // Per-command fake: every harness step succeeds EXCEPT wt-verify, which exits 1.
+    const calls: string[][] = [];
+    const spawnFn = vi.fn((_s: string, args: string[]) => {
+      calls.push(args);
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from([]);
+      const code = args[0] === "wt-verify" ? 1 : 0;
+      child.stdout.on("end", () => child.emit("close", code));
+      return child as unknown as ChildProcess;
+    });
+    const runAgent = vi.fn(async () => ({ code: 0, sessionId: "s-noop" }));
+
+    await runToCompletion("run-noop", "x", { live: true, plan: onePlan, spawnFn: spawnFn as never, runAgent });
+
+    expect(getSnapshot("run-noop")?.task.state).toBe("failed");
+    // Stopped at wt-verify: integ-merge / trace never ran.
+    expect(calls.map((c) => c[0])).toEqual(["budget", "integ-start", "wt-new", "wt-verify"]);
   });
 
   it("rejects a second concurrent run (single slot)", async () => {

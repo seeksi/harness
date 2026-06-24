@@ -8,11 +8,12 @@ import {
   buildAgentArgs,
   spawnAgent,
   containedWorktree,
+  relocateTrace,
   AgentExecError,
   type AgentSpec,
 } from "./agent-bridge";
 import { HarnessTimeoutError } from "./errors";
-import { mintLane, _resetRegistry } from "./registry";
+import { mintLane, mintSession, _resetRegistry } from "./registry";
 import { resetDb, getAuditLog } from "@/lib/store/persist";
 
 // Worktrees allow-dir, derived the same way agent-bridge does (cwd unchanged in tests).
@@ -61,6 +62,27 @@ describe("buildAgentArgs / containedWorktree", () => {
     for (const bad of ["Edit; rm -rf /", "Bash(rm -rf /)", "Bash", "Edit,Write", "Read "]) {
       expect(() => buildAgentArgs(spec({ allowedTools: [bad] })), bad).toThrow(AgentExecError);
     }
+  });
+});
+
+describe("relocateTrace", () => {
+  it("rejects an unminted lane (provenance) before touching the filesystem", () => {
+    mintSession("sess-abc123");
+    expect(() => relocateTrace("lane-x", "sess-abc123")).toThrow(AgentExecError); // lane not minted
+  });
+
+  it("rejects an unminted / path-shaped session id (provenance + path-safety)", () => {
+    mintLane("lane-x");
+    for (const bad of ["sess-not-minted", "../../etc/passwd", "a/b", "a.b", "", "x".repeat(65)]) {
+      expect(() => relocateTrace("lane-x", bad), bad).toThrow(AgentExecError);
+    }
+  });
+
+  it("returns false when the agent produced no trace (nothing to relocate)", () => {
+    mintLane("lane-x");
+    mintSession("sess-none123");
+    // No worktree/trace exists for this lane → existsSync is false → no copy, no throw.
+    expect(relocateTrace("lane-x", "sess-none123")).toBe(false);
   });
 });
 

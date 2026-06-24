@@ -13,6 +13,8 @@
 // needs Max-plan auth on the host); promote remains gated inside spawnHarness.
 
 import { createHash } from "crypto";
+import { writeFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
 import { reducer } from "@/lib/contract/events";
 import { initialRunState } from "@/lib/contract/types";
 import type { RunState } from "@/lib/contract/types";
@@ -26,8 +28,8 @@ import {
   finalizeRun,
 } from "@/lib/store/persist";
 import { publish, complete } from "./broker";
-import { spawnHarness, type HarnessSubcommand, type SpawnHarnessOptions } from "./harness-bridge";
-import { spawnAgent, worktreePathFor, type AgentSpec } from "./agent-bridge";
+import { spawnHarness, containedPlanFile, type HarnessSubcommand, type SpawnHarnessOptions } from "./harness-bridge";
+import { spawnAgent, worktreePathFor, relocateTrace, type AgentSpec } from "./agent-bridge";
 import { mintLane, mintSession, mintPlanFile } from "./registry";
 
 /** One lane to build: a worktree + the agent task that fills it. */
@@ -41,6 +43,31 @@ export interface LaneStep {
 export interface RunPlan {
   planFile: string; // for Gate A (budget)
   lanes: LaneStep[];
+}
+
+/** route-cost tier per model tier (budget.py prices by tier; see route-cost/models.json). */
+const MODEL_TIER: Record<NonNullable<LaneStep["model"]>, "cheap" | "default" | "top"> = {
+  haiku: "cheap",
+  sonnet: "default",
+  opus: "top",
+};
+// Conservative per-lane token estimate (thousands of tokens), well under the $5 ceiling.
+// ponytail: a fixed estimate; replace with real per-task actuals (Claude Code /cost or
+// the captured session usage) once the route step learns them.
+const LANE_TOKEN_EST = { in_ktok: 40, out_ktok: 8, cached_ktok: 30 };
+
+/**
+ * Materialize the route-cost plan.jsonl that Gate A (`harness.sh budget`) prices, into
+ * the SAME contained allow-dir path the bridge will pass to budget.py (one JSONL line
+ * per lane: tier + estimated tokens). Without this the budget gate has nothing to read.
+ */
+function writePlanFile(plan: RunPlan): void {
+  const abs = containedPlanFile(plan.planFile); // absolute path inside the plan allow-dir
+  mkdirSync(dirname(abs), { recursive: true });
+  const lines = plan.lanes.map((lane) =>
+    JSON.stringify({ task: lane.slug, tier: MODEL_TIER[lane.model ?? "sonnet"], ...LANE_TOKEN_EST })
+  );
+  writeFileSync(abs, lines.join("\n") + "\n");
 }
 
 /** Agent runner signature (so tests can inject a fake without spawning claude). */
@@ -84,6 +111,10 @@ export interface StartRunOptions {
   spawnFn?: SpawnHarnessOptions["spawnFn"];
   /** TEST-ONLY seam: injectable agent runner. IGNORED unless NODE_ENV==="test". */
   runAgent?: RunAgentFn;
+  /** TEST-ONLY seam: injectable plan-file writer (avoid real fs). IGNORED unless test. */
+  writePlan?: (plan: RunPlan) => void;
+  /** TEST-ONLY seam: injectable trace relocation. IGNORED unless test. */
+  relocate?: (slug: string, session: string) => boolean;
 }
 
 /**
@@ -137,27 +168,33 @@ async function runSub(
  * The agent step is gated inside spawnAgent (ENABLE_AGENT_EXEC); promote is never auto-
  * run. The session for the trace gate is the one the agent actually reported.
  *
- * ponytail (runtime gate-checklist items, validated on the VPS against a real agent):
- *   - budget needs the route-cost plan.jsonl on disk; trace needs the agent's worktree
- *     trace relocated to the repo's .claude/traces.
- *   - integ-merge assumes the lane is COMMITTED: the agent is prompted to commit, but a
- *     post-agent clean-tree / lane-has-commits verification (harness `wt-verify`) should
- *     gate the merge.
+ * ponytail (remaining runtime gate-checklist items, validated on the VPS):
  *   - on failure, the worktree + feat/integration branches are left dangling; cleanup is
  *     `harness.sh clean` (destructive — intentionally manual, not auto-run here).
- * Until these land a real live run fails at the first missing artifact (gated off).
+ *   - VPS hardening (dedicated agent user, egress firewall, resource limits) + Max-plan
+ *     auth + flipping ENABLE_AGENT_EXEC are operational, not code (§6 gate checklist).
+ * The plan.jsonl, the wt-verify (commit) gate, and trace relocation are now handled here.
  */
 async function runLive(
   plan: RunPlan,
   onEvent: (event: SSEEvent) => void,
-  opts: { spawnFn?: SpawnHarnessOptions["spawnFn"]; runAgent?: RunAgentFn }
+  opts: {
+    spawnFn?: SpawnHarnessOptions["spawnFn"];
+    runAgent?: RunAgentFn;
+    writePlan?: (plan: RunPlan) => void;
+    relocate?: (slug: string, session: string) => boolean;
+  }
 ): Promise<void> {
   const runAgent = opts.runAgent ?? spawnAgent;
+  const writePlan = opts.writePlan ?? writePlanFile;
+  const relocate = opts.relocate ?? relocateTrace;
 
   // Pre-mint ALL provenance up front, so a malformed plan fails BEFORE any harness
   // side effect (no half-created worktrees from a bad later lane).
   mintPlanFile(plan.planFile);
   for (const lane of plan.lanes) mintLane(lane.slug);
+
+  writePlan(plan); // materialize the plan.jsonl Gate A prices (before budget reads it)
 
   await runSub({ cmd: "budget", planFile: plan.planFile }, onEvent, opts.spawnFn); // Gate A
   await runSub({ cmd: "integ-start" }, onEvent, opts.spawnFn);
@@ -178,13 +215,22 @@ async function runLive(
       throw new HarnessExitError(`agent for lane '${lane.slug}' exited with code ${code}`);
     }
 
-    await runSub({ cmd: "integ-merge", slug: lane.slug }, onEvent, opts.spawnFn); // Gate C
+    // Gate B: the lane must be COMMITTED + clean, else integ-merge of an empty branch is
+    // a silent no-op and a do-nothing agent passes unnoticed.
+    await runSub({ cmd: "wt-verify", slug: lane.slug }, onEvent, opts.spawnFn);
 
-    // Gate D: trajectory check on the agent's actual session (skip if it reported none).
+    // Gate D BEFORE the merge: a looping/thrashing agent's lane must not reach
+    // integration. The trace was written inside the worktree; relocate it to the repo
+    // root so `harness.sh trace` can read it. Skip only when there's no session or no
+    // trace was produced (trajectory can't be assessed — proceed to the merge).
     if (sessionId) {
       mintSession(sessionId);
-      await runSub({ cmd: "trace", session: sessionId }, onEvent, opts.spawnFn);
+      if (relocate(lane.slug, sessionId)) {
+        await runSub({ cmd: "trace", session: sessionId }, onEvent, opts.spawnFn);
+      }
     }
+
+    await runSub({ cmd: "integ-merge", slug: lane.slug }, onEvent, opts.spawnFn); // Gate C
   }
 }
 
@@ -250,6 +296,8 @@ export function startRun(runId: string, brief: string, opts: StartRunOptions = {
         await runLive(plan, pipe.ingest, {
           spawnFn: testSeam ? opts.spawnFn : undefined,
           runAgent: testSeam ? opts.runAgent : undefined,
+          writePlan: testSeam ? opts.writePlan : undefined,
+          relocate: testSeam ? opts.relocate : undefined,
         });
         pipe.markDone(); // live pipeline ran to completion → snapshot reflects done
       } else {

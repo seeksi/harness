@@ -18,6 +18,7 @@
 # Usage:
 #   harness.sh budget <plan.jsonl>   Gate A: price the routed batch (exit 1 if over ceiling)
 #   harness.sh wt-new <slug>         create feat/<slug> worktree off the base
+#   harness.sh wt-verify <slug>      Gate B: feat/<slug> committed + worktree clean (exit 1 if a no-op agent)
 #   harness.sh integ-start           create the integration branch off the base
 #   harness.sh integ-merge <slug>    merge feat/<slug> into integration (--no-ff)
 #   harness.sh trace <session>       Gate D L2: check .claude/traces/<session>.jsonl
@@ -99,6 +100,33 @@ case "$cmd" in
       exit "$rc"
     fi
     ;;
+  wt-verify)
+    # Gate B: a lane must be COMMITTED before it can merge — otherwise integ-merge of
+    # an empty feat/<slug> is a silent no-op and a do-nothing agent passes unnoticed.
+    slug=${2:-}
+    [ -n "$slug" ] || die "wt-verify needs a <slug>"
+    # In-script charset guard (same as wt.sh new): the daemon already provenance-checks,
+    # but this script is also a direct CLI, so $slug must never carry path/ref parts.
+    case "$slug" in *[!a-zA-Z0-9_-]*) die "wt-verify: slug must be [a-zA-Z0-9_-]";; esac
+    emit_phase 2 active
+    repo_root=$(git rev-parse --show-toplevel)
+    wt_path="$(cd "$repo_root/.." && pwd)/$(basename "$repo_root").worktrees/$slug"
+    if [ ! -d "$wt_path" ]; then
+      emit_gate B raised high "lane worktree missing for feat/$slug" "$slug"
+      emit_phase 2 blocked; exit 1
+    fi
+    # --porcelain catches modified, staged AND untracked files (plain `diff` misses
+    # untracked). .claude/traces is gitignored, so the agent's own trace won't trip it.
+    if [ -n "$(git -C "$wt_path" status --porcelain)" ]; then
+      emit_gate B raised high "uncommitted/untracked changes in feat/$slug (agent did not commit)" "$slug"
+      emit_phase 2 blocked; exit 1
+    fi
+    if [ "$(git rev-list --count "$BASE..feat/$slug" 2>/dev/null || echo 0)" -eq 0 ]; then
+      emit_gate B raised high "feat/$slug has no commits beyond $BASE (agent produced nothing)" "$slug"
+      emit_phase 2 blocked; exit 1
+    fi
+    emit_gate B clear info "lane feat/$slug committed and clean" "$slug"
+    ;;
   integ-start)
     git show-ref --verify --quiet refs/heads/integration && die "integration already exists — clean first"
     git checkout -b integration "$BASE" >&2
@@ -158,7 +186,7 @@ case "$cmd" in
     git branch -d integration 2>/dev/null && echo "deleted integration" >&2 || true
     ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | integ-start | integ-merge <slug> | trace <session> | promote | clean}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | clean}" >&2
     exit 2
     ;;
 esac

@@ -29,6 +29,7 @@ describe("buildArgs — server-minted provenance → argv (no client strings, no
     mintSession("abc123_DEF");
     mintPlanFile("plan.jsonl");
     expect(buildArgs({ cmd: "wt-new", slug: "scene" })).toEqual(["wt-new", "scene"]);
+    expect(buildArgs({ cmd: "wt-verify", slug: "scene" })).toEqual(["wt-verify", "scene"]);
     expect(buildArgs({ cmd: "integ-merge", slug: "control-plane" })).toEqual([
       "integ-merge",
       "control-plane",
@@ -79,6 +80,7 @@ describe("buildArgs — server-minted provenance → argv (no client strings, no
   it("rejects a regex-VALID but UNMINTED slug/session/plan-file (provenance over pattern — T1)", () => {
     // These match the shape regex but were never minted by the server → rejected.
     expect(() => buildArgs({ cmd: "wt-new", slug: "scene" })).toThrow(HarnessArgError);
+    expect(() => buildArgs({ cmd: "wt-verify", slug: "scene" })).toThrow(HarnessArgError);
     expect(() => buildArgs({ cmd: "integ-merge", slug: "scene" })).toThrow(HarnessArgError);
     expect(() => buildArgs({ cmd: "trace", session: "abc123" })).toThrow(HarnessArgError);
     expect(() => buildArgs({ cmd: "budget", planFile: "plan.jsonl" })).toThrow(HarnessArgError);
