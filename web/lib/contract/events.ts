@@ -16,6 +16,7 @@ import type {
   Subtask,
   AgentEvent,
 } from "./types";
+import { TRACE_WINDOW } from "./types";
 
 export type SSEEvent =
   | { type: "phase"; phase: PhaseId; status: PhaseState["status"] }
@@ -36,8 +37,103 @@ export type SSEEvent =
   | { type: "approval"; phase: PhaseId; kind: NonNullable<PhaseState["approval"]>["kind"]; state: "awaiting" | "approved" | "rejected" }
   | { type: "hello"; run: RunState };
 
+// Bloom-decay window for agentFire dedup (seconds). Events older than this are pruned.
+export const AGENT_BLOOM_WINDOW = 60;
+
 // The reducer must be total over SSEEvent and drop any unknown `type` (forward-compat).
 // `subtask` deltas merge (not replace); `hello` replaces wholesale. Body is Lane A's.
-export function reducer(_state: RunState, _event: SSEEvent): RunState {
-  throw new Error("reducer: implemented in Lane A");
+export function reducer(state: RunState, event: SSEEvent): RunState {
+  switch (event.type) {
+    case "hello":
+      // Wholesale replace — the only resync path.
+      return event.run;
+
+    case "phase": {
+      return {
+        ...state,
+        phases: state.phases.map((p) =>
+          p.id === event.phase ? { ...p, status: event.status } : p
+        ),
+      };
+    }
+
+    case "subtask": {
+      const existing = state.subtasks.find((s) => s.id === event.id);
+      if (existing) {
+        // MERGE delta: only overwrite fields the event actually carries.
+        const merged: Subtask = {
+          ...existing,
+          status: event.status,
+          ...(event.phase !== undefined && { phase: event.phase }),
+          ...(event.model !== undefined && { model: event.model }),
+        };
+        return {
+          ...state,
+          subtasks: state.subtasks.map((s) => (s.id === event.id ? merged : s)),
+        };
+      }
+      // New subtask — seed with required fields; optional fields only if present.
+      const fresh: Subtask = {
+        id: event.id,
+        title: event.id, // title not on wire; use id as placeholder until hello resync
+        status: event.status,
+        phase: event.phase ?? state.task.phase,
+        ownerFiles: [],
+        ...(event.model !== undefined && { model: event.model }),
+      };
+      return { ...state, subtasks: [...state.subtasks, fresh] };
+    }
+
+    case "gate": {
+      const { type: _t, ...gateFields } = event;
+      const existing = state.gates.find((g) => g.id === event.id);
+      if (existing) {
+        return {
+          ...state,
+          gates: state.gates.map((g) => (g.id === event.id ? { ...g, ...gateFields } : g)),
+        };
+      }
+      return { ...state, gates: [...state.gates, gateFields as Gate] };
+    }
+
+    case "agentFire": {
+      const { type: _t, ...evFields } = event;
+      const newEvent = evFields as AgentEvent;
+      // Dedup by id; prune by bloom-decay window from the newest firedAt.
+      const nowish = newEvent.firedAt;
+      const cutoff = nowish - AGENT_BLOOM_WINDOW;
+      const deduped = state.agentEvents.filter((e) => e.id !== newEvent.id && e.firedAt >= cutoff);
+      return { ...state, agentEvents: [...deduped, newEvent] };
+    }
+
+    case "trace": {
+      const { type: _t, ...tick } = event;
+      const ring = [...state.trace, tick];
+      // Cap ring buffer at TRACE_WINDOW (drop oldest first).
+      return {
+        ...state,
+        trace: ring.length > TRACE_WINDOW ? ring.slice(ring.length - TRACE_WINDOW) : ring,
+      };
+    }
+
+    case "budget": {
+      const { type: _t, ...b } = event;
+      return { ...state, budget: b };
+    }
+
+    case "approval": {
+      return {
+        ...state,
+        phases: state.phases.map((p) =>
+          p.id === event.phase
+            ? { ...p, approval: { kind: event.kind, state: event.state } }
+            : p
+        ),
+      };
+    }
+
+    default:
+      // Forward-compat: unknown event type → return state unchanged (no throw).
+      return state;
+  }
 }
