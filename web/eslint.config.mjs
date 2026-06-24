@@ -66,4 +66,11 @@ export default [
   // aria-live messages screen readers depend on — a deliberate, documented pattern,
   // not silent suppression.
   { files: ["hud/HudShell.tsx"], rules: { "react-hooks/set-state-in-effect": "off" } },
+  // Test files legitimately wire across lane boundaries to construct scenarios
+  // (e.g. a scene test that creates a real store). The import-boundary enforces
+  // PRODUCTION lane isolation; production files remain checked.
+  {
+    files: ["**/*.test.{ts,tsx}", "**/__tests__/**"],
+    rules: { "import/no-restricted-paths": "off" },
+  },
 ];

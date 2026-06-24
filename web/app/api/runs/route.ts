@@ -10,22 +10,6 @@ import { startRun, SlotTakenError } from "@/lib/daemon/daemon";
 import { currentSlot, getSnapshot } from "@/lib/store/persist";
 import { initialRunState } from "@/lib/contract/types";
 
-// Active run generator — module-level singleton for the single slot.
-// ponytail: move to a shared context / singleton module when fan-out is needed.
-let activeHandle: { runId: string; gen: AsyncGenerator<unknown, void, unknown> } | null = null;
-
-/** Drain the generator in the background so the run progresses without a subscriber. */
-function drainInBackground(handle: Awaited<ReturnType<typeof startRun>>): void {
-  const { runId, events } = handle;
-  activeHandle = { runId, gen: events };
-  void (async () => {
-    for await (const _ev of events) {
-      // Persist is done inside the generator; nothing more needed here.
-    }
-    if (activeHandle?.runId === runId) activeHandle = null;
-  })();
-}
-
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!csrfOk(req)) {
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
@@ -54,8 +38,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const runId = crypto.randomBytes(12).toString("hex");
 
   try {
-    const handle = await startRun(runId, body.brief);
-    drainInBackground(handle);
+    // Kicks off the background producer; events flow via the broker + persistence.
+    startRun(runId, body.brief);
     return NextResponse.json({ id: runId }, { status: 201 });
   } catch (e) {
     if (e instanceof SlotTakenError) {
