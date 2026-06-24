@@ -107,7 +107,7 @@ remain the most guarded path:
 - [x] T7 — **audit log** of every spawn (argv + outcome + ts + code, no secrets): append-only `audit` table in `persist.ts`, written by `spawnHarness` at every settle point (exit/timeout/error/refused/invalid-args), on by default.
 - [x] T9 — eslint import-boundary converted to an **allowlist** (`no-restricted-imports` default-deny on the store impl + harness spawn; only `runtime/useRunSession.ts` and `lib/daemon/daemon.ts` re-enabled). Verified a non-allowlisted importer errors.
 - [ ] TB-1 — Tailscale ACL reviewed; confirmed no public/LAN exposure.
-- [ ] `harness.sh` emits **line-delimited JSON events** (the contract `parseHarnessLine` consumes) — without this, live wiring has no structured channel.
+- [x] `harness.sh` emits **line-delimited JSON events** on stdout (the contract `parseHarnessLine` consumes) — `phase`/`subtask`/`gate`/`agentFire`/`approval` around each subcommand, with sibling/git human output routed to stderr so stdout is a pure JSON channel. A contract test runs the real script against a throwaway repo and asserts every line passes `parseHarnessLine`.
 - [ ] This document reviewed and signed off (§8).
 
 Until every box is checked: `ENABLE_PROMOTE_TO_MAIN` stays unset, and the daemon
