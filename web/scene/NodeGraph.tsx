@@ -23,22 +23,27 @@ import { Text } from "@react-three/drei";
 import type { RunStore } from "@/lib/contract/store";
 import { useRunState } from "@/lib/store/useRunState";
 import { project_scene } from "./sceneGraph";
+import { statusColor } from "./tokens";
+import { nodeRender } from "./perf";
 
-const STATUS_COLOR: Record<string, string> = {
-  idle: "#3a3f4b",
-  pending: "#6b7280",
-  active: "#4f9cff",
-  building: "#4f9cff",
-  done: "#39d98a",
-  merged: "#39d98a",
-  reviewed: "#a78bfa",
-  blocked: "#ff5d5d",
-  running: "#4f9cff",
-  failed: "#ff5d5d",
-};
-
-function nodeColor(status?: string): string {
-  return (status && STATUS_COLOR[status]) || "#8a8f99";
+// Emissive strength by status — "live" nodes glow (and pick up bloom); idle stays dim.
+function emissiveIntensity(status?: string): number {
+  switch (status) {
+    case "active":
+    case "building":
+    case "running":
+      return 0.85;
+    case "blocked":
+    case "failed":
+      return 0.75;
+    case "reviewed":
+      return 0.6;
+    case "done":
+    case "merged":
+      return 0.45;
+    default:
+      return 0.12;
+  }
 }
 
 export function NodeGraph({ store }: { store: RunStore }) {
@@ -61,17 +66,25 @@ export function NodeGraph({ store }: { store: RunStore }) {
         {headline}
       </Text>
 
-      {/* nodes as basic meshes */}
-      {graph.nodes.map((n) => (
-        <mesh key={n.id} position={n.position}>
-          {n.kind === "task" ? (
-            <boxGeometry args={[0.7, 0.7, 0.7]} />
-          ) : (
-            <sphereGeometry args={[n.kind === "phase" ? 0.35 : 0.25, 16, 16]} />
-          )}
-          <meshStandardMaterial color={nodeColor(n.status)} />
-        </mesh>
-      ))}
+      {/* nodes as basic meshes; sphere radius respects the min node-radius floor */}
+      {graph.nodes.map((n) => {
+        const color = statusColor(n.status);
+        const radius = nodeRender(n.kind === "phase" ? 0.35 : 0.25).radius;
+        return (
+          <mesh key={n.id} position={n.position}>
+            {n.kind === "task" ? (
+              <boxGeometry args={[0.7, 0.7, 0.7]} />
+            ) : (
+              <sphereGeometry args={[radius, 16, 16]} />
+            )}
+            <meshStandardMaterial
+              color={color}
+              emissive={color}
+              emissiveIntensity={emissiveIntensity(n.status)}
+            />
+          </mesh>
+        );
+      })}
 
       {/* node labels (restrained) */}
       {graph.nodes

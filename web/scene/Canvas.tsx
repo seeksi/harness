@@ -1,32 +1,50 @@
 // web/scene/Canvas.tsx
-// Lane B — the single <Canvas> client mount. Owns the r3f frame loop the store's
-// flush feeds; everything inside reads the store via getSnapshot() in useFrame
-// (NodeGraph), so the scene is a pure projection of RunState with no DOM reads
-// and no hud/** imports. The store instance is passed in (the interface from the
-// contract), so this module never imports the store implementation directly —
-// keeping the eslint import-boundary clean.
+// Lane B — the single <Canvas> client mount. Composes the layered scene off ONE
+// store (the interface, never the impl): instanced ambient backdrop, the live
+// node graph, agent-fire bursts, and bloom postprocessing. Everything reads the
+// store via getSnapshot/useRunState; no DOM reads, no hud/** imports.
 //
-// Minimal lighting + camera only. NO bloom/postprocessing, NO ambient field, NO
-// motion tokens this increment.
-
+// Bloom radius is the locked MAX_BLOOM_RADIUS ceiling; bloom is suppressed under
+// prefers-reduced-motion (design package §reduced-motion: no bloom in motion-lite).
 "use client";
 
 import { Canvas as R3FCanvas } from "@react-three/fiber";
+import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import type { RunStore } from "@/lib/contract/store";
 import { NodeGraph } from "./NodeGraph";
+import { AmbientField } from "./AmbientField";
+import { AgentFireLayer } from "./AgentFireLayer";
+import { BASE_SURFACE } from "./tokens";
+import { MAX_BLOOM_RADIUS } from "./perf";
+import { prefersReducedMotion } from "./motion";
 
 export function Canvas({ store }: { store: RunStore }) {
+  const reduced = prefersReducedMotion();
   return (
     <R3FCanvas camera={{ position: [0, 1, 12], fov: 50 }}>
-      <ambientLight intensity={0.6} />
-      <directionalLight position={[5, 8, 5]} intensity={0.8} />
+      <color attach="background" args={[BASE_SURFACE]} />
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[5, 8, 5]} intensity={0.7} />
+
+      <AmbientField />
       <NodeGraph store={store} />
+      <AgentFireLayer store={store} />
+
+      {!reduced && (
+        <EffectComposer>
+          <Bloom
+            intensity={0.9}
+            radius={MAX_BLOOM_RADIUS}
+            luminanceThreshold={0.2}
+            luminanceSmoothing={0.9}
+            mipmapBlur
+          />
+        </EffectComposer>
+      )}
     </R3FCanvas>
   );
 }
 
-// ponytail: scene composition ceiling.
-// skipped: <EffectComposer>/Bloom.tsx, add with the bloom increment (max-bloom-radius + min-node-radius floor).
-// skipped: AmbientField.tsx instanced backdrop, add with the graphify-field increment.
-// skipped: motion.ts breathing/energy-ramp + reduced-motion handling, add with the motion increment.
-// skipped: perf.ts draw-call ceiling + frameloop policy, add when node/draw counts grow.
+// ponytail: motion.ts breathing is wired into AmbientField; per-node rest-glow pulse
+// + restrained-spring node settle land with the node-motion increment.
+// ponytail: LOD/cull on the ambient layer when the field grows toward the 2k cap.
