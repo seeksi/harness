@@ -32,16 +32,17 @@ fi
 sudo install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0700 "$AGENT_HOME"
 say "ensured $AGENT_HOME (0700, owned by $AGENT_USER)"
 
-# 3. Worktrees dir: created and owned by agent so `git worktree add` (run by deploy via
-#    harness.sh) AND the agent's own writes land here. deploy creates worktrees, agent
-#    writes inside them — both need access, so group = deploy, dir is group-writable +
-#    setgid so children inherit the group.
-#    ponytail: shared dir owned by agent, group deploy. Ceiling: deploy and agent both
-#    write here, so neither is fully isolated from the other's worktrees. Upgrade path:
-#    give each lane its own subdir mode 0700 owned by agent and have deploy create them
-#    via a tiny setuid-agent helper, or move to per-lane bind-mounts / containers.
-sudo install -d -o "$AGENT_USER" -g "deploy" -m 2775 "$WORKTREES"
-say "ensured $WORKTREES (2775, owned by $AGENT_USER:deploy)"
+# 3. Worktrees dir: deploy owns and manages the PARENT. `git worktree add` (run by deploy
+#    via harness.sh) creates each lane checkout here; harness.sh wt-new then chowns that
+#    lane's checkout to the agent, so the agent writes only WITHIN its own lane — never the
+#    parent or sibling lanes. The parent is NOT agent-writable (0755, deploy:deploy): an
+#    agent cannot create/rename/symlink-swap sibling entries here, which closes the TOCTOU
+#    against the root chown in wt-new.
+#    ponytail: per-lane isolation still relies on the wt-new chown. Ceiling: lanes are
+#    agent-owned but not mode-0700 from each other. Upgrade path: give each lane its own
+#    subdir mode 0700 owned by agent, or move to per-lane bind-mounts / containers.
+sudo install -d -o deploy -g deploy -m 0755 "$WORKTREES"
+say "ensured $WORKTREES (0755, owned by deploy:deploy)"
 
 # 3b. Enable LINGER so the agent gets a persistent systemd --user manager + an
 #     XDG_RUNTIME_DIR (/run/user/<uid>) even with no login session. The wrapper runs

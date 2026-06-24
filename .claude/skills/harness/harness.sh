@@ -93,6 +93,26 @@ case "$cmd" in
     [ -n "${2:-}" ] || die "wt-new needs a <slug>"
     emit_phase 2 active
     if sh "$WT" new "$2" "$BASE" >&2; then   # echoes the worktree path → stderr
+      # [#agent ownership] wt-new runs as the daemon user (deploy), so the new worktree
+      # checkout is deploy-owned. But the build agent runs as a SEPARATE low-priv user
+      # ($AGENT_USER) and must Write/Edit the lane files — it can't on a deploy-owned tree.
+      # So hand the checkout dir to the agent. Chown ONLY the worktree files, NEVER the
+      # main repo's .git: the linked gitdir admin must stay deploy-owned so wt-commit can
+      # trust it (wt-commit derives the gitdir from the main .git and never trusts
+      # $wt_path/.git). If $AGENT_USER is unset (dev/test/dry-run) skip entirely — no priv
+      # drop is in play, so no chown is needed and behavior is unchanged.
+      if [ -n "${AGENT_USER:-}" ]; then
+        case "$AGENT_USER" in *[!a-zA-Z0-9_-]*) die "wt-new: AGENT_USER must be [a-zA-Z0-9_-]";; esac
+        case "$2" in *[!a-zA-Z0-9_-]*) die "wt-new: slug must be [a-zA-Z0-9_-]";; esac
+        repo_root=$(git rev-parse --show-toplevel)
+        wt_path="$(cd "$repo_root/.." && pwd)/$(basename "$repo_root").worktrees/$2"
+        [ -d "$wt_path" ] || die "wt-new: lane worktree missing for feat/$2"
+        # [#TOCTOU] The chown runs as root-equiv. `[ -d ]` follows symlinks, so reject a
+        # symlinked checkout dir outright, then chown with -h (never deref a symlink to its
+        # referent) and -- (stop option parsing) so a swapped entry can't redirect the chown.
+        [ ! -L "$wt_path" ] || die "wt-new: $wt_path is a symlink — refusing chown"
+        sudo -n chown -hR -- "$AGENT_USER" "$wt_path" || die "wt-new: chown to $AGENT_USER failed"
+      fi
       emit_subtask "$2" building 2
     else
       rc=$?
