@@ -37,7 +37,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          # Match the deploy target (VPS runs Node 22) — test what we ship.
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: web/package-lock.json
 
