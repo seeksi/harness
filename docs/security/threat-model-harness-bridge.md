@@ -122,6 +122,27 @@ producer stays on the dry-run fixture.
 
 **Decision:** OPEN. Live execution and promote-to-main mutation are **not** authorized.
 
+## 9. TB-1 review runbook (operator)
+
+The network IS the perimeter (no in-app authn, ADR decision). TB-1 passes only if
+ALL of these hold; run on the host and record the outcome in §8.
+
+1. **Not publicly exposed via Tailscale.** Funnel must be OFF for this service:
+   - `tailscale funnel status` → expect "no funnels" (nothing forwarding the app port to the internet).
+   - `tailscale serve status` → if used, confirm it serves only inside the tailnet, not Funnel.
+2. **Server binds to the tailnet/loopback, not a public/LAN NIC.** Confirm how the
+   Next.js server is started — it must bind the Tailscale IP (100.64.0.0/10) or
+   127.0.0.1, never 0.0.0.0 on a public/LAN interface:
+   - `ss -ltnp | grep -E ':3000|next'` (or your port) → the Local Address must be a `100.x` or `127.0.0.1` address, not `0.0.0.0`.
+3. **ACL restricts access to the operator only.** In the tailnet ACL policy, the
+   rule granting the app port must list only the operator's user/device/tag (e.g.
+   `tag:umbrella` or `petervance04@…`), with no wildcard `*` source:
+   - Review the admin console ACL JSON (`acls` + `grants`); confirm no `"src": ["*"]` reaches the app port.
+4. **No other nodes can reach it.** From a non-operator device (or check ACL), the
+   port is unreachable.
+
+Record: who reviewed, date, and the `ss`/`funnel`/ACL evidence summary in §8.
+
 ---
 
 _skipped: formal attack trees / DREAD scoring — STRIDE + the gate checklist is enough
