@@ -70,10 +70,10 @@ must exist before live execution is enabled.
 
 | ID | Threat (STRIDE) | Vector | Current mitigation (in code) | Residual | Required before enable |
 |----|-----------------|--------|------------------------------|----------|------------------------|
-| T1 | **Tampering/Elevation** — command injection on the host | client string reaches `harness.sh $2` / a shell | `buildArgs` accepts only validated patterns (`SLUG`, `SESSION`, `PLAN_FILE`), rejects `..`; `spawnHarness` uses `shell:false`; args are server-constructed | Low | **Replace regex validation with a server-owned enum/allowlist** (slugs = the lanes the daemon actually created; sessions = ids it minted). Regex is defense-in-depth, not the primary control. |
+| T1 | **Tampering/Elevation** — command injection on the host | client string reaches `harness.sh $2` / a shell | **DONE** — ALL `buildArgs` args (slugs, sessions, plan files) gated by a server-owned provenance registry (`registry.ts`): only server-minted values pass; regex demoted to mint-time shape check; `spawnHarness` uses `shell:false`; args server-constructed; no raw client string reaches harness.sh | Low | Done. (Plan-file *path containment* — resolving the minted name under a fixed dir — remains T5.) |
 | T2 | **Tampering** — unauthorized `promote` rewrites `main` | CSRF-driven approve, or daemon auto-promote | `promote` preview-only behind `ENABLE_PROMOTE_TO_MAIN` (default off) at BOTH the approve route and `spawnHarness`; ff-only | Med (highest-value target) | Human-in-the-loop confirm on every promote; ff-only verified; **audit log entry per promote**; flag stays off until §7 complete |
 | T3 | **Spoofing** — forged state-changing request | malicious page in operator's browser | custom header (no CORS ⇒ cross-origin preflight fails) + `Sec-Fetch-Site: same-origin` + same-origin host+scheme | Low | Re-confirm no route mutates on GET; keep no-CORS |
-| T4 | **Information disclosure** — credential/secret leak to client | secret in `harness.sh` output forwarded over SSE | `parseHarnessLine` forwards only known event *types*; stderr drained, never forwarded; browser never sees env | **Med** | **Per-event-type schema validation** — drop unknown fields so a future event field can't smuggle a secret; assert no `ANTHROPIC_API_KEY` in env reaching the browser path |
+| T4 | **Information disclosure** — credential/secret leak to client | secret in `harness.sh` output forwarded over SSE | **DONE** — `parseHarnessLine` validates each event against a per-type schema and copies only whitelisted fields (nested `counts` reduced too); a smuggled extra field is dropped; stderr drained; browser never sees env | Low | Done. Still TODO: assert no `ANTHROPIC_API_KEY` in the env on the browser-facing path (separate §7 box). |
 | T5 | **Information disclosure / Tampering** — path traversal (read/write outside repo) | `planFile`/slug containing `/` or `..` | `PLAN_FILE` = bare filename, `..` rejected, slug pattern has no separators | Low | Resolve plan files against a fixed allow-dir and assert the resolved path stays inside it |
 | T6 | **Denial of service** — host hang / slot lockout | child fills stderr pipe; unbounded buffers; stuck slot | stderr drained; SSE pending buffer bounded (`MAX_PENDING`); single-slot lock; failed runs release the slot + persist `failed` | Low | Spawn timeout/kill (a hung `harness.sh` should not hold the slot forever) |
 | T7 | **Repudiation** — no record of what ran | — | `events`/`runs` persisted (append-only event log) | Med | Log the exact argv + outcome + timestamp for every `spawnHarness` call (no secrets) |
@@ -99,10 +99,10 @@ remain the most guarded path:
 
 ## 7. Gate checklist — ALL required before enabling live execution / promote mutation
 
-- [ ] T1 — `buildArgs` args sourced from a **server-owned enum/allowlist**, not raw regex-validated strings.
-- [ ] T4 — **per-event-type schema validation** in `parseHarnessLine` (drop unknown fields); test that proves no extra fields pass.
+- [x] T1 — `buildArgs` slugs/sessions sourced from a **server-owned provenance registry** (`web/lib/daemon/registry.ts`): only server-minted values reach `harness.sh`; the regex is demoted to a mint-time shape check. (Plan-file path containment remains T5, below.)
+- [x] T4 — **per-event-type schema validation** in `parseHarnessLine` (whitelist fields + validate enums/required; nested `counts` reduced too). Tests prove a smuggled extra field is dropped and bad enums/missing fields drop the event.
 - [ ] T4 — verified the browser-facing path never receives any env/secret; `ANTHROPIC_API_KEY` deletion enforced at process start.
-- [ ] T5 — plan-file resolution constrained to a fixed directory with a containment assertion.
+- [ ] T5 — plan-file resolution constrained to a fixed directory with a containment assertion. (Provenance done — plan files are now minted; remaining: resolve the minted name under a fixed allow-dir and assert the resolved path stays inside it.)
 - [ ] T6 — `spawnHarness` has a **timeout + kill**; a hung child releases the slot.
 - [ ] T7 — **audit log** of every spawn (argv + outcome + ts, no secrets).
 - [ ] T9 — eslint import-boundary converted to an **allowlist**.

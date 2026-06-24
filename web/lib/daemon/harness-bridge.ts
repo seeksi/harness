@@ -14,6 +14,8 @@
 import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildProcess } from "child_process";
 import { createInterface } from "readline";
 import type { SSEEvent } from "@/lib/contract/events";
+import { isLane, isSession, isPlanFile } from "./registry";
+import { HarnessArgError } from "./errors";
 
 export type HarnessSubcommand =
   | { cmd: "budget"; planFile: string }
@@ -23,42 +25,50 @@ export type HarnessSubcommand =
   | { cmd: "trace"; session: string }
   | { cmd: "promote" };
 
-export class HarnessArgError extends Error {
-  constructor(msg: string) {
-    super(msg);
-    this.name = "HarnessArgError";
+// Re-exported for callers/tests that import it from the bridge; defined in errors.ts
+// to keep registry.ts ↔ harness-bridge.ts free of a circular dependency.
+export { HarnessArgError };
+
+// Provenance gate (threat model T1): a slug/session/plan-file reaches harness.sh
+// ONLY if the server minted it (registry.ts), never because a client string happens
+// to match a pattern. This is the primary control; the mint-time regex is defense
+// in depth. NO buildArgs argument is a raw client string.
+function requireLane(slug: string): string {
+  if (typeof slug !== "string" || !isLane(slug)) {
+    throw new HarnessArgError(`unminted lane slug (provenance check failed): ${JSON.stringify(slug)}`);
   }
+  return slug;
 }
-
-// Strict validators — anything outside these patterns is rejected outright.
-const SLUG = /^[a-z][a-z0-9-]{0,30}$/; // worktree/lane slug: lowercase, no separators
-const SESSION = /^[A-Za-z0-9_-]{1,64}$/; // trace session id: hex/alphanum
-const PLAN_FILE = /^[A-Za-z0-9._-]+$/; // bare filename only — no path separators, no ..
-
-function check(pattern: RegExp, value: string, what: string): string {
-  if (typeof value !== "string" || !pattern.test(value) || value.includes("..")) {
-    throw new HarnessArgError(`invalid ${what}: ${JSON.stringify(value)}`);
+function requireSession(id: string): string {
+  if (typeof id !== "string" || !isSession(id)) {
+    throw new HarnessArgError(`unminted session id (provenance check failed): ${JSON.stringify(id)}`);
   }
-  return value;
+  return id;
+}
+function requirePlanFile(name: string): string {
+  if (typeof name !== "string" || !isPlanFile(name)) {
+    throw new HarnessArgError(`unminted plan file (provenance check failed): ${JSON.stringify(name)}`);
+  }
+  return name;
 }
 
 /**
  * Build the exact argv for harness.sh from a validated subcommand. Throws
- * HarnessArgError on any value that isn't a clean enum/pattern match. The result
- * is passed to spawn with shell:false, so no value is ever shell-interpreted.
+ * HarnessArgError on any value that isn't server-minted. The result is passed to
+ * spawn with shell:false, so no value is ever shell-interpreted.
  */
 export function buildArgs(sub: HarnessSubcommand): string[] {
   switch (sub.cmd) {
     case "budget":
-      return ["budget", check(PLAN_FILE, sub.planFile, "plan file")];
+      return ["budget", requirePlanFile(sub.planFile)];
     case "wt-new":
-      return ["wt-new", check(SLUG, sub.slug, "slug")];
+      return ["wt-new", requireLane(sub.slug)];
     case "integ-start":
       return ["integ-start"];
     case "integ-merge":
-      return ["integ-merge", check(SLUG, sub.slug, "slug")];
+      return ["integ-merge", requireLane(sub.slug)];
     case "trace":
-      return ["trace", check(SESSION, sub.session, "session")];
+      return ["trace", requireSession(sub.session)];
     case "promote":
       return ["promote"];
     default: {
@@ -69,23 +79,94 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
   }
 }
 
-// `hello` is intentionally excluded — the SSE stream route owns the resync
-// snapshot; the harness producer only emits deltas.
-const KNOWN_EVENT_TYPES = new Set([
-  "phase",
-  "subtask",
-  "gate",
-  "agentFire",
-  "trace",
-  "budget",
-  "approval",
-]);
+// Per-event-type schemas (threat model §7 / T4). Each event type has a fixed set
+// of allowed fields with a primitive/enum validator; parseHarnessLine copies ONLY
+// these fields into the result. Consequences:
+//   - a future/extra field (e.g. a smuggled credential) is dropped, never forwarded;
+//   - a missing required field or wrong enum drops the whole event;
+//   - `hello` has no schema, so it can never arrive on the wire — the SSE stream
+//     route owns the resync snapshot; the harness producer only emits deltas.
+type Check = (v: unknown) => boolean;
+interface FieldSpec {
+  required: boolean;
+  check: Check;
+  /** optional projection so nested objects are also reduced to known fields. */
+  project?: (v: unknown) => unknown;
+}
+
+const isStr: Check = (v) => typeof v === "string";
+const isNum: Check = (v) => typeof v === "number" && Number.isFinite(v);
+const isBool: Check = (v) => typeof v === "boolean";
+const oneOf =
+  (...allowed: unknown[]): Check =>
+  (v) =>
+    allowed.includes(v);
+const PHASE_ID: Check = (v) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 6;
+const SEVERITY = oneOf("info", "low", "medium", "high", "critical");
+const isCounts: Check = (v) =>
+  typeof v === "object" &&
+  v !== null &&
+  isNum((v as Record<string, unknown>).high) &&
+  isNum((v as Record<string, unknown>).critical);
+
+const SCHEMAS: Record<string, Record<string, FieldSpec>> = {
+  phase: {
+    phase: { required: true, check: PHASE_ID },
+    status: { required: true, check: oneOf("idle", "active", "done", "blocked") },
+  },
+  subtask: {
+    id: { required: true, check: isStr },
+    status: { required: true, check: oneOf("pending", "building", "reviewed", "merged", "blocked") },
+    phase: { required: false, check: PHASE_ID },
+    model: { required: false, check: oneOf("haiku", "sonnet", "opus") },
+  },
+  gate: {
+    id: { required: true, check: oneOf("A", "B", "C", "D") },
+    status: { required: true, check: oneOf("clear", "raised", "resolved") },
+    severity: { required: true, check: SEVERITY },
+    subtaskId: { required: false, check: isStr },
+    counts: {
+      required: false,
+      check: isCounts,
+      project: (v) => ({
+        high: (v as Record<string, unknown>).high,
+        critical: (v as Record<string, unknown>).critical,
+      }),
+    },
+    summary: { required: true, check: isStr },
+    traceReady: { required: false, check: isBool },
+  },
+  agentFire: {
+    id: { required: true, check: isStr },
+    subtaskId: { required: true, check: isStr },
+    kind: { required: true, check: oneOf("route", "review", "gate", "merge", "promote") },
+    severity: { required: true, check: SEVERITY },
+    firedAt: { required: true, check: isNum },
+  },
+  trace: {
+    ts: { required: true, check: isNum },
+    tool: { required: true, check: isStr },
+    sig: { required: true, check: isStr },
+    subtaskId: { required: false, check: isStr },
+  },
+  budget: {
+    ceilingUsd: { required: true, check: isNum },
+    estimatedUsd: { required: true, check: isNum },
+    spentUsd: { required: false, check: isNum },
+    overBy: { required: false, check: isNum },
+  },
+  approval: {
+    phase: { required: true, check: PHASE_ID },
+    kind: { required: true, check: oneOf("decompose-split", "promote-to-main") },
+    state: { required: true, check: oneOf("awaiting", "approved", "rejected") },
+  },
+};
 
 /**
  * Parse one stdout line into an SSEEvent. Expects line-delimited JSON (the
- * harness.sh event contract); any non-JSON line or unknown `type` is ignored
- * (returns null) so human-readable output never leaks to the client and unknown
- * shapes can't be injected.
+ * harness.sh event contract); any non-JSON line, unknown `type`, missing/invalid
+ * required field, or bad enum is ignored (returns null). Only whitelisted fields
+ * are copied through, so human output never leaks and no extra field can ride along.
  */
 export function parseHarnessLine(line: string): SSEEvent | null {
   const trimmed = line.trim();
@@ -96,15 +177,27 @@ export function parseHarnessLine(line: string): SSEEvent | null {
   } catch {
     return null;
   }
-  if (
-    typeof parsed !== "object" ||
-    parsed === null ||
-    typeof (parsed as { type?: unknown }).type !== "string" ||
-    !KNOWN_EVENT_TYPES.has((parsed as { type: string }).type)
-  ) {
-    return null;
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (typeof obj.type !== "string") return null;
+  // Own-property check: a bare `SCHEMAS[obj.type]` would resolve inherited keys
+  // ("constructor", "toString", "__proto__"), letting them bypass the type
+  // whitelist. hasOwnProperty restricts lookup to the declared event types.
+  if (!Object.prototype.hasOwnProperty.call(SCHEMAS, obj.type)) return null;
+  const schema = SCHEMAS[obj.type]; // unknown type (incl. hello) already dropped
+
+  const clean: Record<string, unknown> = { type: obj.type };
+  for (const [key, spec] of Object.entries(schema)) {
+    const val = obj[key];
+    if (val === undefined) {
+      if (spec.required) return null; // missing required field → drop event
+      continue; // optional absent → omit
+    }
+    if (!spec.check(val)) return null; // wrong type/enum → drop event
+    clean[key] = spec.project ? spec.project(val) : val;
   }
-  return parsed as SSEEvent;
+  // Fields on obj that aren't in the schema are simply never copied.
+  return clean as SSEEvent;
 }
 
 export interface SpawnHarnessOptions {

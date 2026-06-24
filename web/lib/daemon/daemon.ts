@@ -58,6 +58,8 @@ export function startRun(runId: string, brief: string): void {
         // Skip the fixture's `hello` — it carries the fixture's run identity and
         // would clobber the real seeded runId/brief. Deltas are self-sufficient.
         // ponytail: replace dryRun iteration with the harness-bridge spawn when real.
+        // When wiring live, mint each lane slug / trace session (registry.mintLane /
+        // mintSession) at planning time — buildArgs rejects any unminted value (T1).
         if (event.type === "hello") continue;
         state = reducer(state, event);
         appendEvent(runId, event);

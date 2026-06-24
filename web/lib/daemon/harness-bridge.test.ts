@@ -1,5 +1,5 @@
 // web/lib/daemon/harness-bridge.test.ts
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Readable } from "stream";
 import { EventEmitter } from "events";
 import type { ChildProcess } from "child_process";
@@ -8,11 +8,17 @@ import {
   parseHarnessLine,
   spawnHarness,
   HarnessArgError,
-  type HarnessSubcommand,
 } from "./harness-bridge";
+import { mintLane, mintSession, mintPlanFile, _resetRegistry } from "./registry";
 
-describe("buildArgs — validated enum→argv (no client strings, no shell)", () => {
-  it("builds clean argv for valid subcommands", () => {
+beforeEach(() => _resetRegistry());
+
+describe("buildArgs — server-minted provenance → argv (no client strings, no shell)", () => {
+  it("builds clean argv for minted slugs/sessions/plan-files + static subcommands", () => {
+    mintLane("scene");
+    mintLane("control-plane");
+    mintSession("abc123_DEF");
+    mintPlanFile("plan.jsonl");
     expect(buildArgs({ cmd: "wt-new", slug: "scene" })).toEqual(["wt-new", "scene"]);
     expect(buildArgs({ cmd: "integ-merge", slug: "control-plane" })).toEqual([
       "integ-merge",
@@ -24,22 +30,27 @@ describe("buildArgs — validated enum→argv (no client strings, no shell)", ()
     expect(buildArgs({ cmd: "promote" })).toEqual(["promote"]);
   });
 
-  it("rejects shell-injection / path-traversal attempts", () => {
-    const bad: HarnessSubcommand[] = [
-      { cmd: "wt-new", slug: "a; rm -rf /" },
-      { cmd: "wt-new", slug: "$(whoami)" },
-      { cmd: "wt-new", slug: "../etc" },
-      { cmd: "wt-new", slug: "Scene" }, // uppercase not allowed
-      { cmd: "wt-new", slug: "" },
-      { cmd: "integ-merge", slug: "a`b`" },
-      { cmd: "trace", session: "a/b" },
-      { cmd: "trace", session: "a b" },
-      { cmd: "budget", planFile: "../../etc/passwd" },
-      { cmd: "budget", planFile: "a;b" },
-      { cmd: "budget", planFile: "a/b.jsonl" },
-    ];
-    for (const sub of bad) {
-      expect(() => buildArgs(sub), JSON.stringify(sub)).toThrow(HarnessArgError);
+  it("rejects a regex-VALID but UNMINTED slug/session/plan-file (provenance over pattern — T1)", () => {
+    // These match the shape regex but were never minted by the server → rejected.
+    expect(() => buildArgs({ cmd: "wt-new", slug: "scene" })).toThrow(HarnessArgError);
+    expect(() => buildArgs({ cmd: "integ-merge", slug: "scene" })).toThrow(HarnessArgError);
+    expect(() => buildArgs({ cmd: "trace", session: "abc123" })).toThrow(HarnessArgError);
+    expect(() => buildArgs({ cmd: "budget", planFile: "plan.jsonl" })).toThrow(HarnessArgError);
+    // After minting, the same value passes.
+    mintLane("scene");
+    expect(buildArgs({ cmd: "wt-new", slug: "scene" })).toEqual(["wt-new", "scene"]);
+  });
+
+  it("mint rejects shell-injection / path-traversal shapes (defense in depth)", () => {
+    const badSlugs = ["a; rm -rf /", "$(whoami)", "../etc", "Scene", "", "a`b`"];
+    for (const s of badSlugs) {
+      expect(() => mintLane(s), s).toThrow(HarnessArgError);
+    }
+    for (const s of ["a/b", "a b", ".."]) {
+      expect(() => mintSession(s), s).toThrow(HarnessArgError);
+    }
+    for (const s of ["../../etc/passwd", "a;b", "a/b.jsonl", ".."]) {
+      expect(() => mintPlanFile(s), s).toThrow(HarnessArgError);
     }
   });
 });
@@ -63,6 +74,49 @@ describe("parseHarnessLine — structured-only, ignores human output", () => {
   it("rejects hello — the stream route owns the resync snapshot", () => {
     expect(parseHarnessLine('{"type":"hello","run":{}}')).toBeNull();
   });
+
+  it("rejects inherited Object keys as types (no prototype-chain bypass)", () => {
+    expect(parseHarnessLine('{"type":"constructor"}')).toBeNull();
+    expect(parseHarnessLine('{"type":"toString"}')).toBeNull();
+    expect(parseHarnessLine('{"type":"hasOwnProperty"}')).toBeNull();
+    expect(parseHarnessLine('{"type":"__proto__"}')).toBeNull();
+  });
+
+  it("strips unknown fields — a smuggled extra field never passes through (T4)", () => {
+    const out = parseHarnessLine(
+      '{"type":"phase","phase":1,"status":"active","ANTHROPIC_API_KEY":"sk-leak","x":1}'
+    );
+    expect(out).toEqual({ type: "phase", phase: 1, status: "active" });
+    expect(out as Record<string, unknown>).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  it("drops events missing a required field or with a bad enum (T4)", () => {
+    expect(parseHarnessLine('{"type":"phase","phase":1}')).toBeNull(); // missing status
+    expect(parseHarnessLine('{"type":"phase","phase":9,"status":"active"}')).toBeNull(); // phase out of range
+    expect(parseHarnessLine('{"type":"phase","phase":1,"status":"nope"}')).toBeNull(); // bad enum
+    expect(parseHarnessLine('{"type":"gate","id":"Z","status":"raised","severity":"high","summary":"x"}')).toBeNull(); // bad gate id
+    expect(parseHarnessLine('{"type":"agentFire","id":"a","subtaskId":"s","kind":"review","severity":"high"}')).toBeNull(); // missing firedAt
+  });
+
+  it("reduces nested counts to known fields only (T4)", () => {
+    const out = parseHarnessLine(
+      '{"type":"gate","id":"C","status":"raised","severity":"high","summary":"x","counts":{"high":2,"critical":1,"secret":"s"}}'
+    );
+    expect(out).toEqual({
+      type: "gate",
+      id: "C",
+      status: "raised",
+      severity: "high",
+      summary: "x",
+      counts: { high: 2, critical: 1 },
+    });
+  });
+
+  it("keeps valid optional fields", () => {
+    expect(
+      parseHarnessLine('{"type":"subtask","id":"st-a","status":"building","phase":2,"model":"opus"}')
+    ).toEqual({ type: "subtask", id: "st-a", status: "building", phase: 2, model: "opus" });
+  });
 });
 
 describe("spawnHarness — shell:false + validated argv + structured-only events", () => {
@@ -80,6 +134,7 @@ describe("spawnHarness — shell:false + validated argv + structured-only events
       return child as unknown as ChildProcess;
     });
 
+    mintLane("scene");
     const events: string[] = [];
     const result = await spawnHarness(
       { cmd: "wt-new", slug: "scene" },
