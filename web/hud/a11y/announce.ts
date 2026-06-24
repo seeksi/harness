@@ -55,6 +55,12 @@ export function announceGateResolved(gateId: GateId): string {
   return `Gate ${gateId} resolved — clear.`;
 }
 
+// Automated verify path: a lane's commit is confirmed (e.g. Gate B "clear").
+// Carries the event summary so the operator is told *what* cleared (the commit).
+export function announceGateCleared(gateId: GateId, summary: string): string {
+  return `Gate ${gateId} clear — ${summary}`;
+}
+
 export function announceSubtaskStatus(id: string, status: SubtaskStatus): string {
   return `Subtask ${id}: ${STATUS_BADGE[status]}`;
 }

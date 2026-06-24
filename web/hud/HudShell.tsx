@@ -17,6 +17,7 @@ import {
   announcePhaseChange,
   announceGateRaised,
   announceGateResolved,
+  announceGateCleared,
   gateUrgency,
 } from "./a11y/announce";
 import { deriveInbox, type InboxItem } from "./inbox";
@@ -44,13 +45,16 @@ function useAnnouncements(state: RunState) {
   useEffect(() => {
     const cur = state;
     const p = prev.current;
-    let nextPolite = "";
+    // Accumulate every polite change in this flush; a single-slot last-wins would
+    // drop a co-occurring transition (e.g. a Gate B "clear"/commit alongside another
+    // gate change in the same frame). Critical escalations stay in the assertive slot.
+    const politeLines: string[] = [];
     let nextAssertive = "";
 
     for (const phase of cur.phases) {
       const prevPhase = p.phases.find((ph) => ph.id === phase.id);
       if (prevPhase && prevPhase.status !== phase.status) {
-        nextPolite = announcePhaseChange(phase.id, phase.status);
+        politeLines.push(announcePhaseChange(phase.id, phase.status));
       }
     }
 
@@ -60,14 +64,17 @@ function useAnnouncements(state: RunState) {
         if (gate.status === "raised") {
           const copy = announceGateRaised(gate.id, gate.severity, gate.summary);
           if (gateUrgency(gate.severity) === "assertive") nextAssertive = copy;
-          else nextPolite = copy;
+          else politeLines.push(copy);
         } else if (gate.status === "resolved") {
-          nextPolite = announceGateResolved(gate.id);
+          politeLines.push(announceGateResolved(gate.id));
+        } else if (gate.status === "clear") {
+          // Automated verify cleared the gate (e.g. a lane committed) — tell the operator.
+          politeLines.push(announceGateCleared(gate.id, gate.summary));
         }
       }
     }
 
-    if (nextPolite) setPolite(nextPolite);
+    if (politeLines.length) setPolite(politeLines.join(" · "));
     if (nextAssertive) setAssertive(nextAssertive);
     prev.current = cur;
   }, [state]);
