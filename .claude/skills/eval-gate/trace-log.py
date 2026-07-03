@@ -16,7 +16,13 @@ def main():
         # stable signature of the input so identical repeated calls (loops) are detectable
         tin = json.dumps(data.get("tool_input", {}), sort_keys=True, default=str)
         sig = hashlib.sha1(tin.encode()).hexdigest()[:8]
-        out_dir = os.path.join(".claude", "traces")
+        # ponytail: repo root = $CLAUDE_PROJECT_DIR, else three dirs up from this
+        # file (.claude/skills/eval-gate/trace-log.py -> repo root). Revisit if
+        # this file ever moves to a different depth under the repo.
+        repo_root = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        )
+        out_dir = os.path.join(repo_root, ".claude", "traces")
         os.makedirs(out_dir, exist_ok=True)
         line = {"ts": round(time.time(), 3), "tool": tool, "sig": sig}
         with open(os.path.join(out_dir, f"{session}.jsonl"), "a") as f:
