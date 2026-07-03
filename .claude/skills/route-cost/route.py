@@ -23,10 +23,16 @@ def route(task: str) -> tuple[str, str]:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("usage: route.py <task description>", file=sys.stderr)
+    args = sys.argv[1:]
+    # ponytail: --project <memory-os-slug> is accepted and IGNORED (forward
+    # plumbing only); wire it to memory-os enrichment when ENABLE_MEMORY_OS lands.
+    if "--project" in args:
+        i = args.index("--project")
+        del args[i:i + 2]
+    if not args:
+        print("usage: route.py [--project <slug>] <task description>", file=sys.stderr)
         return 2
-    task = " ".join(sys.argv[1:])
+    task = " ".join(args)
     tier, why = route(task)
     cfg = json.load(open(os.path.join(os.path.dirname(__file__), "models.json")))
     model = cfg["tiers"][tier]["model"]
