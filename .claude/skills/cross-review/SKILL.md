@@ -5,10 +5,8 @@ description: Cross-model code review. Reviews the current diff with an independe
 
 # Cross-Model Review (Claude × Codex)
 
-Independent review beats self-review because a same-model reviewer shares the
-author's blind spots and rationalizations (sycophancy). The value here is the
-**disagreement** between two providers: Codex tends to run terse and strict;
-Claude tends to downgrade severity and tolerate more. Surface both, bias strict.
+Two independent reviews (Codex fresh-context + Claude self-review), reconciled
+strict-biased. Rationale: `docs/adr/0002-skill-rationale.md`.
 
 ## Hard rules (do not skip)
 
@@ -20,6 +18,10 @@ Claude tends to downgrade severity and tolerate more. Surface both, bias strict.
 3. **On any severity disagreement, take the stricter call.** A human (or the
    orchestrator on low-risk diffs) breaks genuine ties — never auto-resolve downward.
 4. **Severity ≥ High that is unresolved ⇒ verdict is BLOCK.** No merge.
+5. **Memory boundary ⇒ automatic BLOCK.** Any diff that wires `mem_*` calls, memory-os
+   access, or MCP config into agent-facing code (`web/lib/sandbox/**` — e.g. adding
+   `--mcp-config` to the build-agent launcher) is an automatic BLOCK, regardless of
+   any other finding. The zero-MCP build-agent sandbox is a security invariant.
 
 ## Procedure
 
@@ -27,15 +29,13 @@ Claude tends to downgrade severity and tolerate more. Surface both, bias strict.
 ```
 git diff --merge-base origin/main   # or the relevant base; fall back to: git diff HEAD
 ```
-The "spec" is the task description / PR body / ticket the change is supposed to
-satisfy. If none exists, write one sentence stating the intended behavior — Codex
-needs the *intent* to judge correctness, not just the mechanics.
+The spec = the task description / PR body / ticket. If none exists, write one
+sentence stating the intended behavior — Codex needs the *intent*, not just mechanics.
 
 ### 2. Launch the Codex pass (fresh, read-only)
 Call `mcp__codex__codex` with `sandbox: "read-only"`. Pass ONLY the diff + spec in
-the prompt. Use role-split passes — one prompt covering all four lenses is fine for
-mid-scale diffs; split into separate Codex sessions only for large/security-critical
-changes.
+the prompt. One prompt covering all four lenses is fine for mid-scale diffs; split
+into separate Codex sessions only for large/security-critical changes.
 
 `base-instructions` (the reviewer's whole job):
 ```
@@ -54,8 +54,8 @@ Be terse. Flag spec violations as at least High. Do not praise.
 Set `model` to your current Codex model (e.g. `gpt-5.2-codex`) or omit to use the default.
 
 ### 3. Run the Claude self-review in parallel
-In your own context, review the same diff against the same four lenses. This is the
-cheap pass that catches the obvious; it is NOT a substitute for Codex.
+Review the same diff against the same four lenses in your own context. It is NOT
+a substitute for Codex.
 
 ### 4. Reconcile
 Build one merged findings table. For each finding present in either review:
@@ -78,16 +78,12 @@ VERDICT: BLOCK | PASS
 Then: the merged table, and the 1–3 must-fix items if BLOCK.
 ```
 
-## Where this sits in the harness
-
-This is the Phase 1 review gate. It runs after verification (tests + app actually
-run) and before the sequential merge to the integration branch. Wire it as a
-pre-merge step (skill invocation or hook). A BLOCK verdict stops the merge gate.
+Position in the harness: the Phase 1 review gate — after verification (tests +
+app actually run), before the sequential merge to integration. BLOCK stops the merge.
 
 ## Notes / ceiling
 
-skipped: separate Codex sessions per lens — add when diffs routinely exceed a few
-hundred lines or are security-critical (parallel role agents catch more than one
-combined pass). skipped: persisting review transcripts for trace/eval — add in
-Phase 3 when the eval suite lands. skipped: auto-applying Codex fixes — keep
-review and write separate on purpose; apply fixes yourself after reconciling.
+skipped: separate Codex sessions per lens — add when diffs exceed a few hundred lines
+or are security-critical. skipped: persisting review transcripts for trace/eval — add
+when the eval suite needs them. skipped: auto-applying Codex fixes — review and write
+stay separate on purpose; apply fixes yourself after reconciling.

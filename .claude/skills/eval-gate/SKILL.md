@@ -5,13 +5,9 @@ description: Phase 3 of the agent harness — regression evals + trace observabi
 
 # Eval Gate (regression evals + trace observability)
 
-Two layers run on the **integration branch** before promotion to `main`:
-
-1. **Outcome evals** — does the change still do the right thing?
-2. **Trajectory observability** — did the agent get there sanely, or loop/thrash?
-
-Single-run "it passed" is not evidence the harness is healthy; regressions hide in
-both layers. Run both; a failure in either blocks the fast-forward to `main`.
+Two layers run on the **integration branch** before promotion to `main`; a
+failure in either blocks the fast-forward. Rationale:
+`docs/adr/0002-skill-rationale.md`.
 
 ## Layer 1 — Outcome evals (on the integration branch)
 
@@ -24,7 +20,7 @@ Keep two suites, run both in CI on `integration`:
 
 For agent-built behavior that isn't deterministically checkable, add a small
 **planning / LLM-as-judge** check: assert the change forms a sensible plan and meets
-the spec. Keep these few and canonical — they cost tokens and drift.
+the spec. Keep these few and canonical.
 
 Wire it as the step between the Phase 2 sequential merge and the `main` fast-forward:
 ```
@@ -48,23 +44,23 @@ It reports tool-call counts and flags (exit 1 on any hard signal):
 - **EXPLOSION** — total calls over budget (runaway / no plan).
 - **THRASH** — one tool dominates (e.g. all Bash, no progress).
 
-These are the documented agent-failure signals (looping, trace-depth/call spikes).
-Run trace-check in CI on the session that produced the integration branch, or ad hoc
-when an agent run "felt off". Tune `LOOP_RUN` / `MAX_CALLS` / `DOMINANCE` at the top
+Run it in CI on the session that produced the integration branch, or ad hoc when
+an agent run "felt off". Tune `LOOP_RUN` / `MAX_CALLS` / `DOMINANCE` at the top
 of the script for your app's normal shape.
+
+To inspect a trace, distill it — **read the summary, not the raw file**:
+```
+python3 .claude/skills/eval-gate/trace-distill.py .claude/traces/<session>.jsonl
+```
+Prints one compact JSON object (`total_calls`, `tool_histogram`,
+`top_repeated_sig`, `flags`). Informational only; `trace-check.py` owns the
+gating exit code.
 
 ### Enabling the hook
 
 `.claude/settings.json` registers the PostToolUse hook (already wired in this repo).
 Traces are gitignored. If the hook isn't firing, confirm the project `settings.json`
 hook block is present and `python3` is on PATH.
-
-## Where this sits in the harness
-
-Phase 3, on top of Phases 1–2. Layer 1 is the gate before `main`; Layer 2 makes the
-agent runtime observable so trajectory regressions (not just output regressions) are
-visible. Feeds Phase 4 (routing/cost): trajectory data tells you which tasks are
-cheap vs. runaway.
 
 ## Notes / ceiling
 

@@ -5,16 +5,11 @@ description: Run multiple coding agents in parallel safely using git worktrees, 
 
 # Parallel Build (worktree isolation + sequential merge)
 
-Uncoordinated parallel agents are dangerous: they generate overlapping changes
-with partial context, producing merge conflicts, **duplicated implementations, and
-semantic contradictions that pass compile and lint**. Worktrees fix this by giving
-each agent its own working dir + index over a shared object store — conflicts get
-deferred to intentional merge points and surface as ordinary git conflicts that
-existing tooling resolves. Never skip the decomposition or the sequential merge;
-they are what make parallelism safe rather than just fast.
+Worktrees isolate each agent; the sequential merge serializes conflicts. Never
+skip the decomposition or the sequential merge — they are what make parallelism
+safe rather than just fast. Rationale: `docs/adr/0002-skill-rationale.md`.
 
-Cap: **3–5 concurrent agents.** Beyond that, merge/reconcile overhead exceeds the
-parallelism gain.
+Cap: **3–5 concurrent agents.**
 
 ## Procedure
 
@@ -25,9 +20,11 @@ Split the task into subtasks that are:
 - **Testable** — each has its own acceptance check.
 - **Bounded** — write a one-line spec + the file/dir ownership for each.
 
-Write the decomposition to `NOTES.md` (orchestrator-owned) so it survives context
-compaction and every worktree agent can read the same boundaries. Refuse to start
-if two subtasks claim write-ownership of the same file.
+Write the decomposition to `NOTES.md` (orchestrator-owned, append-only) so it
+survives context compaction, and emit one `NOTES.<slug>.md` per subtask (~15
+lines: one-line spec + owned files + acceptance check only — see the harness
+skill for the templates). Refuse to start if two subtasks claim write-ownership
+of the same file.
 
 ### 2. Create one worktree per subtask
 ```
@@ -35,8 +32,9 @@ if two subtasks claim write-ownership of the same file.
 ```
 Worktrees land in `../<repo>.worktrees/<slug>` on branch `feat/<slug>` off `main`.
 Launch one agent per worktree (a subagent, or background tasks). Give each agent
-ONLY its spec + its file ownership — not the others' specs. Optional per-task model
-routing: cheap model for boilerplate subtasks, top model for the hard one.
+ONLY its own `NOTES.<slug>.md` — never the master NOTES.md or the others' specs.
+Optional per-task model routing: cheap model for boilerplate subtasks, top model
+for the hard one.
 
 ### 3. Verify each worktree independently (quality gate)
 In each worktree, before it is eligible to merge:
@@ -53,9 +51,7 @@ git merge --no-ff feat/<slug>             # resolve conflicts here, deliberately
 <run full build + test suite on integration>   # catch semantic conflicts lint missed
 ```
 Merge order: lowest-risk / most-foundational first. After each merge, run the FULL
-suite on `integration` — this is where duplicated logic and semantic contradictions
-that passed each worktree's local tests get caught. Only when `integration` is green
-through all branches:
+suite on `integration`. Only when `integration` is green through all branches:
 ```
 git checkout main && git merge --ff-only integration
 ```
@@ -65,18 +61,10 @@ git checkout main && git merge --ff-only integration
 .claude/skills/parallel-build/wt.sh clean      # removes merged worktrees + branches
 ```
 
-## Where this sits in the harness
-
-Phase 2, on top of Phase 1. Each worktree's pre-merge gate IS the cross-review skill.
-The sequential integration-branch step is the merge gate the cross-review verdict
-feeds into. Phase 3 (evals/observability) later runs on the integration branch so
-regressions are caught before main.
-
 ## Notes / ceiling
 
-skipped: automated merge-order selection — currently you pick (foundational first);
-add a dependency-graph sort when batches routinely exceed ~5 subtasks. skipped:
-locking/coordination between live agents — relies on disjoint file ownership from
-step 1 instead; add a coordinator agent only if ownership keeps colliding. skipped:
-auto-rebasing long-lived worktrees onto a moving main — fine for short batches; add
-when a batch outlives a day of main activity.
+skipped: automated merge-order selection — you pick foundational-first; add a
+dependency-graph sort past ~5 subtasks. skipped: locking between live agents —
+disjoint file ownership from step 1 covers it; add a coordinator only if ownership
+keeps colliding. skipped: auto-rebasing worktrees onto a moving main — fine for
+short batches; add when a batch outlives a day of main activity.

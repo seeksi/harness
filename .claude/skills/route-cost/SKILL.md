@@ -5,10 +5,9 @@ description: Phase 4 of the agent harness — per-task model routing and cost co
 
 # Model Routing + Cost Controls (Phase 4)
 
-Running every subtask on Opus is the default waste at mid-scale. Route by what the
-task needs: Haiku for mechanical/read-only work, Sonnet for ordinary implementation,
-Opus only for hard reasoning and correctness-critical steps (architecture, security,
-and the cross-review **reconcile**). Caching and a budget ceiling keep the bill bounded.
+Route by what the task needs: Haiku for mechanical/read-only work, Sonnet for
+ordinary implementation, Opus only for hard reasoning and correctness-critical
+steps. Rationale: `docs/adr/0002-skill-rationale.md`.
 
 Rates live in `models.json` (cheap=Haiku, default=Sonnet, top=Opus), sourced from the
 claude-api reference — re-verify against the Models API / pricing docs before trusting
@@ -19,13 +18,14 @@ the numbers for billing.
 ```
 python3 .claude/skills/route-cost/route.py "<task description>"
 ```
-Prints the tier and the Claude model id. Wire it into delegation:
+Prints the tier and the Claude model id. An optional `--project <slug>` flag is
+accepted and ignored (forward plumbing for memory-os; distinct from mem_route —
+never merge them). Wire it into delegation:
 - **Subagents** — pass the printed model id as the subagent's model (cheap explore
   agents on Haiku, the hard implementation on Opus).
 - **Cross-review (Phase 1)** — Claude self-review and the reconcile run on `top`
   (Opus); Codex is the independent lane regardless.
-- **parallel-build (Phase 2)** — route each worktree subtask independently; this is
-  the "per-task model routing" the decision framework calls for.
+- **parallel-build (Phase 2)** — route each worktree subtask independently.
 
 Routing table (the forks):
 
@@ -38,7 +38,8 @@ Routing table (the forks):
 ## Cost estimate + budget gate
 
 Write a JSONL plan (token fields are thousands of tokens; `cached_ktok` is the input
-portion served from cache, billed at ~0.1× the input rate):
+portion served from cache, billed at ~0.1× the input rate; an optional `"project"`
+field is tolerated and ignored):
 ```
 {"task":"scaffold module","tier":"cheap","in_ktok":10,"out_ktok":4}
 {"task":"implement handler","tier":"default","in_ktok":25,"out_ktok":8,"cached_ktok":15}
@@ -61,16 +62,10 @@ actuals read Claude Code's `/cost`.
 3. **Right-size `max_tokens` / effort** — lower effort on cheap/mechanical subtasks.
 4. **Budget alarm** — the ceiling gate stops a runaway batch before it spends.
 
-## Where this sits in the harness
-
-Phase 4, the last layer. It feeds on Phase 3 trace data (trajectory shape tells you
-which task classes run cheap vs. runaway) and applies across Phases 1–2 (which model
-each review/worktree subtask uses).
-
 ## Notes / ceiling
 
-skipped: a learned/LLM classifier for routing — keyword routing is enough at mid-scale;
-add when task descriptions stop matching keywords. skipped: pulling real token usage
-from Claude Code transcripts into budget.py — `/cost` covers actuals today; wire it in
-when you want automated post-hoc cost reports. skipped: Fable 5 (`claude-fable-5`,
-$10/$50) as a fourth tier — add only when a task genuinely exceeds Opus.
+skipped: a learned/LLM classifier for routing — add when task descriptions stop
+matching keywords. skipped: pulling real token usage from transcripts into
+budget.py — `/cost` covers actuals; wire in for automated post-hoc cost reports.
+skipped: Fable 5 (`claude-fable-5`, $10/$50) as a fourth tier — add only when a
+task genuinely exceeds Opus.

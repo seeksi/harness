@@ -5,26 +5,23 @@ description: Top-level orchestrator that runs the full four-phase agent harness 
 
 # The Harness (orchestrator over the four phases)
 
-The four phase-skills each do one job; nothing chains them. This skill is the
-driver. It owns the two *subjective* steps itself — decomposing the task and the
-cross-review reconcile/verdict — and delegates the *mechanical* steps to
-`harness.sh`, which only sequences the existing phase scripts (`route.py`,
-`budget.py`, `wt.sh`, `trace-check.py`) plus the integration-branch git
-transitions no phase script covers. Reimplement nothing.
+You own the two *subjective* steps — decomposition and the cross-review
+reconcile/verdict — and delegate the *mechanical* steps to `harness.sh` (which
+only sequences the phase scripts + integration-branch git transitions).
+Reimplement nothing. Rationale: `docs/adr/0002-skill-rationale.md`.
 
 ## Autonomy policy
 
 Run the batch **autonomously**. Halt automatically only on a real gate failure
 (over budget, cross-review BLOCK, integration suite red, eval red, trace anomaly).
 Require **exactly one** human go/no-go: immediately before promoting to `main`
-(`harness.sh promote`) — the only irreversible, shared-state step. Worktree
-creation is reversible (`harness.sh clean`) and is covered by the budget approval,
-so it gets no separate stop.
+(`harness.sh promote`) — the only irreversible, shared-state step.
 
 ## State machine
 
 ```
-S0 DECOMPOSE      [you]      write NOTES.md (below). Refuse if two subtasks write the same file.
+S0 DECOMPOSE      [you]      write NOTES.md + NOTES.status.json + one NOTES.<slug>.md per subtask
+                             (below). Refuse if two subtasks write the same file.
 S1 ROUTE+BUDGET   [script]   route.py per subtask -> tier; you write plan.jsonl; harness.sh budget.
                              GATE A: exit 1 -> HALT (report total vs ceiling). Nothing irreversible yet.
 S2 BUILD/slug     [you+script] harness.sh wt-new <slug>; implement in the worktree on the routed model.
@@ -44,32 +41,44 @@ S7 ACCOUNT+CLEAN  [script]   note actual cost vs the S1 estimate (read /cost); h
 
 ## Routing (Phase 4) applied throughout
 
-Use `route.py "<subtask spec>"` for each subtask and for the review work:
-- architecture / security / review / **the cross-review reconcile** / migration / hard debug → `top` (Opus)
-- scaffold / tests / docs / rename / format / lint / explore / read → `cheap` (Haiku)
-- everything else → `default` (Sonnet)
+Run `route.py "<subtask spec>"` for each subtask and for the review work; it
+prints the tier + model id (tier table lives in the route-cost skill). The
+cross-review reconcile always routes `top`.
 
 ## Gate B: cross-review (the hard rule that must survive)
 
 When you reach S3, invoke the `cross-review` skill on the worktree diff. Its
 independence is load-bearing: **Codex gets a fresh context with only the diff +
-the one-line spec from NOTES.md** — never your own reasoning or self-review.
+the one-line spec from NOTES.<slug>.md** — never your own reasoning or self-review.
 Reconcile strict-biased; any unresolved High/Critical = BLOCK = no merge.
 
 ## State this skill owns
 
-**`NOTES.md`** (target repo root — survives context compaction):
+**`NOTES.md`** (target repo root — survives context compaction). **Append-only
+during a run** (never rewrite lines — keeps it byte-stable / prompt-cache
+eligible). Live status lives in `NOTES.status.json`, not here. The `project:`
+header is optional forward plumbing (memory-os slug, ignored today).
 ```
 # <task>  — base: <BASE> (default main)
+project: <memory-os-slug>            # optional; ignored today
 
 ## Subtasks
-- slug: hello    spec: "add hello() greeter"     owns: src/hello.js          tier: cheap   status: pending
-- slug: bye      spec: "add bye() farewell"       owns: src/bye.js            tier: cheap   status: pending
+- slug: hello    spec: "add hello() greeter"     owns: src/hello.js          tier: cheap
+- slug: bye      spec: "add bye() farewell"       owns: src/bye.js            tier: cheap
 ```
-status ∈ pending|building|reviewed|merged|blocked. 3-5 subtasks, each independent
-(no shared write-file), testable (its own check), bounded (one-line spec + owned paths).
+3-5 subtasks, each independent (no shared write-file), testable (its own check),
+bounded (one-line spec + owned paths).
 
-**`plan.jsonl`** (input to `harness.sh budget`, token fields are thousands):
+**`NOTES.status.json`** (repo root, volatile — the ONLY place status changes;
+never write status into NOTES.md): `{"hello": "pending", "bye": "building"}`,
+status ∈ pending|building|reviewed|merged|blocked.
+
+**`NOTES.<slug>.md`** — one per subtask, ~15 lines max: the one-line spec, the
+owned files/dirs, and the acceptance check. Nothing else. Point each worktree
+agent at its own `NOTES.<slug>.md` — never at the master NOTES.md.
+
+**`plan.jsonl`** (input to `harness.sh budget`, token fields are thousands;
+an optional `"project"` field is tolerated and ignored):
 ```
 {"task":"add hello() greeter","tier":"cheap","in_ktok":12,"out_ktok":4,"cached_ktok":8}
 {"task":"add bye() farewell","tier":"cheap","in_ktok":12,"out_ktok":4,"cached_ktok":8}
@@ -82,16 +91,31 @@ You author this from the decomposition + `route.py` tiers (estimates are yours).
 ## harness.sh subcommands (the mechanical glue)
 
 ```
-harness.sh budget <plan.jsonl>   Gate A — exit 1 if over ceiling_usd
-harness.sh wt-new <slug>         create feat/<slug> worktree off the base
-harness.sh integ-start           create integration off the base
-harness.sh integ-merge <slug>    git merge --no-ff feat/<slug> (stops on conflict)
-harness.sh trace <session>       Gate D L2 — check .claude/traces/<session>.jsonl
-harness.sh promote               guarded --ff-only of base to integration (only after the human go)
-harness.sh clean                 remove merged worktrees + delete integration
+harness.sh budget <plan.jsonl>       Gate A — exit 1 if over ceiling_usd
+harness.sh wt-new <slug>             create feat/<slug> worktree off the base
+harness.sh integ-start               create integration off the base
+harness.sh integ-merge <slug>        git merge --no-ff feat/<slug> (stops on conflict)
+harness.sh trace <session>           Gate D L2 — check .claude/traces/<session>.jsonl
+harness.sh promote                   guarded --ff-only of base to integration (only after the human go)
+harness.sh clean [keep-session ...]  remove merged worktrees + delete integration + prune stale traces
 ```
 Set `HARNESS_BASE=<branch>` to target a non-`main` base (smoke tests). The base
 must already exist.
+
+## Memory (optional)
+
+All memory-os integration is orchestrator-side, behind `ENABLE_MEMORY_OS`
+(default off). Hard boundaries:
+- Memory calls ONLY at the `[you]`-owned steps **S0/S3/S5/S7** — never in
+  `harness.sh`, the phase scripts, or the build agents (zero-MCP sandbox, no Bash).
+- `route.py` (model tier) and memory-os `mem_route` (project→skill→agent) are
+  **orthogonal** — never merge them.
+- Writes are **summary-only at run boundaries**, exclusively through
+  `web/lib/memory/proposeFromHarness.ts` (secret-scan + provisional/queue
+  semantics live there). Never feed raw `.claude/traces/*.jsonl` into a write.
+- Failures never block Gates A–D: reads fail open (skip enrichment), writes queue.
+- harness.sh's stdout event contract RESERVES `type:"memory"` (comment only —
+  the script never emits it).
 
 ## Preconditions
 

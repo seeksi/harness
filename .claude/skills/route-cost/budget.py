@@ -9,6 +9,8 @@ actuals, read Claude Code's /cost or the session usage.
 Plan line shape (token fields are thousands of tokens):
   {"task": "build auth", "tier": "top", "in_ktok": 40, "out_ktok": 8, "cached_ktok": 30}
 cached_ktok is the portion of input served from cache (billed at the read rate).
+An optional "project" field (memory-os slug) is tolerated and ignored — forward
+plumbing only; unknown fields never affect pricing.
 """
 import sys, json, os
 

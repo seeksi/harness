@@ -11,6 +11,8 @@
 # EVENT CONTRACT (consumed by web/lib/daemon/harness-bridge.ts parseHarnessLine):
 # STDOUT is a stream of line-delimited JSON events ONLY — one compact object per
 # line, each with a "type" in {phase,subtask,gate,agentFire,trace,budget,approval}.
+# type:"memory" is RESERVED for future memory-os enrichment events — this script
+# never emits it today, but consumers must treat it as part of the vocabulary.
 # All human/sibling output goes to STDERR so the stdout channel stays pure JSON.
 # parseHarnessLine drops anything it doesn't recognize, so accidental stdout noise
 # is non-fatal, but keep it on stderr by convention.
@@ -25,7 +27,8 @@
 #   harness.sh trace <session>       Gate D L2: check .claude/traces/<session>.jsonl
 #   harness.sh promote               guarded fast-forward of base to integration (run only after the human go)
 #   harness.sh reset-base            best-effort: return the main repo checkout to the base branch (idempotent; never fails the caller)
-#   harness.sh clean                 remove merged worktrees + delete integration
+#   harness.sh clean [session ...]   remove merged worktrees + delete integration + prune stale
+#                                    traces (named sessions kept; with none, keep last 24h)
 set -eu
 
 # --- resolve this script's dir (follow a one-level symlink so siblings resolve) ---
@@ -396,9 +399,27 @@ case "$cmd" in
     reclaim_worktrees
     sh "$WT" clean "$BASE" >&2
     git branch -d integration 2>/dev/null && echo "deleted integration" >&2 || true
+    # Trace hygiene: prune .claude/traces/*.jsonl not belonging to the current run.
+    # Extra args = session ids to KEEP; with none, keep only traces touched in the
+    # last 24h. All output → stderr (stdout stays the pure JSON event channel).
+    # ponytail: mtime is the "current run" proxy in the no-arg form; pass session
+    # ids explicitly when a run outlives a day.
+    shift
+    for f in .claude/traces/*.jsonl; do
+      [ -e "$f" ] || break
+      keep=0
+      if [ $# -gt 0 ]; then
+        for s in "$@"; do [ "$f" = ".claude/traces/$s.jsonl" ] && keep=1; done
+      else
+        [ -n "$(find "$f" -mtime -1 2>/dev/null)" ] && keep=1
+      fi
+      if [ "$keep" -eq 0 ]; then
+        rm -f -- "$f" 2>/dev/null && echo "pruned trace $f" >&2 || true
+      fi
+    done
     ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | reset-base | clean}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | reset-base | clean [keep-session ...]}" >&2
     exit 2
     ;;
 esac
