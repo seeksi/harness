@@ -125,6 +125,30 @@ opus, ordinary build/ship work → sonnet.
   ```
 - **Python 3** and **git** for the Phase 2–4 helper scripts.
 
+## Memory (optional)
+
+`memory-os` (separate repo, `~/claude/memory-os`) is an optional cross-session
+memory layer, coupled to HARNESS only at the MCP level.
+
+Behind `ENABLE_MEMORY_OS` (default off) — unset, nothing changes. Hard boundaries:
+
+- **Orchestrator/daemon-side only.** Build agents are zero-MCP sandboxed; memory
+  calls happen only at the `[you]`-owned run boundaries **S0/S3/S5/S7**, never in
+  `harness.sh`, the phase scripts, or a build agent's context.
+- **One write path.** Writes go exclusively through
+  [`web/lib/memory/proposeFromHarness.ts`](web/lib/memory/proposeFromHarness.ts),
+  summary-only at those same run boundaries — never raw `.claude/traces/*.jsonl`.
+- **Reads fail open.** A memory-os outage skips enrichment silently; it never
+  blocks Gates A–D.
+
+Decisions and constraints don't land as committed knowledge automatically: they're
+ledgered to `data/memory-pending-provisionals.jsonl` as **provisional** until an
+operator confirms them. (memory-os's own `audit_required` is not that gate — the
+human gate lives on the HARNESS side.)
+
+Verify with `deploy/tier3/conformance-memory.sh` and the `web` vitest suite
+(`web/lib/memory/*.test.ts`).
+
 ## Status
 
 All four phases are implemented and were smoke-tested end-to-end (a real Claude×Codex
