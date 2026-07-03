@@ -1,0 +1,3 @@
+{"task":"make the PostToolUse trace hook work from any cwd","tier":"default","in_ktok":20,"out_ktok":4,"cached_ktok":12,"project":"harness"}
+{"task":"operator CLI to list/confirm/reject pending provisional memory records","tier":"default","in_ktok":30,"out_ktok":8,"cached_ktok":15,"project":"harness"}
+{"task":"README section documenting the memory-os integration","tier":"default","in_ktok":18,"out_ktok":3,"cached_ktok":10,"project":"harness"}
