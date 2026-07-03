@@ -21,6 +21,11 @@ const modulePresent = fs.existsSync(MODULE_PATH);
 
 async function loadModule(env: Record<string, string | undefined>) {
   vi.resetModules();
+  // Isolate the real ledgers: without these stubs, approved/queued test records
+  // land in the live ./data/*.jsonl files on every suite run.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "propose-ledgers-"));
+  vi.stubEnv("MEMORY_PENDING_PATH", path.join(tmp, "pending.jsonl"));
+  vi.stubEnv("MEMORY_QUEUE_PATH", path.join(tmp, "queue.jsonl"));
   for (const [k, v] of Object.entries(env)) vi.stubEnv(k, v);
   return import("./proposeFromHarness");
 }
