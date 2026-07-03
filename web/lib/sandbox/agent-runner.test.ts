@@ -79,6 +79,37 @@ describe("buildAgentArgs / containedWorktree", () => {
   });
 });
 
+describe("MCP lockdown REGRESSION (memory boundary — any loosening must fail loudly)", () => {
+  // Load-bearing invariant: build agents get ZERO MCP. --strict-mcp-config with NO
+  // --mcp-config means the agent can never reach memory-os (or any connector) — all
+  // memory traffic stays orchestrator/daemon-side. Adding --mcp-config in ANY form
+  // (separate element or --mcp-config=path) is a security regression.
+  const mcpConfigForms = (args: string[]) => args.filter((a) => /^--mcp-config(=|$)/.test(a));
+
+  it("buildAgentArgs ALWAYS emits --strict-mcp-config and NEVER any --mcp-config form", () => {
+    mintLane("lane-x");
+    const args = buildAgentArgs(spec());
+    expect(args).toContain("--strict-mcp-config");
+    expect(mcpConfigForms(args)).toEqual([]);
+  });
+
+  it("the lockdown holds at the actual spawn boundary (runAgentInSandbox argv)", async () => {
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+    mintLane("lane-x");
+    let capturedArgs: string[] | undefined;
+    const spawnFn = vi.fn((_cmd: string, args: string[]) => {
+      capturedArgs = args;
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"session_id":"sess-mcp0001"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    await runAgentInSandbox({ prompt: "x", cwd: wt("lane-x"), sessionId: "lane-x", spawnFn: spawnFn as never });
+    expect(capturedArgs).toContain("--strict-mcp-config");
+    expect(mcpConfigForms(capturedArgs!)).toEqual([]);
+  });
+});
+
 describe("relocateTrace", () => {
   it("rejects an unminted lane (provenance) before touching the filesystem", () => {
     mintSession("sess-abc123");
