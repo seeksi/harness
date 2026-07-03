@@ -93,10 +93,13 @@ You author this from the decomposition + `route.py` tiers (estimates are yours).
 ```
 harness.sh budget <plan.jsonl>       Gate A — exit 1 if over ceiling_usd
 harness.sh wt-new <slug>             create feat/<slug> worktree off the base
+harness.sh wt-commit <slug>          commit the lane after the agent edits (harness commits, not the agent)
+harness.sh wt-verify <slug>          Gate B — verify the lane is committed before it may merge
 harness.sh integ-start               create integration off the base
 harness.sh integ-merge <slug>        git merge --no-ff feat/<slug> (stops on conflict)
 harness.sh trace <session>           Gate D L2 — check .claude/traces/<session>.jsonl
 harness.sh promote                   guarded --ff-only of base to integration (only after the human go)
+harness.sh reset-base                best-effort return of the repo to the base branch after a run (never fails the caller)
 harness.sh clean [keep-session ...]  remove merged worktrees + delete integration + prune stale traces
 ```
 Set `HARNESS_BASE=<branch>` to target a non-`main` base (smoke tests). The base
