@@ -85,6 +85,15 @@ describe("pendingLedger", () => {
     expect(readLedger()[0].operator_confirmed).toBe(false); // untouched
   });
 
+  it("confirm(id) refuses an already-rejected entry (no contradictory state)", async () => {
+    writeLedger([
+      { ts: 1, slug: "s", recordType: "decision", update_id: "upd_1", record: {}, operator_confirmed: false, rejected: true },
+    ]);
+    const mod = await loadModule();
+    expect(mod.confirm("upd_1")).toBe(false);
+    expect(readLedger()[0].operator_confirmed).toBe(false); // untouched
+  });
+
   it("reject(id) marks rejected:true, removes it from listPending, and persists it", async () => {
     writeLedger([
       { ts: 1, slug: "s", recordType: "constraint", update_id: "upd_1", record: {}, operator_confirmed: false },

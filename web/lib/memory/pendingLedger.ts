@@ -54,13 +54,13 @@ export function listPending(): PendingEntry[] {
   }
 }
 
-/** Flip operator_confirmed=true for the entry keyed by update_id. false = not found or failed. */
+/** Flip operator_confirmed=true for the entry keyed by update_id. false = not found, rejected, or failed. */
 export function confirm(id: string): boolean {
   const file = PENDING_FILE();
   try {
     const entries = readAll(file);
     const entry = entries.find((e) => e.update_id === id);
-    if (!entry) return false;
+    if (!entry || entry.rejected) return false;
     entry.operator_confirmed = true;
     writeAll(file, entries);
     return true;
