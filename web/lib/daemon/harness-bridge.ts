@@ -163,6 +163,23 @@ const isCounts: Check = (v) =>
   isNum((v as Record<string, unknown>).high) &&
   isNum((v as Record<string, unknown>).critical);
 
+/**
+ * Every event kind the harness stdout contract names. "memory" is RESERVED for the
+ * memory-os integration (ENABLE_MEMORY_OS): the name is claimed here so producers and
+ * consumers agree on it, but it has NO SCHEMAS entry yet — parseHarnessLine drops a
+ * "memory" line exactly like any unrecognized type, and nothing emits it anywhere.
+ * Implementing it requires a SCHEMAS entry plus an SSEEvent contract change.
+ */
+export type HarnessEventKind =
+  | "phase"
+  | "subtask"
+  | "gate"
+  | "agentFire"
+  | "trace"
+  | "budget"
+  | "approval"
+  | "memory"; // RESERVED — not implemented
+
 const SCHEMAS: Record<string, Record<string, FieldSpec>> = {
   phase: {
     phase: { required: true, check: PHASE_ID },
