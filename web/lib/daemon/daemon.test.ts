@@ -77,8 +77,10 @@ describe("startRun — live per-lane interleave", () => {
     expect(agentCalls[0]).toMatchObject({
       slug: "lane-a",
       worktreePath: worktreePathFor("lane-a"),
-      taskPrompt: "build it",
+      // The task text plus the injected context-budget (handoff) instructions.
+      taskPrompt: expect.stringContaining("build it"),
     });
+    expect(agentCalls[0].taskPrompt).toContain("## Context budget");
     // The trace gate uses the session the AGENT actually reported.
     const traceCall = calls.find((c) => c[0] === "trace")!;
     expect(traceCall[1]).toBe("sess-xyz123");
@@ -424,6 +426,92 @@ describe("startRun — multi-lane concurrency + serial git", () => {
     expect(getSnapshot("run-3throw")?.task.state).toBe("failed");
     const git = calls.map((c) => c[0]);
     expect(git).not.toContain("integ-merge");
+  });
+});
+
+describe("startRun — context-management handoff respawn", () => {
+  const usageAt = (costUsd: number, cacheReadTokens = 100_000) => ({
+    inputTokens: 5,
+    outputTokens: 400,
+    cacheReadTokens,
+    cacheCreationTokens: 0,
+    contextWindow: 200_000,
+    costUsd,
+  });
+
+  it("respawns ONCE when the agent hands off: second prompt inlines HANDOFF.md, archive called", async () => {
+    const { fn: spawnFn, calls } = harnessFake(0);
+    const prompts: string[] = [];
+    const runAgent = vi.fn(async (spec: AgentSpec) => {
+      prompts.push(spec.taskPrompt);
+      return { code: 0, sessionId: "sess-ho" };
+    });
+    // First read (attempt 0) finds a handoff; the respawned attempt finds none.
+    const bodies: (string | null)[] = ["## Next steps\n1. finish the reducer", null];
+    const archived: Array<[string, number]> = [];
+    const handoffFs = {
+      read: vi.fn(() => bodies.shift() ?? null),
+      archive: vi.fn((slug: string, n: number) => archived.push([slug, n])),
+    };
+
+    await runToCompletion("run-ho", "x", { live: true, plan: onePlan, spawnFn, runAgent, handoffFs });
+
+    expect(runAgent).toHaveBeenCalledTimes(2);
+    expect(prompts[0]).not.toContain("Handoff from the previous agent");
+    expect(prompts[1]).toContain("## Handoff from the previous agent");
+    expect(prompts[1]).toContain("1. finish the reducer");
+    expect(prompts[1]).toContain("## Context budget");
+    expect(archived).toEqual([["lane-a", 0]]);
+    // The lane still finalizes/merges exactly once (one wt-commit, one integ-merge).
+    expect(calls.map((c) => c[0]).filter((c) => c === "wt-commit")).toHaveLength(1);
+    expect(getSnapshot("run-ho")?.task.state).toBe("done");
+  });
+
+  it("caps respawns at MAX_HANDOFFS (default 2): 1 + 2 attempts, run still completes", async () => {
+    const { fn: spawnFn } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 0, sessionId: "sess-cap" }));
+    const handoffFs = {
+      read: vi.fn(() => "still not done"), // a handoff after EVERY attempt
+      archive: vi.fn(),
+    };
+
+    await runToCompletion("run-hocap", "x", { live: true, plan: onePlan, spawnFn, runAgent, handoffFs });
+
+    expect(runAgent).toHaveBeenCalledTimes(3); // initial + 2 respawns
+    expect(handoffFs.archive).toHaveBeenCalledTimes(2); // the capped attempt is not archived
+    expect(getSnapshot("run-hocap")?.task.state).toBe("done");
+  });
+
+  it("does NOT respawn on a failed agent even if HANDOFF.md exists (failure blocks the run)", async () => {
+    const { fn: spawnFn } = harnessFake(0);
+    const runAgent = vi.fn(async () => ({ code: 1, sessionId: null }));
+    const handoffFs = { read: vi.fn(() => "partial work"), archive: vi.fn() };
+
+    await runToCompletion("run-hofail", "x", { live: true, plan: onePlan, spawnFn, runAgent, handoffFs });
+
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(handoffFs.read).not.toHaveBeenCalled(); // non-zero exit never consults the handoff
+    expect(getSnapshot("run-hofail")?.task.state).toBe("failed");
+  });
+
+  it("emits one usage event PER ATTEMPT: totalCostUsd sums, the lane shows the last attempt", async () => {
+    const { fn: spawnFn } = harnessFake(0);
+    let attempt = 0;
+    const runAgent = vi.fn(async () => ({
+      code: 0,
+      sessionId: "sess-hu",
+      usage: usageAt(attempt++ === 0 ? 0.5 : 0.25, attempt === 1 ? 150_000 : 40_000),
+    }));
+    const bodies: (string | null)[] = ["handoff body", null];
+    const handoffFs = { read: vi.fn(() => bodies.shift() ?? null), archive: vi.fn() };
+
+    const seen = await runToCompletion("run-hu", "x", { live: true, plan: onePlan, spawnFn, runAgent, handoffFs });
+
+    expect(seen.filter((e) => e.type === "usage")).toHaveLength(2);
+    const snap = getSnapshot("run-hu");
+    expect(snap?.usage.totalCostUsd).toBeCloseTo(0.75); // accumulated across attempts
+    expect(snap?.usage.lanes["lane-a"]?.costUsd).toBeCloseTo(0.25); // latest attempt wins the row
+    expect(snap?.usage.lanes["lane-a"]?.cacheReadTokens).toBe(40_000);
   });
 });
 

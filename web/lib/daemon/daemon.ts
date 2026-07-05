@@ -13,10 +13,10 @@
 // needs Max-plan auth on the host); promote remains gated inside spawnHarness.
 
 import { createHash } from "crypto";
-import { writeFileSync, mkdirSync } from "fs";
-import { dirname } from "path";
+import { writeFileSync, mkdirSync, readFileSync, renameSync } from "fs";
+import { dirname, join } from "path";
 import { reducer } from "@/lib/contract/events";
-import { initialRunState } from "@/lib/contract/types";
+import { initialRunState, CONTEXT_HARD } from "@/lib/contract/types";
 import type { RunState } from "@/lib/contract/types";
 import type { SSEEvent } from "@/lib/contract/events";
 import { dryRun } from "@/lib/contract/fixture";
@@ -142,6 +142,63 @@ async function asyncPool<T, R>(
   return results;
 }
 
+// Context-management: a judgment-based handoff instruction injected into every lane
+// prompt. A one-shot `claude -p` agent cannot observe its own token count mid-run, so
+// the in-run signal is the agent's judgment; the MEASURED signal (usage ratio vs
+// CONTEXT_HARD) only exists at completion and is logged in the build loop.
+// ponytail: no live mid-run token enforcement for sandboxed agents.
+const CONTEXT_GUARD_PROMPT = `
+## Context budget (mandatory)
+You have a finite context window. If you judge you cannot FINISH this task
+comfortably (roughly: you've done a lot of reading/editing and are still far from
+done), STOP and hand off instead of degrading:
+1. Write HANDOFF.md in your working directory with sections:
+   Current state / Decisions / Files touched / Next steps / Dead ends.
+2. Then stop immediately. Do not start new edits after writing HANDOFF.md.
+A fresh agent will be started with your HANDOFF.md. Prefer a clean handoff over a
+rushed, broken finish.`;
+
+// Cap when inlining the previous attempt's HANDOFF.md into the respawn prompt —
+// head-preserving truncate, well under agent-runner's MAX_PROMPT (100k chars).
+const HANDOFF_INLINE_CAP = 20_000;
+
+function buildLanePrompt(task: string, handoff?: string): string {
+  const h = handoff
+    ? `\n## Handoff from the previous agent (continue from here)\n${handoff.slice(0, HANDOFF_INLINE_CAP)}\n`
+    : "";
+  return `${task}\n${h}${CONTEXT_GUARD_PROMPT}`;
+}
+
+/** Handoff-file access (injectable so tests avoid real worktrees). */
+type HandoffFs = {
+  read(slug: string): string | null;
+  archive(slug: string, attempt: number): void;
+};
+
+const defaultHandoffFs: HandoffFs = {
+  read(slug) {
+    try {
+      return readFileSync(join(worktreePathFor(slug), "HANDOFF.md"), "utf8");
+    } catch {
+      return null; // no handoff written — the normal case
+    }
+  },
+  archive(slug, attempt) {
+    renameSync(
+      join(worktreePathFor(slug), "HANDOFF.md"),
+      join(worktreePathFor(slug), `HANDOFF.${attempt}.md`)
+    );
+  },
+};
+
+// Max fresh-agent respawns per lane after a clean handoff (HANDOFF.md + exit 0).
+// At the cap the last result stands and the lane proceeds to the normal gates.
+const MAX_HANDOFFS = (() => {
+  const raw = Number(process.env.CONTEXT_MAX_HANDOFFS);
+  const n = Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+  return Math.min(5, Math.max(0, n));
+})();
+
 /** Milliseconds between dry-run event yields (simulates a live stream). */
 const DRY_RUN_DELAY_MS = 50;
 
@@ -181,6 +238,8 @@ export interface StartRunOptions {
   writePlan?: (plan: RunPlan) => void;
   /** TEST-ONLY seam: injectable trace relocation. IGNORED unless test. */
   relocate?: (slug: string, session: string) => boolean;
+  /** TEST-ONLY seam: injectable handoff-file access. IGNORED unless test. */
+  handoffFs?: HandoffFs;
 }
 
 /**
@@ -258,11 +317,13 @@ async function runLive(
     runAgent?: RunAgentFn;
     writePlan?: (plan: RunPlan) => void;
     relocate?: (slug: string, session: string) => boolean;
+    handoffFs?: HandoffFs;
   }
 ): Promise<void> {
   const runAgent = opts.runAgent ?? defaultRunAgent;
   const writePlan = opts.writePlan ?? writePlanFile;
   const relocate = opts.relocate ?? relocateTrace;
+  const handoffFs = opts.handoffFs ?? defaultHandoffFs;
 
   // Pre-mint ALL provenance up front, so a malformed plan fails BEFORE any harness
   // side effect (no half-created worktrees from a bad later lane).
@@ -295,15 +356,41 @@ async function runLive(
   // prod, an injected fake in tests). allSettled (NOT all) so one rejection never leaves
   // another's unhandled and the pool always drains before we inspect outcomes.
   type LaneBuild = Awaited<ReturnType<RunAgentFn>>;
-  const builds = await asyncPool<LaneStep, LaneBuild>(LANE_CONCURRENCY, plan.lanes, (lane, i) =>
-    runAgent({
-      slug: lane.slug,
-      worktreePath: worktreePathFor(lane.slug),
-      taskPrompt: lane.taskPrompt,
-      model: lane.model,
-      user: laneUsers[i], // run as this lane's OS user — the same user that owns its 0700 worktree
-    })
-  );
+  const builds = await asyncPool<LaneStep, LaneBuild>(LANE_CONCURRENCY, plan.lanes, async (lane, i) => {
+    // Handoff-respawn loop: an agent that judged it couldn't finish (see
+    // CONTEXT_GUARD_PROMPT) writes HANDOFF.md and exits 0; the next attempt reruns
+    // in the SAME worktree (same uid — no wt-new/chown between attempts) with the
+    // handoff inlined. Trigger is HANDOFF.md EXISTENCE, not the usage ratio —
+    // usage is post-hoc, and a lane that finished at 80% finished. ponytail:
+    // ratio >= CONTEXT_HARD without a handoff is logged only, never respawned.
+    let handoff: string | undefined;
+    for (let attempt = 0; ; attempt++) {
+      const res = await runAgent({
+        slug: lane.slug,
+        worktreePath: worktreePathFor(lane.slug),
+        taskPrompt: buildLanePrompt(lane.taskPrompt, handoff),
+        model: lane.model,
+        user: laneUsers[i], // run as this lane's OS user — the same user that owns its 0700 worktree
+      });
+      // Surface ACTUAL usage/cost/context per ATTEMPT (HUD gauges): the lane row
+      // shows the latest attempt; totalCostUsd accumulates across attempts.
+      if (res.usage) {
+        onEvent({ type: "usage", subtaskId: lane.slug, ...res.usage });
+        const { cacheReadTokens, inputTokens, contextWindow } = res.usage;
+        if (contextWindow > 0 && (cacheReadTokens + inputTokens) / contextWindow >= CONTEXT_HARD) {
+          console.error(
+            `[daemon] lane '${lane.slug}' attempt ${attempt} ended at ` +
+              `${Math.round(((cacheReadTokens + inputTokens) / contextWindow) * 100)}% context fill ` +
+              `(hard limit ${CONTEXT_HARD * 100}%)`
+          );
+        }
+      }
+      const next = res.code === 0 && attempt < MAX_HANDOFFS ? handoffFs.read(lane.slug) : null;
+      if (next === null) return res;
+      handoffFs.archive(lane.slug, attempt); // a stale HANDOFF.md must not retrigger
+      handoff = next;
+    }
+  });
 
   // Block the WHOLE run BEFORE any merge if any lane rejected OR exited non-zero — a run
   // with a failed lane must not merge. (We still emit usage for the lanes that produced
@@ -321,15 +408,9 @@ async function runLive(
     throw new HarnessExitError(`agent for lane '${lane.slug}' ${why}`);
   }
 
-  // All builds succeeded — fold to the per-lane results in lane order.
+  // All builds succeeded — fold to the per-lane results in lane order. (Usage was
+  // already emitted per attempt inside the build loop.)
   const results = builds.map((b) => (b as PromiseFulfilledResult<LaneBuild>).value);
-
-  // Surface ACTUAL usage/cost/context per lane (HUD token + context gauges), in lane
-  // order. Best-effort: a failed-parse / no-result agent reports null → no event.
-  plan.lanes.forEach((lane, i) => {
-    const { usage } = results[i];
-    if (usage) onEvent({ type: "usage", subtaskId: lane.slug, ...usage });
-  });
 
   // Phase 3 — FINALIZE EACH LANE: SERIAL, lane order. All git/serial.
   for (let i = 0; i < plan.lanes.length; i++) {
@@ -430,6 +511,7 @@ export function startRun(runId: string, brief: string, opts: StartRunOptions = {
           runAgent: testSeam ? opts.runAgent : undefined,
           writePlan: testSeam ? opts.writePlan : undefined,
           relocate: testSeam ? opts.relocate : undefined,
+          handoffFs: testSeam ? opts.handoffFs : undefined,
         });
         pipe.markDone(); // live pipeline ran to completion → snapshot reflects done
       } else {

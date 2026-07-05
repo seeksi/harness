@@ -9,6 +9,15 @@
             "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/skills/eval-gate/trace-log.py"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/skills/context-guard/context-guard.py"
+          }
+        ]
       }
     ]
   }

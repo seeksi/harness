@@ -1,4 +1,5 @@
 .claude/traces/
+.claude/context-guard/
 .claude/council-cache/
 .playwright-mcp/
 node_modules/

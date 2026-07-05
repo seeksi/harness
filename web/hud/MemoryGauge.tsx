@@ -6,14 +6,16 @@
 "use client";
 
 import type { RunState, LaneUsage } from "@/lib/contract/types";
+import { CONTEXT_SOFT, CONTEXT_HARD } from "@/lib/contract/types";
 import { glassSurface } from "./glass";
 
 const MONO = "var(--font-mono)";
 
-// Accent ramp by fill pressure: idle→rest→mid→vivid→neon as the window fills.
+// Accent ramp by fill pressure, aligned with the context-management thresholds:
+// vivid at the soft limit (checkpoint), neon at the hard limit (handoff territory).
 function rampColor(ratio: number): string {
-  if (ratio >= 0.9) return "var(--accent-neon)";
-  if (ratio >= 0.7) return "var(--accent-vivid)";
+  if (ratio >= CONTEXT_HARD) return "var(--accent-neon)";
+  if (ratio >= CONTEXT_SOFT) return "var(--accent-vivid)";
   if (ratio >= 0.4) return "var(--accent-mid)";
   if (ratio > 0) return "var(--accent-rest-glow)";
   return "var(--accent-dim-fill)";
@@ -87,6 +89,14 @@ function LaneBar({ id, lane }: { id: string; lane: LaneUsage }) {
           in {fmt(lane.inputTokens)} · out {fmt(lane.outputTokens)} · cache {fmt(lane.cacheReadTokens)}
         </span>
         <span data-testid={`lane-window-${id}`}>
+          {hasWindow && ratio >= CONTEXT_HARD ? (
+            <span
+              data-testid={`lane-tier-${id}`}
+              style={{ color: "var(--accent-neon)", fontWeight: 700, marginRight: 6 }}
+            >
+              HANDOFF
+            </span>
+          ) : null}
           {hasWindow ? `${fmt(used)}/${fmt(lane.contextWindow)} (${pct}%)` : "n/a"}
         </span>
       </div>

@@ -54,6 +54,25 @@ describe("MemoryGauge", () => {
     expect(screen.getByTestId("lane-window-st-z").textContent).toBe("n/a");
   });
 
+  it("shows no HANDOFF tag below the hard limit, a HANDOFF tag at/above it", () => {
+    const lane = withUsage.usage.lanes["st-a"];
+    const state: RunState = {
+      ...withUsage,
+      usage: {
+        totalCostUsd: 0,
+        lanes: {
+          // (120_000 + 2_000) / 200_000 = 61% — soft territory, no tag
+          soft: { ...lane, cacheReadTokens: 120_000, inputTokens: 2_000 },
+          // (150_000 + 2_000) / 200_000 = 76% — handoff territory, tagged
+          hard: { ...lane, cacheReadTokens: 150_000, inputTokens: 2_000 },
+        },
+      },
+    };
+    render(<MemoryGauge state={state} open />);
+    expect(screen.queryByTestId("lane-tier-soft")).toBeNull();
+    expect(screen.getByTestId("lane-tier-hard").textContent).toBe("HANDOFF");
+  });
+
   it("shows an empty state when there is no lane usage", () => {
     render(<MemoryGauge state={initialRunState} open />);
     expect(screen.getByTestId("memory-empty")).toBeInTheDocument();

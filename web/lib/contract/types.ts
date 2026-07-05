@@ -95,6 +95,13 @@ export interface RunState {
 // agree on this bound so the trace feed never grows unbounded (ADR risk 17).
 export const TRACE_WINDOW = 500;
 
+// Context-fill thresholds (fractions of contextWindow). SOFT: warn + start handoff
+// prep. HARD: stop, write HANDOFF.md, hand off to a fresh agent. The interactive
+// hook (.claude/skills/context-guard/context-guard.py) duplicates these values
+// (cross-language; env-overridable there).
+export const CONTEXT_SOFT = 0.6;
+export const CONTEXT_HARD = 0.75;
+
 // The canonical idle RunState. Defined, never undefined: qa requires getSnapshot()
 // to return a defined value before any event arrives. The six-phase rail is seeded
 // idle with its locked labels; everything else is empty / zeroed.
