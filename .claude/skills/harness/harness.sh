@@ -25,6 +25,7 @@
 #   harness.sh integ-start           create the integration branch off the base
 #   harness.sh integ-merge <slug>    merge feat/<slug> into integration (--no-ff)
 #   harness.sh trace <session>       Gate D L2: check .claude/traces/<session>.jsonl
+#   harness.sh loop-tick             loop-mode Stop Rule: bump NOTES.loop.json, exit 1 = stop the loop
 #   harness.sh promote               guarded fast-forward of base to integration (run only after the human go)
 #   harness.sh reset-base            best-effort: return the main repo checkout to the base branch (idempotent; never fails the caller)
 #   harness.sh clean [session ...]   remove merged worktrees + delete integration + prune stale
@@ -334,6 +335,40 @@ case "$cmd" in
       exit "$rc"                          # propagate LOOP/EXPLOSION/THRASH
     fi
     ;;
+  loop-tick)
+    # Loop-mode Stop Rule (deterministic — the model never self-judges the stop).
+    # Run FIRST each /loop tick. Reads+updates NOTES.loop.json (the loop ledger)
+    # against NOTES.status.json: bumps iteration, tracks stall (consecutive ticks
+    # with an unchanged status fingerprint), then exits 0 = continue, 1 = STOP
+    # with the reason in the ledger's "stop" field: target-reached (all subtasks
+    # merged — go ask the S6 human) | max-iterations | stalled. Human output on
+    # stderr; no stdout event (type:"loop" stays out of the event vocabulary).
+    root=$(git rev-parse --show-toplevel) || die "loop-tick: not in a git repo"
+    [ -f "$root/NOTES.loop.json" ] || die "loop-tick: no NOTES.loop.json (loop mode not initialized at S0)"
+    [ -f "$root/NOTES.status.json" ] || die "loop-tick: no NOTES.status.json"
+    python3 - "$root" >&2 <<'PYEOF'
+import json, hashlib, sys, os
+os.chdir(sys.argv[1])
+led = json.load(open("NOTES.loop.json"))
+st  = json.load(open("NOTES.status.json"))
+fp = hashlib.sha1(json.dumps(st, sort_keys=True).encode()).hexdigest()
+led["stall"] = led.get("stall", 0) + 1 if fp == led.get("last_fp") else 0
+led["last_fp"] = fp
+led["iteration"] = led.get("iteration", 0) + 1
+stop = ""
+if st and all(v == "merged" for v in st.values()):
+    stop = "target-reached"
+elif led["iteration"] >= led.get("max_iterations", 10):
+    stop = "max-iterations"
+elif led["stall"] >= led.get("max_stall", 2):
+    stop = "stalled"
+led["stop"] = stop
+with open("NOTES.loop.json", "w") as f:
+    json.dump(led, f, indent=1)
+print(f"loop-tick: iteration={led['iteration']} stall={led['stall']} stop={stop or 'no (continue)'}")
+sys.exit(1 if stop else 0)
+PYEOF
+    ;;
   promote)
     # promote is a manual operator command run after reset-base may have returned HEAD
     # to BASE, so it must not assume it starts on integration — it switches there itself.
@@ -419,7 +454,7 @@ case "$cmd" in
     done
     ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | promote | reset-base | clean [keep-session ...]}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | loop-tick | promote | reset-base | clean [keep-session ...]}" >&2
     exit 2
     ;;
 esac

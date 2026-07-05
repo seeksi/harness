@@ -1,6 +1,6 @@
 ---
 name: harness
-description: Top-level orchestrator that runs the full four-phase agent harness end to end — decompose a task, route+budget-gate it (Phase 4), build each subtask in an isolated worktree gated by a cross-review PASS (Phases 1-2), merge sequentially through an integration branch, run evals + a trajectory check (Phase 3), then fast-forward to main. Use on "run the harness", "full pipeline", "build this end to end", or to drive cross-review / parallel-build / eval-gate / route-cost as one flow.
+description: Top-level orchestrator that runs the full four-phase agent harness end to end — decompose a task, route+budget-gate it (Phase 4), build each subtask in an isolated worktree gated by a cross-review PASS (Phases 1-2), merge sequentially through an integration branch, run evals + a trajectory check (Phase 3), then fast-forward to main. Use on "run the harness", "full pipeline", "build this end to end", or to drive cross-review / parallel-build / eval-gate / route-cost as one flow. Also runs under /loop (loop mode): each tick advances the state machine one step, with harness.sh loop-tick as the deterministic stop rule.
 ---
 
 # The Harness (orchestrator over the four phases)
@@ -39,6 +39,43 @@ S6 PROMOTE        [CHECKPOINT] all gates green -> ask the human go/no-go -> harn
 S7 ACCOUNT+CLEAN  [script]   note actual cost vs the S1 estimate (read /cost); harness.sh clean.
 ```
 
+## Loop mode (/loop as the tick, eval-gate as Eval + Trace)
+
+For long batches, run the state machine under `/loop` so each wake-up advances
+it **one step** instead of one giant turn: `/loop /harness <task>` (self-paced
+via ScheduleWakeup) or `/loop 10m /harness <task>` (fixed interval). The seven
+loop parts map to existing pieces — nothing reinvented:
+
+| Part      | Owner |
+|-----------|-------|
+| State     | `NOTES.status.json` (subtask state) + `NOTES.loop.json` (loop ledger) |
+| Target    | the NOTES.md decomposition — every subtask `merged`, Gates A–D green |
+| Observe   | tick start: read `NOTES.status.json` + the last eval/trace result |
+| Action    | advance exactly ONE state-machine step (S2–S5) for the next eligible slug |
+| Eval      | eval-gate Layer 1 — the S5 regression/judge suites (HARD) |
+| Trace     | eval-gate Layer 2 — `harness.sh trace <session>` |
+| Stop Rule | `harness.sh loop-tick` — deterministic; NEVER model self-judgment |
+
+At S0, alongside the other NOTES files, write **`NOTES.loop.json`** (repo root,
+volatile like NOTES.status.json):
+```
+{"target":"<one line>","iteration":0,"max_iterations":10,"stall":0,"max_stall":2,"last_fp":"","stop":""}
+```
+
+Every tick, in this order:
+1. `harness.sh loop-tick` FIRST. **Exit 1 → the loop is over: do NOT schedule
+   the next wake-up.** Read `stop` from the ledger: `target-reached` → report
+   and ask the S6 human go/no-go (the loop never auto-promotes);
+   `max-iterations` / `stalled` → HALT and report the stuck slug + gate.
+2. Observe: `NOTES.status.json` → pick the next eligible slug/step.
+3. Act: one step only — one build, one review, one merge, or the S5 eval+trace pass.
+4. Dynamic mode only: ScheduleWakeup with the same /loop prompt.
+
+`stall` counts consecutive ticks with an unchanged `NOTES.status.json`; raise
+`max_stall` in the ledger when a single step legitimately spans several ticks
+(long builds). All other rules — gates, autonomy policy, the S6 human
+checkpoint — apply unchanged.
+
 ## Routing (Phase 4) applied throughout
 
 Run `route.py "<subtask spec>"` for each subtask and for the review work; it
@@ -73,6 +110,9 @@ bounded (one-line spec + owned paths).
 never write status into NOTES.md): `{"hello": "pending", "bye": "building"}`,
 status ∈ pending|building|reviewed|merged|blocked.
 
+**`NOTES.loop.json`** (repo root, volatile — loop mode only; schema above).
+Written by you at S0, updated ONLY by `harness.sh loop-tick` after that.
+
 **`NOTES.<slug>.md`** — one per subtask, ~15 lines max: the one-line spec, the
 owned files/dirs, and the acceptance check. Nothing else. Point each worktree
 agent at its own `NOTES.<slug>.md` — never at the master NOTES.md.
@@ -98,6 +138,7 @@ harness.sh wt-verify <slug>          Gate B — verify the lane is committed bef
 harness.sh integ-start               create integration off the base
 harness.sh integ-merge <slug>        git merge --no-ff feat/<slug> (stops on conflict)
 harness.sh trace <session>           Gate D L2 — check .claude/traces/<session>.jsonl
+harness.sh loop-tick                 loop-mode Stop Rule — bump NOTES.loop.json; exit 1 = stop the loop
 harness.sh promote                   guarded --ff-only of base to integration (only after the human go)
 harness.sh reset-base                best-effort return of the repo to the base branch after a run (never fails the caller)
 harness.sh clean [keep-session ...]  remove merged worktrees + delete integration + prune stale traces
