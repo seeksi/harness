@@ -1,0 +1,5 @@
+# run-focus
+spec: Deep-linkable run steering view at console/app/run/[id]: focus-size PhaseRail owns the top-left quadrant (6 phases, position, building subtasks, next); virtualized live feed (streaming agent/tool events, auto-follow w/ scroll-lock, per-line ts/agent/event/cost tick); inline gate cards (id A-D, what's blocked, evidence links, amber approve / red reject w/ confirm); token-primary budget + per-lane context-fill meters (60/75 thresholds); stale freeze+badge; single-column restack <1024px. Wire to existing fleetStore/SSE + selectors. Reuse existing components (PhaseRail, meters) — extend, don't fork.
+owns: console/app/run/**, console/components/run/**
+acceptance: cd console && npx vitest run passes (new: feed virtualization windowing, gate-card actions, route param wiring) && npm run build passes && /run/<fixture-run-id> SSR-renders phase rail + feed for a fixture run.
+read: DESIGN_SPEC.md §5 (run-focus hierarchy, components, states), §6 (metrics). Contract in console/lib/contract/.

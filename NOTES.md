@@ -61,3 +61,10 @@ project: harness
 - Gate C: console 44/44 + build clean; web 277 pass (integration).
 - Gate D L1: judge PASS (spec conformance, independent test/build/serve re-run). L2: trace 9831dd07 clean, 94 calls, no anomalies.
 - Awaiting S6 human go/no-go to promote integration -> main.
+
+## Subtasks (Batch B — off main b0482f6, parallel worktrees)
+- slug: run-focus    spec: "app/run/[id] steering view: focus-size phase rail top-left, live feed, gate cards, budget/context meters, deep-linkable, phone restack"  owns: console/app/run/**, console/components/run/**  tier: TBD
+- slug: deck         spec: "app/deck observability route: trace forensics explorer (search+filters run/lane/agent/type), tool-call detail w/ full args/outputs/timing, diff viewer, eval results, burn/eval charts"  owns: console/app/deck/**, console/components/deck/**  tier: TBD
+- slug: graph        spec: "app/graph/[projectId]: activity-driven progressive-disclosure workflow graph + full-swarm showpiece toggle, pan/zoom, 60fps, capture-worthy"  owns: console/app/graph/**, console/components/graph/**  tier: TBD
+- slug: live-bridge  spec: "real event producer: POST /api/runs spawns harness.sh w/ typed argv (port web harness-bridge security pattern), events -> persist + SSE broadcast + ntfy hooks, wall-clock health nowSec, events cap + eventsSince LIMIT, /api/projects N+1 fix, gate-id-aware approve"  owns: console/lib/server/**, console/app/api/**, console/lib/bridge/**, console/components/RunLane.tsx, console/components/FleetHome.tsx  tier: TBD
+note: deck router said cheap; orchestrator held default (search/filter/virtualization/path-validation logic). Priced default in plan.jsonl.

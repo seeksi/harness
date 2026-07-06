@@ -1,0 +1,5 @@
+# graph
+spec: Workflow graph at console/app/graph/[projectId]: activity-driven progressive disclosure — active/recent agents as nodes, idle niche agents auto-collapse into parent/group nodes; edges light on handoffs (functional, quiet — no decorative choreography); full-swarm SHOWPIECE toggle (entire agent worktree at once, alive: pulses on working agents, phase-transition punctuation) — the demo wow-shot, must be capture-worthy; pan/zoom (wheel+drag, touch pinch); node click -> agent state/trace snippet. 60fps on hundreds of nodes: canvas or SVG w/ rAF batching, no react re-render per tick; prefers-reduced-motion freezes texture. Data: agent roster from /api/projects discovery + agentEvents from store; layout deterministic (no Math.random at render).
+owns: console/app/graph/**, console/components/graph/**
+acceptance: cd console && npx vitest run passes (new: collapse/disclosure logic, layout determinism) && npm run build passes && /graph/<fixture-project> renders; showpiece toggle works.
+read: DESIGN_SPEC.md §2 (progressive disclosure, showpiece), §3 (motion vocabulary), §5. Contract in console/lib/contract/.

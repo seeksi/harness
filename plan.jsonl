@@ -1,1 +1,4 @@
-{"task":"foundation: console/ app skeleton per DESIGN_SPEC.md","tier":"top","in_ktok":220,"out_ktok":90,"cached_ktok":120}
+{"task":"run-focus steering view","tier":"default","in_ktok":110,"out_ktok":40,"cached_ktok":60}
+{"task":"observability deck","tier":"default","in_ktok":110,"out_ktok":40,"cached_ktok":60}
+{"task":"workflow graph + showpiece","tier":"default","in_ktok":120,"out_ktok":45,"cached_ktok":60}
+{"task":"live-bridge (security-critical)","tier":"top","in_ktok":170,"out_ktok":60,"cached_ktok":80}
