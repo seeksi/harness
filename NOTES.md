@@ -50,3 +50,14 @@ project: harness
 - DESIGN_SPEC.md signed off 2026-07-06; committed to main this batch.
 - Decomposition rationale: greenfield lanes cannot import an unpromoted contract; Batch A is single-slug by design.
 - Next steps if respawned: S1 route+budget -> wt-new foundation -> background build agent (worktree ../HARNESS.worktrees/foundation, read console spec from DESIGN_SPEC.md + NOTES.foundation.md) -> S3 cross-review -> integ-merge -> evals -> human go/no-go -> promote -> Batch B.
+
+## Gate B round 1 (foundation): BLOCK — 3 must-fix
+1. stream/route.ts: Last-Event-ID null->0 coercion drops frame 0 (guard null, cursor=-1)
+2. sse/client.ts: reconnect recreates EventSource, loses cursor (track lastEventId explicitly)
+3. RunLane.tsx: approve buttons use green; token rule = amber interactions
++ add SSE resume tests (no-header->frame0; Last-Event-ID:N -> N+1). Follow-ups logged: events cap/LIMIT, N+1, auth-note, live-bridge wiring (persist+notifier+wall-clock health) -> Batch B.
+
+## Batch A gates: ALL GREEN (2026-07-06)
+- Gate C: console 44/44 + build clean; web 277 pass (integration).
+- Gate D L1: judge PASS (spec conformance, independent test/build/serve re-run). L2: trace 9831dd07 clean, 94 calls, no anomalies.
+- Awaiting S6 human go/no-go to promote integration -> main.
