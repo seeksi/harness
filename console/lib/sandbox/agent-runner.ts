@@ -168,6 +168,15 @@ export function buildAgentArgs(spec: AgentSpec): string[] {
     // account-synced servers (Gmail/Drive/Calendar/…), global, and project .mcp.json.
     // The tool allowlist blocks CALLING mcp__* tools; this blocks CONNECTING at all.
     "--strict-mcp-config",
+    // A headless agent has NO interactive approver: without this it falls back to plan
+    // mode (or blocks on the first permission prompt) and never executes — it just plans
+    // and asks "want me to proceed?" (found in the first live smoke run). Bypassing the
+    // permission PROMPT is not a guardrail loss here: the real guardrails are the exact
+    // --allowedTools allowlist (which tools), --strict-mcp-config (no MCP), the
+    // credential-free minimal env, worktree-cwd confinement, and the timeout. This is
+    // consistent with the decided direct-local + full-toolset(incl. Bash) posture — the
+    // agent is meant to run autonomously as the operator. (feat/agent-exec-wire follow-up.)
+    "--dangerously-skip-permissions",
   ];
 }
 

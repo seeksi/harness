@@ -54,6 +54,7 @@ describe("buildAgentArgs / containedWorktree", () => {
       "--allowedTools",
       "Read,Edit,Write,Grep,Glob,Bash",
       "--strict-mcp-config",
+      "--dangerously-skip-permissions",
     ]);
   });
 
@@ -63,6 +64,13 @@ describe("buildAgentArgs / containedWorktree", () => {
     const args = buildAgentArgs(spec());
     expect(args).toContain("--strict-mcp-config");
     expect(args).not.toContain("--mcp-config");
+  });
+
+  it("bypasses the permission PROMPT so the headless agent actually executes (not plan mode)", () => {
+    mintLane("lane-x");
+    // A headless agent has no interactive approver; without this it stalls in plan mode.
+    // The real guardrails remain the tool allowlist + strict-mcp + minimal env + cwd + timeout.
+    expect(buildAgentArgs(spec())).toContain("--dangerously-skip-permissions");
   });
 
   it("rejects an unminted lane (provenance)", () => {

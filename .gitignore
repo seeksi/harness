@@ -3,3 +3,4 @@
 .claude/council-cache/
 .playwright-mcp/
 node_modules/
+data/
