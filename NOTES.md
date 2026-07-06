@@ -89,3 +89,5 @@ note: deck router said cheap; orchestrator held default (search/filter/virtualiz
 
 ## Subtasks (Batch C — off main 3bf12a9)
 - slug: polish-wire  spec: "cross-view seams: deck drill-through from run focus (?run= + palette entries), desk chime on gate-raise (mutable, pref-respecting), phone restack pass on deck/graph, /brand page w/ 3 name proposals as Oxanium wordmarks, Project.id made opaque in discovery (+dependents), ntfy deep-link base URL config"  owns: console/** (cross-cutting, single lane)  tier: default
+
+## Batch C Gate B r1 (polish-wire): Codex BLOCK — projectId still rendered raw in RunFocus/CommandPalette (legacy path leak), client basename fallback keeps path-parsing client-side, chime.ts imports server notifier module (boundary), roster exact-only slug breaks legacy links, weak chime baseline test. Claude review pending; reconcile then fix round.
