@@ -1,0 +1,175 @@
+/*
+ * console/app/globals.css — INDUSTRIAL-CRT design tokens (§3, binding).
+ *
+ * Identity: graphite/near-black base, AMBER PHOSPHOR as the sole interface voice
+ * (every interactive / emphasis / attention cue is amber, distinguished by
+ * INTENSITY not hue). Semantic colours are strictly role-reserved:
+ *   • GREEN  — live / healthy ONLY. Never decorative, never interactive.
+ *   • RED    — failure / blocked ONLY.
+ *   • CYAN   — the single info hue (neutral annotation: evidence links, meta).
+ * Dark only — one theme executed perfectly (phone stays dark).
+ *
+ * WCAG 2.2 AA — contrast on --bg (HSL 40 7% 7%, the graphite void), verified
+ * (see lib scratch calc; normal text needs 4.5:1):
+ *   --amber            40 96% 62%  → 11.10:1   (interface voice — passes 4.5:1)
+ *   --amber-bright     42 100% 68% → 12.67:1   (emphasis / hover)
+ *   --amber-rest       40 55% 55%  →  7.81:1   (idle rail / low-energy)
+ *   --live             142 58% 62% → 10.33:1   (green — healthy/live text)
+ *   --fail              2 82% 63%  →  5.49:1   (red — failure/blocked)
+ *   --info            196 80% 60%  →  8.83:1   (cyan — info hue)
+ *   --text             40 10% 92%  → 15.73:1
+ *   --text-dim         40 8% 66%   →  8.13:1
+ *   --text-faint       40 6% 50%   →  4.89:1   (tertiary; still clears 4.5:1)
+ * Hue bands held apart: amber 40–42° · red 2° (warm-orange 15–35° left empty so
+ * amber and red never blur) · green 142° · cyan 196°.
+ */
+:root {
+  color-scheme: dark;
+
+  /* graphite base + elevation steps (slight warm undertone, never reads as amber) */
+  --bg: hsl(40, 7%, 7%);
+  --surface-1: hsl(40, 7%, 10%);
+  --surface-2: hsl(38, 8%, 13%);
+  --surface-3: hsl(38, 8%, 16%); /* hover / active row */
+  --border: hsl(40, 6%, 20%);
+  --border-bright: hsl(40, 8%, 28%);
+
+  /* text ramp */
+  --text: hsl(40, 10%, 92%);
+  --text-dim: hsl(40, 8%, 66%);
+  --text-faint: hsl(40, 6%, 50%);
+
+  /* AMBER PHOSPHOR — the interface voice. Intensity ladder = attention level. */
+  --amber: hsl(40, 96%, 62%); /* interactive / current / emphasis */
+  --amber-bright: hsl(42, 100%, 68%); /* hover / peak pulse */
+  --amber-rest: hsl(40, 55%, 55%); /* idle / completed-but-not-live */
+  --amber-fill: hsla(40, 96%, 62%, 0.14); /* meter tracks / pulse halos */
+  --amber-line: hsla(40, 96%, 62%, 0.4); /* hairline emphasis borders */
+
+  /* GREEN — live/healthy ONLY */
+  --live: hsl(142, 58%, 62%);
+  --live-fill: hsla(142, 58%, 50%, 0.16);
+
+  /* RED — failure/blocked ONLY */
+  --fail: hsl(2, 82%, 63%);
+  --fail-fill: hsla(2, 82%, 56%, 0.16);
+
+  /* CYAN — the one info hue */
+  --info: hsl(196, 80%, 60%);
+  --info-fill: hsla(196, 80%, 55%, 0.14);
+
+  --space-unit: 4px;
+  --radius: 8px;
+
+  /* fonts wired via next/font in layout.tsx */
+  --font-sans: var(--font-geist-sans, system-ui, sans-serif);
+  --font-mono: var(--font-geist-mono, ui-monospace, "SFMono-Regular", monospace);
+  /* Display face: OXANIUM — industrial/mechanical character, self-hosted via
+     next/font/google. Used ONLY for project names + big numbers (never chrome). */
+  --font-display: var(--font-oxanium, var(--font-sans));
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* tabular data — Geist Mono, aligned figures for cost/time/id columns */
+.mono,
+code,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+
+/* display voice — project names + big numbers only */
+.display {
+  font-family: var(--font-display);
+  letter-spacing: 0.01em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+::selection {
+  background: var(--amber-fill);
+  color: var(--text);
+}
+
+button {
+  font-family: inherit;
+}
+
+/* --- kinetic texture (streaming feel · agent pulses · phase punctuation) --- */
+@keyframes pulse-amber {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 var(--amber-fill); }
+  50% { opacity: 0.75; box-shadow: 0 0 0 6px transparent; }
+}
+@keyframes burn-fail {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@keyframes live-breathe {
+  0%, 100% { opacity: 0.9; }
+  50% { opacity: 0.5; }
+}
+@keyframes feed-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes success-flash {
+  0% { background: var(--live-fill); }
+  100% { background: transparent; }
+}
+.pulse { animation: pulse-amber 1.4s ease-in-out infinite; }
+.burn { animation: burn-fail 0.9s steps(2, end) infinite; }
+.breathe { animation: live-breathe 2.4s ease-in-out infinite; }
+.feed-line { animation: feed-in 180ms ease-out; }
+.flash-ok { animation: success-flash 900ms ease-out; }
+
+/* --- layout: desktop multi-column ≥1024px, single-column stack below (§5) --- */
+.console-shell { max-width: 1400px; margin: 0 auto; padding: 16px; }
+.topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 4px 16px; flex-wrap: wrap;
+}
+.lanes {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+.cards {
+  display: grid; gap: 10px; margin-top: 22px;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+@media (max-width: 1024px) {
+  .lanes { grid-template-columns: 1fr; }
+  .cards { grid-template-columns: 1fr; }
+}
+
+/* prefers-reduced-motion — freeze kinetic texture, keep information current (§5/a11y) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
