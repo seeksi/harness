@@ -29,6 +29,12 @@ const COLOR = {
 const MIN_SCALE = 0.3;
 const MAX_SCALE = 3.5;
 const CLICK_SLOP_PX = 6;
+const LABEL_VISIBLE_SCALE = 0.55;
+// Canvas fillStyle/font strings are CSS-lexed but NOT resolved against custom
+// properties — `ctx.font = "10px var(--font-mono, monospace)"` silently fails to
+// parse and canvas falls back to its default font, so this was both wrong AND (set
+// per node, per frame) wasted work. One literal, set once per frame.
+const LABEL_FONT = "10px ui-monospace, monospace";
 
 interface Transform {
   x: number;
@@ -63,11 +69,37 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
   const punctuationStartRef = useRef<number | null>(null);
   const lastSeqRef = useRef(punctuationSeq);
   const rafRef = useRef(0);
+  // Cached bounding rect — getBoundingClientRect() forces a layout read, and doing
+  // it on every wheel/pointermove event is a perf cliff by itself. Refreshed by the
+  // existing ResizeObserver instead (the container's on-screen offset only moves
+  // when it resizes, for this layout).
+  const rectRef = useRef({ left: 0, top: 0 });
+  // Node labels redraw to this reused offscreen layer only when dirty (transform or
+  // data changed) instead of every frame — hundreds of fillText calls/frame is the
+  // single biggest cost at showpiece scale (see draw()).
+  const labelCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const labelsDirtyRef = useRef(true);
 
   // Fresh-each-render props/data captured in a ref so the (stable) rAF/draw closure
   // never goes stale without needing to restart the loop or re-bind listeners.
   const liveRef = useRef({ nodes, edges, layout, selectedId, reducedMotion });
   liveRef.current = { nodes, edges, layout, selectedId, reducedMotion };
+
+  // Lazily creates/resizes the reused label layer; a size change means stale pixels,
+  // so it also flags a redraw.
+  function ensureLabelCanvas(wPx: number, hPx: number): HTMLCanvasElement {
+    let c = labelCanvasRef.current;
+    if (!c) {
+      c = document.createElement("canvas");
+      labelCanvasRef.current = c;
+    }
+    if (c.width !== wPx || c.height !== hPx) {
+      c.width = wPx;
+      c.height = hPx;
+      labelsDirtyRef.current = true;
+    }
+    return c;
+  }
 
   const draw = useMemo(
     () =>
@@ -132,14 +164,6 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
           ctx.lineWidth = n.id === sel ? 2.5 : 1.25;
           ctx.strokeStyle = n.id === sel ? COLOR.amberBright : n.kind === "group" ? COLOR.border : COLOR.amberRest;
           ctx.stroke();
-
-          // label — only at a legible zoom level, keeps the swarm view uncluttered.
-          if (t.scale >= 0.55) {
-            ctx.fillStyle = n.activity === "active" ? COLOR.amberBright : COLOR.textFaint;
-            ctx.font = "10px var(--font-mono, monospace)";
-            ctx.textAlign = "center";
-            ctx.fillText(n.label, p.x, p.y + r + 12);
-          }
         }
 
         // phase-transition punctuation — one quiet expanding ring, ~600ms, green
@@ -164,6 +188,40 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
         }
 
         ctx.restore();
+
+        // labels — only at a legible zoom level, keeps the swarm view uncluttered.
+        // Redrawn to a reused offscreen layer only when dirty (pan/zoom/data changed
+        // — see the dirty-flag sites below), then just blitted here every frame.
+        if (t.scale >= LABEL_VISIBLE_SCALE) {
+          const labelCanvas = ensureLabelCanvas(canvas.width, canvas.height);
+          if (labelsDirtyRef.current) {
+            const lctx = labelCanvas.getContext("2d");
+            if (lctx) {
+              // Reset to identity before clearing — clearRect is transform-relative,
+              // so clearing under whatever pan/zoom transform was left over from the
+              // previous draw only wipes a sub-region of the canvas, leaving stale
+              // label pixels behind after a pan/zoom. Full-canvas clear must run in
+              // device-pixel space, then the dpr transform is (re-)applied for drawing.
+              lctx.setTransform(1, 0, 0, 1, 0, 0);
+              lctx.clearRect(0, 0, labelCanvas.width, labelCanvas.height);
+              lctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+              lctx.translate(t.x, t.y);
+              lctx.scale(t.scale, t.scale);
+              lctx.font = LABEL_FONT;
+              lctx.textAlign = "center";
+              for (const n of ns) {
+                const p = lay.get(n.id);
+                if (!p) continue;
+                const r = nodeRadius(n);
+                lctx.fillStyle = n.activity === "active" ? COLOR.amberBright : COLOR.textFaint;
+                lctx.fillText(n.label, p.x, p.y + r + 12);
+              }
+            }
+            labelsDirtyRef.current = false;
+          }
+          ctx.setTransform(1, 0, 0, 1, 0, 0); // blit device-pixel-for-device-pixel
+          ctx.drawImage(labelCanvas, 0, 0);
+        }
       },
     []
   );
@@ -190,6 +248,7 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
       canvas.height = Math.round(box.height * dpr);
       canvas.style.width = `${box.width}px`;
       canvas.style.height = `${box.height}px`;
+      rectRef.current = canvas.getBoundingClientRect();
       scheduleDraw();
     });
     ro.observe(container);
@@ -219,8 +278,9 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
   }, [reducedMotion, draw]);
 
   // redraw immediately when data/selection changes under reduced-motion (no loop
-  // running to pick it up on its own).
+  // running to pick it up on its own); labels are stale either way.
   useEffect(() => {
+    labelsDirtyRef.current = true;
     scheduleDraw();
   }, [nodes, edges, layout, selectedId, scheduleDraw]);
 
@@ -241,11 +301,12 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
       t.scale = newScale;
       t.x = sx - w.x * newScale;
       t.y = sy - w.y * newScale;
+      labelsDirtyRef.current = true; // transform changed — cached label layer is stale
     };
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const rect = canvas.getBoundingClientRect();
+      const rect = rectRef.current;
       const factor = Math.exp(-e.deltaY * 0.001);
       zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor);
       scheduleDraw();
@@ -253,7 +314,7 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
 
     const onPointerDown = (e: PointerEvent) => {
       canvas.setPointerCapture(e.pointerId);
-      const rect = canvas.getBoundingClientRect();
+      const rect = rectRef.current;
       pointersRef.current.set(e.pointerId, { x: e.clientX - rect.left, y: e.clientY - rect.top });
       if (pointersRef.current.size === 1) {
         dragRef.current = { startScreen: { x: e.clientX - rect.left, y: e.clientY - rect.top }, moved: 0, pinchStartDist: 0 };
@@ -269,7 +330,7 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
 
     const onPointerMove = (e: PointerEvent) => {
       if (!pointersRef.current.has(e.pointerId)) return;
-      const rect = canvas.getBoundingClientRect();
+      const rect = rectRef.current;
       const p = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       const prev = pointersRef.current.get(e.pointerId)!;
       pointersRef.current.set(e.pointerId, p);
@@ -281,6 +342,7 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
         const t = transformRef.current;
         t.x += dx;
         t.y += dy;
+        labelsDirtyRef.current = true; // panned — cached label layer is stale
         if (dragRef.current) dragRef.current.moved += Math.hypot(dx, dy);
         scheduleDraw();
       } else if (pts.length >= 2) {
@@ -300,7 +362,7 @@ export function GraphCanvas({ nodes, edges, layout, reducedMotion, selectedId, o
       pointersRef.current.delete(e.pointerId);
       if (pointersRef.current.size === 0) {
         if (wasSingleTap) {
-          const rect = canvas.getBoundingClientRect();
+          const rect = rectRef.current;
           const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
           const hit = hitTest(liveRef.current.nodes, liveRef.current.layout, world);
           onSelect(hit);

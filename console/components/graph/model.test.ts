@@ -170,12 +170,31 @@ describe("computeLayout — determinism", () => {
       activity: "idle" as const,
       memberCount: 1,
     }));
-    const layout = computeLayout(big, 1600, 900);
+    const width = 1600;
+    const height = 900;
+    const layout = computeLayout(big, width, height);
     expect(layout.size).toBe(300);
+
+    // Mirrors computeLayout's own bound math: niches ring the center within
+    // nicheRadius, members ring their niche anchor within memberRadius (capped
+    // at 90) plus at most 10px of deterministic jitter — so every point must
+    // land within that combined radius of the canvas center, and therefore
+    // within the canvas rect itself (not just "finite").
+    const cx = width / 2;
+    const cy = height / 2;
+    const nicheRadius = Math.max(40, Math.min(width, height) * 0.34);
+    const maxMemberReach = 90 + 10;
+    const maxDistFromCenter = nicheRadius + maxMemberReach;
+
     const seen = new Set<string>();
     for (const [id, p] of layout) {
       expect(Number.isFinite(p.x)).toBe(true);
       expect(Number.isFinite(p.y)).toBe(true);
+      expect(p.x).toBeGreaterThanOrEqual(0);
+      expect(p.x).toBeLessThanOrEqual(width);
+      expect(p.y).toBeGreaterThanOrEqual(0);
+      expect(p.y).toBeLessThanOrEqual(height);
+      expect(Math.hypot(p.x - cx, p.y - cy)).toBeLessThanOrEqual(maxDistFromCenter + 1e-6);
       const key = `${p.x.toFixed(3)},${p.y.toFixed(3)}`;
       expect(seen.has(key)).toBe(false);
       seen.add(key);

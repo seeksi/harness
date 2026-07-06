@@ -2,10 +2,11 @@
 // The graph route's client shell: owns the fleet store + SSE (same pattern as
 // FleetHome), scopes it down to one project's runs, folds their trace into the
 // activity-driven progressive-disclosure graph (model.ts), and renders the canvas
-// + showpiece toggle + node inspector. `nowSec` for activity classification is the
-// project's own latest event time (matching health.ts's convention — the fixture is
-// frozen in the past, so "now" tracks the data, not the wall clock, until the live
-// bridge lands).
+// + showpiece toggle + node inspector. `nowSec` for activity classification tracks
+// the greater of (a) the project's own latest event time (matching health.ts's
+// convention) and (b) a client-only 1s-tick clock seeded from that same data — so a
+// frozen fixture still classifies correctly, but activity also decays in real time
+// once no new events arrive, instead of staying pinned to the last event forever.
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -16,6 +17,15 @@ import { fmtClock } from "@/lib/format";
 import { buildGraph, computeLayout, summarizeActivity, type RosterAgent } from "./model";
 import { GraphCanvas } from "./GraphCanvas";
 import { Inspector } from "./Inspector";
+
+// Last path segment, without pulling in the "path" module (this file is client-only
+// and browser bundles don't get node's fs/path polyfills for free). Mirrors
+// roster.ts's resolveProject basename fallback so a run stamped with either the
+// slug or the discovery id's basename still matches.
+function basename(id: string): string {
+  const i = Math.max(id.lastIndexOf("/"), id.lastIndexOf("\\"));
+  return i === -1 ? id : id.slice(i + 1);
+}
 
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
@@ -32,11 +42,14 @@ function usePrefersReducedMotion(): boolean {
 export interface GraphViewProps {
   initial: FleetState;
   projectId: string;
+  // The resolved project's canonical (discovery) id, when it differs from the route
+  // slug — see [projectId]/page.tsx. Runs are matched against either.
+  canonicalProjectId?: string;
   projectName: string;
   rosterAgents: RosterAgent[];
 }
 
-export function GraphView({ initial, projectId, projectName, rosterAgents }: GraphViewProps) {
+export function GraphView({ initial, projectId, canonicalProjectId, projectName, rosterAgents }: GraphViewProps) {
   const storeRef = useRef<FleetStore | null>(null);
   if (!storeRef.current) storeRef.current = createFleetStore(initial);
   const store = storeRef.current;
@@ -44,12 +57,37 @@ export function GraphView({ initial, projectId, projectName, rosterAgents }: Gra
   const getServer = useCallback(() => initial, [initial]);
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, getServer);
 
+  // The route slug (basename) and the run's own projectId (often the canonical
+  // absolute discovery id) can legitimately differ — see [projectId]/page.tsx.
+  // Match on either, plus a basename fallback, so live runs for a project whose
+  // id isn't the slug still show up instead of silently vanishing.
+  const matchesProject = useCallback(
+    (pid: string) => pid === projectId || pid === canonicalProjectId || basename(pid) === projectId,
+    [projectId, canonicalProjectId]
+  );
+
+  // Deterministic seed for both the "now" clock and the connection pill's
+  // lastEventMs — derived from the server-rendered `initial` data's own event
+  // times (never Date.now() at render — that's a hydration/determinism hazard).
+  const seedNowSec = useMemo(() => {
+    const seedRuns = Object.values(initial.runs).filter((r) => matchesProject(r.projectId));
+    return seedRuns.length ? Math.max(...seedRuns.map((r) => r.lastEventTs)) : 0;
+  }, [initial, matchesProject]);
+
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [lastEventMs, setLastEventMs] = useState<number>(Date.now());
+  const [lastEventMs, setLastEventMs] = useState<number>(() => seedNowSec * 1000);
   const [showpiece, setShowpiece] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  const reducedMotion = usePrefersReducedMotion();
+  // The rAF loop is a continuous per-frame wakeup even under prefers-reduced-motion
+  // (only the canvas's own loop stops for that) — read via ref inside the SSE
+  // handler below so a runtime media-query flip doesn't need to re-open the stream.
+  const reducedMotionRef = useRef(reducedMotion);
+  reducedMotionRef.current = reducedMotion;
+
   useEffect(() => {
+    if (reducedMotion) return; // flushed on SSE arrival instead — see below.
     let raf = 0;
     const loop = () => {
       store.flush();
@@ -57,22 +95,51 @@ export function GraphView({ initial, projectId, projectName, rosterAgents }: Gra
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [store]);
+  }, [store, reducedMotion]);
 
   useEffect(() => {
-    const client = createSseClient({ url: "/api/fleet/stream", store, onStatusChange: setStatus, onEventTime: setLastEventMs });
+    const client = createSseClient({
+      url: "/api/fleet/stream",
+      store,
+      onStatusChange: setStatus,
+      onEventTime: (ms) => {
+        setLastEventMs(ms);
+        // No rAF loop running under reduced motion — flush right on arrival instead
+        // of polling, so buffered envelopes never sit unflushed indefinitely.
+        if (reducedMotionRef.current) store.flush();
+      },
+    });
     return () => client.destroy();
   }, [store]);
 
-  const reducedMotion = usePrefersReducedMotion();
-
   // This project's runs, its merged trace stream, and its "now" reference.
-  const projectRuns = useMemo(() => Object.values(state.runs).filter((r) => r.projectId === projectId), [state, projectId]);
+  const projectRuns = useMemo(() => Object.values(state.runs).filter((r) => matchesProject(r.projectId)), [state, matchesProject]);
   const traces = useMemo(() => projectRuns.flatMap((r) => r.trace), [projectRuns]);
-  const nowSec = useMemo(
-    () => (projectRuns.length ? Math.max(...projectRuns.map((r) => r.lastEventTs)) : Math.floor(Date.now() / 1000)),
+
+  // Wall-clock reference for activity classification: seeded once (above) from
+  // `initial`, then ticks forward one second at a time via a client-only interval
+  // (same owns-its-loop-in-an-effect shape as the rAF flush loop above) so
+  // active/recent/idle decay in real time even when no new events arrive.
+  const [clockSec, setClockSec] = useState(seedNowSec);
+  useEffect(() => {
+    const id = setInterval(() => setClockSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const latestProjectEventTs = useMemo(
+    () => (projectRuns.length ? Math.max(...projectRuns.map((r) => r.lastEventTs)) : 0),
     [projectRuns]
   );
+  // Live events can carry wall-clock timestamps far ahead of the seeded clockSec
+  // (e.g. a frozen fixture seed vs. a real SSE stream's real-time epoch). Without
+  // this, nowSec below pins at the last event ts forever — clockSec's 1s ticks can
+  // never catch up — so activity never decays. Re-seed clockSec whenever an
+  // observed event ts exceeds it, so the interval keeps ticking forward from live
+  // time instead of stale seed time.
+  useEffect(() => {
+    setClockSec((s) => (latestProjectEventTs > s ? latestProjectEventTs : s));
+  }, [latestProjectEventTs]);
+  const nowSec = useMemo(() => Math.max(clockSec, latestProjectEventTs), [clockSec, latestProjectEventTs]);
 
   const activity = useMemo(() => summarizeActivity(traces), [traces]);
   const graph = useMemo(
@@ -193,8 +260,13 @@ function Legend() {
 }
 
 function ConnectionPill({ status, lastEventMs }: { status: ConnectionStatus; lastEventMs: number }) {
-  if (status === "open" || status === "connecting") {
-    return <span className="mono breathe" style={{ fontSize: 11, color: "var(--live)" }}>● {status === "open" ? "live" : "connecting"}</span>;
+  // §3 token rule: green (var(--live)) is reserved for actually open/live — never
+  // for "connecting", which hasn't reached live yet. Amber/dim instead.
+  if (status === "open") {
+    return <span className="mono breathe" style={{ fontSize: 11, color: "var(--live)" }}>● live</span>;
+  }
+  if (status === "connecting") {
+    return <span className="mono pulse" style={{ fontSize: 11, color: "var(--amber-rest)" }}>◐ connecting</span>;
   }
   if (status === "reconnecting") {
     return <span className="mono pulse" style={{ fontSize: 11, color: "var(--amber)" }}>◐ reconnecting · data as of {fmtClock(lastEventMs)}</span>;

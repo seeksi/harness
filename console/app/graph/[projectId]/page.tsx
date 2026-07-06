@@ -17,16 +17,30 @@ export default async function Page({ params }: { params: Promise<{ projectId: st
   const initial = foldFleet(fixtureEnvelopes(), initialFleetState);
 
   let projectName = projectId;
+  // The route param is a basename slug (see roster.ts), but a run's own projectId
+  // is whatever the launcher stamped it with — for real (discovered) projects
+  // that's the canonical absolute repo path, which never equals the slug. Pass
+  // both down so GraphView can match live runs against either identity.
+  let canonicalProjectId: string | undefined;
   let rosterAgents: RosterAgent[] = [];
   try {
     const project = resolveProject(projectId);
     if (project) {
       projectName = project.name;
+      canonicalProjectId = project.id;
       rosterAgents = rosterFromProject(project);
     }
   } catch {
     rosterAgents = []; // discovery/roster read is best-effort — graph still renders
   }
 
-  return <GraphView initial={initial} projectId={projectId} projectName={projectName} rosterAgents={rosterAgents} />;
+  return (
+    <GraphView
+      initial={initial}
+      projectId={projectId}
+      canonicalProjectId={canonicalProjectId}
+      projectName={projectName}
+      rosterAgents={rosterAgents}
+    />
+  );
 }
