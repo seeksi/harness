@@ -148,7 +148,6 @@ function reduceRun(run: RunState, env: Envelope): RunState {
     case "usage": {
       const p = env.payload;
       const laneKey = p.laneId ?? "_run";
-      const prev = run.usage.lanes[laneKey];
       const lane: LaneUsage = {
         ...(p.model !== undefined && { model: p.model }),
         inputTokens: p.inputTokens,
@@ -166,7 +165,6 @@ function reduceRun(run: RunState, env: Envelope): RunState {
         totalTokens += l.inputTokens + l.outputTokens + l.cacheReadTokens + l.cacheCreationTokens;
         totalCostUsd += l.costUsd;
       }
-      void prev;
       return { ...withTs, usage: { lanes, totalTokens, totalCostUsd } };
     }
 

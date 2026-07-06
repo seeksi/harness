@@ -9,6 +9,7 @@ export const runtime = "nodejs";
 import type { Envelope } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { STREAM_END } from "@/lib/sse/client";
+import { resumeStartIndex } from "@/lib/sse/resume";
 
 const FRAME_MS = 220; // pacing for the streaming heartbeat
 
@@ -18,8 +19,11 @@ function frame(env: Envelope, id: number): string {
 
 export async function GET(req: Request): Promise<Response> {
   const envelopes = fixtureEnvelopes();
-  const lastId = Number(req.headers.get("Last-Event-ID"));
-  const startIdx = Number.isFinite(lastId) && lastId >= 0 ? lastId + 1 : 0;
+  // Resume cursor: native EventSource reconnect sends the Last-Event-ID header; the
+  // client's explicit reconnect sends a ?lastEventId= query param. A missing/empty/
+  // invalid cursor is "no cursor" → start at 0 (never silently drop frame 0).
+  const cursor = req.headers.get("Last-Event-ID") ?? new URL(req.url).searchParams.get("lastEventId");
+  const startIdx = resumeStartIndex(cursor);
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

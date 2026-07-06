@@ -2,11 +2,14 @@
 // Opens an EventSource to the fleet stream, parses each frame to an Envelope, and
 // calls store.apply() (buffer only — the rAF flush is the sole notifier). Reconnect
 // is exponential back-off with jitter, capped at 30s. On drop we FREEZE last-known
-// state (never blank) and signal "reconnecting"; on reconnect the server sends fresh
-// `sync` frames so state resyncs with no gap (EventSource resumes via Last-Event-ID).
+// state (never blank) and signal "reconnecting". We track the last received event id
+// ourselves and hand it back on reconnect (?lastEventId=) — recreating the EventSource
+// throws away the browser's native Last-Event-ID, so without this the server would
+// re-replay the whole stream. Resume is at cursor+1: no duplicate frames, no gap.
 
 import type { Envelope } from "@/lib/contract/events";
 import type { FleetStore } from "@/lib/store/fleetStore";
+import { withLastEventId } from "./resume";
 
 export type ConnectionStatus = "connecting" | "open" | "reconnecting" | "closed";
 
@@ -40,13 +43,14 @@ export function createSseClient(opts: SseClientOptions): SseClient {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let destroyed = false;
   let ended = false;
+  let lastEventId: string | null = null; // last id we actually received (resume cursor)
 
   const notify = (s: ConnectionStatus) => onStatusChange?.(s);
 
   function connect() {
     if (destroyed) return;
     notify(attempt === 0 ? "connecting" : "reconnecting");
-    es = new EventSource(url);
+    es = new EventSource(withLastEventId(url, lastEventId));
 
     es.onopen = () => {
       attempt = 0;
@@ -55,6 +59,8 @@ export function createSseClient(opts: SseClientOptions): SseClient {
 
     es.onmessage = (ev: MessageEvent) => {
       onEventTime?.(Date.now());
+      // Remember the id of every frame that carries one so a reconnect resumes at N+1.
+      if (ev.lastEventId) lastEventId = ev.lastEventId;
       let parsed: Envelope | { type?: string };
       try {
         parsed = JSON.parse(ev.data as string);

@@ -97,7 +97,9 @@ export function RunLane({ run, feedStale, selected, onSelect, onApprove, onRejec
 }
 
 function ActionBtn({ kind, label, onClick }: { kind: "ok" | "danger"; label: string; onClick: () => void }) {
-  const color = kind === "ok" ? "var(--live)" : "var(--fail)";
+  // Interactive affordance → amber. Green (--live) is STRICTLY a live/healthy signal,
+  // never a button; amber owns every interactive/interface element (approve included).
+  const color = kind === "ok" ? "var(--amber)" : "var(--fail)";
   return (
     <button
       type="button"
