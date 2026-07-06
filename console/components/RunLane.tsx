@@ -14,14 +14,33 @@ import { BurnMeter, HealthBadge } from "./meters";
 interface Props {
   run: RunState;
   feedStale: boolean;
+  // LIVE mode active (server probe). Gates which clock the staleness/stuck rule reads —
+  // see laneNowSec. Defaults to false so fixture behavior is the default.
+  live?: boolean;
+  // Wall-clock now (epoch seconds), ticked by the parent so the staleness/stuck rule in
+  // deriveHealth advances while a LIVE run goes silent. Ignored in fixture mode.
+  nowSec?: number;
   selected?: boolean;
   onSelect: (runId: string) => void;
   onApprove: (runId: string, gate: GateId) => void;
   onReject: (runId: string, gate: GateId) => void;
+  onApprovePromote?: (runId: string) => void;
 }
 
-export function RunLane({ run, feedStale, selected, onSelect, onApprove, onReject }: Props) {
-  const verdict = deriveHealth({ run, nowSec: run.lastEventTs, feedStale });
+/**
+ * The `now` (epoch seconds) the §6 staleness/stuck rule is measured against.
+ * - LIVE: WALL-CLOCK (prefer the parent's ticked `nowSec`; fall back to a fresh read) so a
+ *   silent live run actually ages into "stuck".
+ * - FIXTURE: the run's OWN lastEventTs (silenceSec ≈ 0) so the deterministic fixture stays
+ *   byte-identical — its historical epoch must NOT read as a ~370-day "stuck" badge.
+ */
+export function laneNowSec(live: boolean, run: RunState, nowSec?: number): number {
+  return live ? nowSec ?? Math.floor(Date.now() / 1000) : run.lastEventTs;
+}
+
+export function RunLane({ run, feedStale, live, nowSec, selected, onSelect, onApprove, onReject, onApprovePromote }: Props) {
+  const now = laneNowSec(!!live, run, nowSec);
+  const verdict = deriveHealth({ run, nowSec: now, feedStale });
   const counts = subtaskCounts(run);
   const gates = raisedGates(run);
   const cur = currentPhase(run);
@@ -87,7 +106,7 @@ export function RunLane({ run, feedStale, selected, onSelect, onApprove, onRejec
         <div style={{ padding: 8, borderRadius: 6, background: "var(--live-fill)", border: "1px solid var(--live)" }}>
           <div className="mono" style={{ fontSize: 11, color: "var(--live)" }}>PROMOTE · awaiting</div>
           <div style={{ fontSize: 12, color: "var(--text)", margin: "3px 0 7px" }}>eval+promote ready — approve to fast-forward main</div>
-          <ActionBtn kind="ok" label="Approve promote" onClick={() => onApprove(run.runId, "A")} />
+          <ActionBtn kind="ok" label="Approve promote" onClick={() => (onApprovePromote ?? (() => onApprove(run.runId, "A")))(run.runId)} />
         </div>
       )}
 
