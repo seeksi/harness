@@ -1,0 +1,298 @@
+// console/components/graph/model.ts
+// Pure graph logic — no React, no canvas, no Date.now(). Everything takes `nowSec`
+// as an argument (same convention as lib/contract/health.ts) so activity/collapse
+// decisions are deterministic and unit-testable without a clock.
+//
+// Progressive disclosure (§2/§3, binding): active/recently-active agents render as
+// their OWN node; idle agents collapse into ONE group node per niche. The showpiece
+// toggle disables collapsing entirely (full worktree, everyone visible at once) but
+// still reports real activity so pulses stay honest.
+//
+// Layout is deterministic and positional (§ acceptance: "no Math.random at render"):
+// niches ring the center in alphabetical order, members ring their niche anchor in
+// alphabetical order with a small string-hash angle offset for visual separation —
+// a pure function of node ids, never wall-clock or Math.random.
+
+import type { TraceTick } from "@/lib/contract/types";
+
+export type AgentActivity = "active" | "recent" | "idle";
+
+// Windows are deltas against `nowSec` (which callers pass as the run's own
+// lastEventTs, matching the rest of the console — see health.ts). A fixture frozen
+// in the past is exactly as "active" as a live one as long as nowSec tracks it.
+export const ACTIVE_WINDOW_SEC = 20;
+export const RECENT_WINDOW_SEC = 90;
+
+// A roster entry the graph knows about even before any trace event names it —
+// sourced from discovery (.claude/agents/*.md) when the project resolves on disk.
+export interface RosterAgent {
+  id: string;
+  niche: string;
+  label: string;
+  model?: string;
+}
+
+export interface AgentActivitySummary {
+  id: string;
+  lastTs: number;
+  eventCount: number;
+  lastTool?: string;
+  lastSig?: string;
+  recentTicks: TraceTick[]; // newest-last, capped — the inspector's trace snippet
+}
+
+export interface GraphNode {
+  id: string; // agentId, or "group:<niche>" for a collapsed group
+  kind: "agent" | "group";
+  niche: string;
+  label: string;
+  activity: AgentActivity; // group nodes are always "idle" by construction
+  memberCount: number; // 1 for an agent node; N for a group node
+  lastTs?: number;
+  members?: string[]; // group nodes only — the collapsed agent ids, sorted
+}
+
+export interface GraphEdge {
+  from: string; // post-collapse node id
+  to: string;
+  weight: number;
+  lastTs: number;
+}
+
+const RECENT_SNIPPET = 5;
+
+function nicheOf(id: string): string {
+  const i = id.indexOf(":");
+  return i === -1 ? id : id.slice(0, i);
+}
+
+export function classifyActivity(lastTs: number | undefined, nowSec: number): AgentActivity {
+  if (lastTs === undefined) return "idle";
+  const age = nowSec - lastTs;
+  if (age <= ACTIVE_WINDOW_SEC) return "active";
+  if (age <= RECENT_WINDOW_SEC) return "recent";
+  return "idle";
+}
+
+// Folds a merged trace stream (across every run belonging to one project) into a
+// per-agent activity summary. Ticks need not arrive sorted — we sort defensively.
+export function summarizeActivity(traces: TraceTick[]): Map<string, AgentActivitySummary> {
+  const byId = new Map<string, TraceTick[]>();
+  for (const t of traces) {
+    const list = byId.get(t.agentId);
+    if (list) list.push(t);
+    else byId.set(t.agentId, [t]);
+  }
+  const out = new Map<string, AgentActivitySummary>();
+  for (const [id, ticks] of byId) {
+    const sorted = [...ticks].sort((a, b) => a.ts - b.ts || a.tool.localeCompare(b.tool));
+    const last = sorted[sorted.length - 1];
+    out.set(id, {
+      id,
+      lastTs: last.ts,
+      eventCount: sorted.length,
+      lastTool: last.tool,
+      lastSig: last.sig,
+      recentTicks: sorted.slice(-RECENT_SNIPPET),
+    });
+  }
+  return out;
+}
+
+export interface BuildGraphInput {
+  rosterAgents: RosterAgent[];
+  activity: Map<string, AgentActivitySummary>;
+  traces: TraceTick[]; // the full merged trace stream — edges need the whole history, not the capped snippet
+  nowSec: number;
+  showpiece: boolean;
+}
+
+export interface Graph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+// Handoffs: consecutive DISTINCT agentIds acting on the same laneId, in ts order.
+// laneId-less ticks (no subtask attribution) don't participate — there is nothing
+// to hand off between.
+function rawHandoffEdges(traces: TraceTick[]): GraphEdge[] {
+  const byLane = new Map<string, TraceTick[]>();
+  for (const t of traces) {
+    if (!t.laneId) continue;
+    const list = byLane.get(t.laneId);
+    if (list) list.push(t);
+    else byLane.set(t.laneId, [t]);
+  }
+  const merged = new Map<string, GraphEdge>();
+  for (const ticks of byLane.values()) {
+    // Same tiebreak as summarizeActivity — without it, edge direction on
+    // equal-ts ticks would depend on input array order instead of being pure.
+    const sorted = [...ticks].sort((a, b) => a.ts - b.ts || a.tool.localeCompare(b.tool));
+    for (let i = 1; i < sorted.length; i++) {
+      const from = sorted[i - 1].agentId;
+      const to = sorted[i].agentId;
+      if (from === to) continue;
+      const key = `${from} ${to}`;
+      const existing = merged.get(key);
+      if (existing) {
+        existing.weight += 1;
+        existing.lastTs = Math.max(existing.lastTs, sorted[i].ts);
+      } else {
+        merged.set(key, { from, to, weight: 1, lastTs: sorted[i].ts });
+      }
+    }
+  }
+  return [...merged.values()];
+}
+
+export function buildGraph(input: BuildGraphInput): Graph {
+  const { rosterAgents, activity, traces, nowSec, showpiece } = input;
+
+  // Union of every id the graph knows about: roster entries + anyone seen in trace.
+  const niches = new Map<string, string>(); // id -> niche
+  for (const r of rosterAgents) niches.set(r.id, r.niche);
+  for (const id of activity.keys()) if (!niches.has(id)) niches.set(id, nicheOf(id));
+
+  const ids = [...niches.keys()].sort();
+
+  const activityOf = (id: string): AgentActivity => classifyActivity(activity.get(id)?.lastTs, nowSec);
+
+  // id -> the node id it renders as (itself, or its niche's group node).
+  const renderAs = new Map<string, string>();
+  const nodes: GraphNode[] = [];
+
+  if (showpiece) {
+    // Full swarm — no collapsing. Everyone is their own node, activity still honest.
+    for (const id of ids) {
+      renderAs.set(id, id);
+      const summary = activity.get(id);
+      nodes.push({
+        id,
+        kind: "agent",
+        niche: niches.get(id)!,
+        label: id,
+        activity: activityOf(id),
+        memberCount: 1,
+        lastTs: summary?.lastTs,
+      });
+    }
+  } else {
+    const byNiche = new Map<string, string[]>();
+    for (const id of ids) {
+      const n = niches.get(id)!;
+      const list = byNiche.get(n);
+      if (list) list.push(id);
+      else byNiche.set(n, [id]);
+    }
+    for (const niche of [...byNiche.keys()].sort()) {
+      const members = byNiche.get(niche)!;
+      const idle: string[] = [];
+      for (const id of members) {
+        const a = activityOf(id);
+        if (a === "idle") {
+          idle.push(id);
+          continue;
+        }
+        renderAs.set(id, id);
+        const summary = activity.get(id);
+        nodes.push({ id, kind: "agent", niche, label: id, activity: a, memberCount: 1, lastTs: summary?.lastTs });
+      }
+      if (idle.length > 0) {
+        const groupId = `group:${niche}`;
+        for (const id of idle) renderAs.set(id, groupId);
+        nodes.push({
+          id: groupId,
+          kind: "group",
+          niche,
+          label: `${niche} (+${idle.length} idle)`,
+          activity: "idle",
+          memberCount: idle.length,
+          members: idle,
+        });
+      }
+    }
+  }
+
+  // Remap raw agent-id edges onto rendered node ids; drop self-loops created by
+  // two idle siblings collapsing into the same group (nothing to show there).
+  const remapped = new Map<string, GraphEdge>();
+  for (const e of rawHandoffEdges(traces)) {
+    const from = renderAs.get(e.from) ?? e.from;
+    const to = renderAs.get(e.to) ?? e.to;
+    if (from === to) continue;
+    const key = `${from} ${to}`;
+    const existing = remapped.get(key);
+    if (existing) {
+      existing.weight += e.weight;
+      existing.lastTs = Math.max(existing.lastTs, e.lastTs);
+    } else {
+      remapped.set(key, { from, to, weight: e.weight, lastTs: e.lastTs });
+    }
+  }
+  const edges = [...remapped.values()].sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
+
+  nodes.sort((a, b) => a.niche.localeCompare(b.niche) || a.id.localeCompare(b.id));
+  return { nodes, edges };
+}
+
+// --- deterministic layout ----------------------------------------------------------
+
+// Tiny deterministic string hash (FNV-1a) — used ONLY to spread siblings apart
+// within a niche ring, never for randomness proper. Same id -> same offset, always.
+function hash(id: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h;
+}
+
+export interface Point {
+  x: number;
+  y: number;
+}
+
+// Niches ring the canvas center; each niche's members ring the niche's anchor.
+// Pure function of (sorted) node ids + canvas size — call it twice, get the exact
+// same map back, regardless of the input array's order.
+export function computeLayout(nodes: GraphNode[], width: number, height: number): Map<string, Point> {
+  const cx = width / 2;
+  const cy = height / 2;
+  const nicheRadius = Math.max(40, Math.min(width, height) * 0.34);
+
+  const byNiche = new Map<string, GraphNode[]>();
+  for (const n of nodes) {
+    const list = byNiche.get(n.niche);
+    if (list) list.push(n);
+    else byNiche.set(n.niche, [n]);
+  }
+  for (const list of byNiche.values()) list.sort((a, b) => a.id.localeCompare(b.id));
+
+  const niches = [...byNiche.keys()].sort();
+  const out = new Map<string, Point>();
+
+  niches.forEach((niche, ni) => {
+    const angle = niches.length <= 1 ? 0 : (2 * Math.PI * ni) / niches.length;
+    const anchor: Point = { x: cx + nicheRadius * Math.cos(angle), y: cy + nicheRadius * Math.sin(angle) };
+    const members = byNiche.get(niche)!;
+
+    if (members.length === 1) {
+      out.set(members[0].id, anchor);
+      return;
+    }
+    const memberRadius = Math.min(90, 20 + 12 * members.length);
+    members.forEach((m, mi) => {
+      const h = hash(m.id);
+      const offset = (h % 360) * (Math.PI / 180);
+      // Small deterministic per-id radius jitter (also hash-derived) so large rings
+      // don't stack members at exactly-equal angles into overlapping points.
+      const radiusJitter = ((h >>> 9) % 21) - 10;
+      const a = (2 * Math.PI * mi) / members.length + offset;
+      const r = Math.max(10, memberRadius + radiusJitter);
+      out.set(m.id, { x: anchor.x + r * Math.cos(a), y: anchor.y + r * Math.sin(a) });
+    });
+  });
+
+  return out;
+}
