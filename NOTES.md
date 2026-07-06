@@ -96,3 +96,12 @@ note: deck router said cheap; orchestrator held default (search/filter/virtualiz
 
 ## Batch C S6: GO (human, 2026-07-06). Judge PASS, all gates green. Rebuild complete on promote.
 status: DASHBOARD REBUILD COMPLETE — Batches A+B+C promoted. Remaining: operator DoD (live run e2e, phone approve, ntfy tap, showpiece capture), name pick on /brand.
+
+## agent-exec-wire Gate B r1: Codex BLOCK (6 findings)
+1. HIGH daemon: agent nonzero/null exitCode ignored -> failed agent still committed/merged. Throw unless exitCode===0 before wt-commit.
+2. HIGH daemon: mintSession(child stdout) launders child value into provenance. Validate as data, don't mint child output; trace/relocate re-validate shape; fail closed if untrustworthy.
+3. HIGH sandbox: session via regex over all stdout -> spoofable. JSON-parse final result, read top-level session_id.
+4. HIGH daemon: missing session/trace -> Gate D silently skipped, still merges (agent suppresses trace). If agent ran+exit0, require relocated trace + Gate D, else fail closed.
+5. HIGH sandbox: audit swallowed + no mandatory pre-spawn audit. Fail-closed pre-spawn audit (same pattern live-bridge already adopted).
+6. MED/LOW tests: cover nonzero-exit/null-session/relocate=false fail-closed; timeout test needs pid for process-group kill.
+Claude review pending; reconcile then fix.

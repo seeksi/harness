@@ -28,7 +28,15 @@ import {
   type ParsedHarnessEvent,
   type SpawnHarnessOptions,
 } from "@/lib/bridge/harness-bridge";
-import { mintLane, mintPlanFile } from "@/lib/bridge/registry";
+import { mintLane, mintPlanFile, mintSession } from "@/lib/bridge/registry";
+import {
+  runAgentInSandbox,
+  relocateTrace,
+  worktreePathFor,
+  DEFAULT_TOOLS,
+  type RunAgentInSandboxOptions,
+  type RunAgentInSandboxResult,
+} from "@/lib/sandbox";
 
 export class SlotTakenError extends Error {
   constructor(msg: string) {
@@ -62,6 +70,14 @@ export function _resetSlot(): void {
   slotRunId = null;
 }
 
+// The agent-reported usage.model is a free child-controlled string. It is ingested
+// DIRECTLY into the HUD usage envelope (it does NOT pass through the harness stdout schema
+// whitelist), so it must be clamped here before reaching the browser: only a known-safe
+// model-id shape passes through, anything else drops the field (numeric usage is kept).
+// ponytail: shape-whitelist (cap: any well-formed model id like "claude-sonnet-4-6");
+// upgrade to an exact model-id set if the HUD ever needs to trust the value semantically.
+const SAFE_MODEL_ID = /^[a-z][a-z0-9.-]{0,40}$/;
+
 export type Routing = "auto" | "haiku" | "sonnet" | "opus";
 const MODEL_BY_ROUTING: Record<Routing, "haiku" | "sonnet" | "opus"> = {
   auto: "sonnet",
@@ -87,7 +103,7 @@ export interface RunPlan {
  * validator-safe id so distinct runs never collide on a lane slug / plan file. The brief
  * NEVER contributes to a provenance-bearing value.
  * ponytail: single generic lane (cap: one lane); real brief → N file-disjoint lanes is the
- * decompose agent's job — out of scope for this lane (no agent-exec here).
+ * decompose agent's job — out of scope for this v1 wiring (single-lane build agent only).
  */
 export function planRun(runId: string, routing: Routing): RunPlan {
   const id = createHash("sha1").update(runId).digest("hex").slice(0, 16);
@@ -133,6 +149,40 @@ export interface StartRunInput {
   routing?: Routing;
 }
 
+/** Agent-runner signature (so tests can stub the sandbox without spawning claude). */
+export type RunAgentFn = (opts: RunAgentInSandboxOptions) => Promise<RunAgentInSandboxResult>;
+
+// Length-cap the brief before it becomes the agent prompt. Well under agent-runner's
+// MAX_PROMPT (100k chars); the composed wrapper below adds only a few hundred chars.
+const MAX_BRIEF = 90_000;
+
+/**
+ * Compose the headless build agent's prompt from the run brief. The agent runs in DIRECT
+ * mode with the FULL toolset (incl. Bash) inside the lane worktree, so the prompt tells it
+ * to implement in-place and verify with the project's own tooling — and, crucially, to NOT
+ * commit: the harness commits the lane afterwards (wt-commit), and an agent `git commit`
+ * would leave nothing for wt-commit to stage → Gate B would misfire. The brief is opaque
+ * task text (never provenance) and is length-capped here.
+ */
+export function buildAgentPrompt(brief: string): string {
+  const task = (typeof brief === "string" ? brief : "").slice(0, MAX_BRIEF);
+  return [
+    "Implement the following task IN THIS WORKTREE (your current working directory).",
+    "You have the FULL toolset, including Bash — use it to run the project's own",
+    "tests, build, and lint to verify your work as you go.",
+    "",
+    "TASK:",
+    task,
+    "",
+    "RULES:",
+    "- Make all changes inside the current working directory only.",
+    "- Verify your work by running the project's own tests/build before finishing.",
+    "- DO NOT run `git commit` or `git add`. The harness commits your lane after you",
+    "  finish; committing yourself will break the commit/verify step (wt-commit).",
+    "Finish once the task is implemented and its tests/build pass.",
+  ].join("\n");
+}
+
 export interface StartRunOptions {
   /** Force live. Defaults to HARNESS_LIVE === "1". */
   live?: boolean;
@@ -140,6 +190,10 @@ export interface StartRunOptions {
   spawnFn?: SpawnHarnessOptions["spawnFn"];
   /** TEST-ONLY seam: injectable plan-file writer (avoid real fs). IGNORED unless test. */
   writePlan?: (plan: RunPlan) => void;
+  /** TEST-ONLY seam: injectable agent runner (default = real runAgentInSandbox). IGNORED unless test. */
+  runAgent?: RunAgentFn;
+  /** TEST-ONLY seam: injectable trace relocation (default = real relocateTrace). IGNORED unless test. */
+  relocate?: (slug: string, session: string) => boolean;
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -162,6 +216,10 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
   const live = opts.live ?? process.env.HARNESS_LIVE === "1";
   const spawnFn = testSeam ? opts.spawnFn : undefined;
   const writePlan = (testSeam && opts.writePlan) || writePlanFile;
+  // Real sandbox entrypoint in prod; an injected stub only under the test seam (mirrors
+  // spawnFn). The sandbox itself still gates on ENABLE_AGENT_EXEC — this seam is orthogonal.
+  const runAgent: RunAgentFn = (testSeam && opts.runAgent) || runAgentInSandbox;
+  const relocate = (testSeam && opts.relocate) || relocateTrace;
 
   // ONE ingest path: fold → persist → broadcast → notify (edge-triggered).
   let fleet: FleetState = initialFleetState;
@@ -218,11 +276,65 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
         await runSub({ cmd: "budget", planFile: plan.planFile }); // Gate A
         await runSub({ cmd: "integ-start" });
         await runSub({ cmd: "wt-new", slug: plan.slug });
-        // NOTE: the agent BUILD (Phase 2) is out of scope for this lane (no agent-exec).
-        // A live run therefore commits/verifies an unbuilt worktree — Gate B raises on a
-        // do-nothing lane, which is the honest signal until the decompose+build agent lands.
+
+        // Phase 2 — AGENT BUILD. Gated default-OFF behind ENABLE_AGENT_EXEC=1. When ON, run
+        // the headless build agent in the lane worktree (direct-local, full toolset incl.
+        // Bash); it EDITS the worktree in place and the harness commits it below (wt-commit).
+        // The agent's reported session id is captured for the Gate D trace step. When the
+        // flag is UNSET the flow is byte-identical to before — a do-nothing worktree that
+        // Gate B honestly raises on (the else path is simply "no agent ran").
+        let agentSessionId: string | null = null;
+        let agentRan = false;
+        if (process.env.ENABLE_AGENT_EXEC === "1") {
+          agentRan = true;
+          const result = await runAgent({
+            prompt: buildAgentPrompt(brief),
+            cwd: worktreePathFor(plan.slug),
+            sessionId: plan.slug,
+            model: plan.model,
+            allowedTools: DEFAULT_TOOLS,
+          });
+          // FAIL CLOSED on a nonzero agent exit: runAgentInSandbox only REJECTS on
+          // timeout/gate-refusal — a clean process exit with a nonzero code RESOLVES
+          // normally. A failed agent must NOT flow into wt-commit/verify/merge, so throw
+          // here (before any commit) rather than treat the failed build as a success.
+          if (result.exitCode !== 0) {
+            throw new Error(`agent exited nonzero (code ${result.exitCode}) — failing run before wt-commit`);
+          }
+          agentSessionId = result.sessionId;
+          // Surface ACTUAL usage/cost/context (HUD gauges) when the agent reported it. The
+          // child-controlled `model` string bypasses the harness stdout schema, so clamp it
+          // to a known-safe shape (else drop the field); numeric usage fields are kept.
+          if (result.usage) {
+            const { model, ...numeric } = result.usage;
+            const safeModel = typeof model === "string" && SAFE_MODEL_ID.test(model) ? { model } : {};
+            ingest(toEnvelope({ type: "usage", laneId: plan.slug, ...safeModel, ...numeric }));
+          }
+        }
+
         await runSub({ cmd: "wt-commit", slug: plan.slug });
         await runSub({ cmd: "wt-verify", slug: plan.slug }); // Gate B
+
+        // Gate D (trace) — AFTER Gate B, BEFORE the merge: a looping/thrashing agent's lane
+        // must not reach integration. FAIL CLOSED when the agent RAN: a valid session, a
+        // successful relocate, AND the trace subcommand are ALL mandatory. An agent must not
+        // be able to evade the loop/thrash check by suppressing/deleting its trace (a missing
+        // session or a false relocate would otherwise silently skip Gate D and still merge).
+        // Safe: an agent that made zero edits already failed at wt-commit ("nothing to
+        // commit") above, so requiring a trace once the agent ran cannot false-positive.
+        if (agentRan) {
+          if (!agentSessionId) {
+            console.error(`[daemon] run ${runId} Gate D fail-closed: agent ran but produced no valid session id`);
+            throw new Error("agent ran but produced no valid session id — failing run closed (Gate D cannot be skipped)");
+          }
+          mintSession(agentSessionId);
+          if (!relocate(plan.slug, agentSessionId)) {
+            console.error(`[daemon] run ${runId} Gate D fail-closed: agent trace could not be relocated for lane ${plan.slug}`);
+            throw new Error(`agent ran but its trace could not be relocated (lane ${plan.slug}) — failing run closed (Gate D)`);
+          }
+          await runSub({ cmd: "trace", session: agentSessionId }); // Gate D
+        }
+
         await runSub({ cmd: "integ-merge", slug: plan.slug }); // Gate C
         ingest(toEnvelope({ type: "health", verdict: "healthy", lifecycle: "done" }));
       }
