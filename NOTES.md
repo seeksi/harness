@@ -91,3 +91,8 @@ note: deck router said cheap; orchestrator held default (search/filter/virtualiz
 - slug: polish-wire  spec: "cross-view seams: deck drill-through from run focus (?run= + palette entries), desk chime on gate-raise (mutable, pref-respecting), phone restack pass on deck/graph, /brand page w/ 3 name proposals as Oxanium wordmarks, Project.id made opaque in discovery (+dependents), ntfy deep-link base URL config"  owns: console/** (cross-cutting, single lane)  tier: default
 
 ## Batch C Gate B r1 (polish-wire): Codex BLOCK — projectId still rendered raw in RunFocus/CommandPalette (legacy path leak), client basename fallback keeps path-parsing client-side, chime.ts imports server notifier module (boundary), roster exact-only slug breaks legacy links, weak chime baseline test. Claude review pending; reconcile then fix round.
+
+## Batch C S4/S5: merged clean; Gate C console 244/244 + build + lint, web 277. Trace: EXPLOSION:1493 on aggregate session — same FP class human accepted at Batch B checkpoint (run=1, no dominance); carried forward. Judge (scoped) running.
+
+## Batch C S6: GO (human, 2026-07-06). Judge PASS, all gates green. Rebuild complete on promote.
+status: DASHBOARD REBUILD COMPLETE — Batches A+B+C promoted. Remaining: operator DoD (live run e2e, phone approve, ntfy tap, showpiece capture), name pick on /brand.
