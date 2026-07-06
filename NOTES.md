@@ -34,3 +34,19 @@ checkpoint: 2026-07-05 (session checkpoint at soft limit — work in progress)
 - Plan: /home/alter/.claude/plans/let-s-add-a-context-temporal-hennessy.md
 
 status: COMPLETE 2026-07-05 — all next steps done (tests 277 pass, tsc+eslint clean, hook verified live). Uncommitted on main.
+
+# Dashboard rebuild per DESIGN_SPEC.md (Umbrella successor) — base: main
+project: harness
+
+## Batch plan (staged; dependency spine: contract -> views)
+- Batch A: foundation (this batch)
+- Batch B (off promoted main): run-focus, deck, graph (parallel)
+- Batch C: polish-wire (seams: drawer overlays, palette entries, chime, name proposals)
+
+## Subtasks (Batch A)
+- slug: foundation  spec: "console/ app skeleton: Next16 app, CRT tokens/fonts, provider-agnostic multi-run event contract+reducer+store, project discovery (named roots), SQLite persistence w/ 20-run retention, SSE endpoints, ntfy notifier, fleet home + launch console + palette on fixture data"  owns: console/**  tier: top
+
+## Checkpoint (context-guard, session 61%)
+- DESIGN_SPEC.md signed off 2026-07-06; committed to main this batch.
+- Decomposition rationale: greenfield lanes cannot import an unpromoted contract; Batch A is single-slug by design.
+- Next steps if respawned: S1 route+budget -> wt-new foundation -> background build agent (worktree ../HARNESS.worktrees/foundation, read console spec from DESIGN_SPEC.md + NOTES.foundation.md) -> S3 cross-review -> integ-merge -> evals -> human go/no-go -> promote -> Batch B.
