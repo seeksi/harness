@@ -6,7 +6,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { FleetState, GateId, RunState } from "@/lib/contract/types";
+import type { FleetState, GateId, GateStatus, RunState } from "@/lib/contract/types";
 import type { Envelope } from "@/lib/contract/events";
 import { newRun } from "@/lib/contract/types";
 import { activeLanes, laneOrder, totalTokens } from "@/lib/contract/selectors";
@@ -33,6 +33,13 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
   const [launchOpen, setLaunchOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  // Live-mode probe: HARNESS_LIVE=1 on the server → launch/approve route to the real
+  // spawn + gate endpoints; otherwise everything stays optimistic in-browser (fixture,
+  // unchanged). Defaults to false so SSR + first paint behave exactly as the fixture.
+  const [live, setLive] = useState(false);
+  // Wall-clock tick (1s) so the staleness/stuck verdict advances even while a run is
+  // silent (no store events to trigger a re-render). Cheap: one setState/sec.
+  const [now, setNow] = useState(() => nowSec());
 
   // rAF flush loop — the single notification path (one commit + one notify / frame).
   useEffect(() => {
@@ -56,6 +63,24 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
     return () => client.destroy();
   }, [store]);
 
+  // Probe live-mode once on mount (best-effort; stays fixture-optimistic on failure).
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/runs")
+      .then((r) => (r.ok ? r.json() : { live: false }))
+      .then((d) => alive && setLive(!!d.live))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Wall-clock tick for the staleness rule.
+  useEffect(() => {
+    const t = setInterval(() => setNow(nowSec()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
   // ⌘K toggles the palette.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -77,28 +102,62 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
   );
   const runById = useCallback((id: string) => store.getSnapshot().runs[id], [store]);
 
+  // CSRF-headed POST to a mutating API route (matches lib/server/csrf.ts). Best-effort:
+  // the SSE stream is what actually reflects the result, so a network error is swallowed.
+  const postGate = useCallback((runId: string, gateId: GateId, status: GateStatus) => {
+    void fetch(`/api/runs/${encodeURIComponent(runId)}/gate`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-harness-request": "1" },
+      body: JSON.stringify({ gateId, status }),
+    }).catch(() => {});
+  }, []);
+
+  // Gate-id-aware. LIVE → route the operator's verdict to the harness gate endpoint (the
+  // SSE stream folds the resulting gate event). FIXTURE → optimistic local emit, unchanged.
   const onApprove = useCallback(
     (runId: string, gate: GateId) => {
       const run = runById(runId);
       if (!run) return;
+      if (live) {
+        postGate(runId, gate, "approved");
+        return;
+      }
       const g = run.gates.find((x) => x.id === gate);
       if (g) emit(run, "gate", { id: gate, status: "approved", severity: g.severity, summary: `${g.summary} — approved` });
-      // clear a blocked phase + mark promote approved
-      emit(run, "phase", { phase: 4, status: "done" });
+      // clear whichever phase is blocked (fixture blocks phase 4 → identical outcome)
+      const blocked = run.phases.find((p) => p.status === "blocked");
+      if (blocked) emit(run, "phase", { phase: blocked.id, status: "done" });
+    },
+    [emit, runById, live, postGate]
+  );
+  const onApprovePromote = useCallback(
+    (runId: string) => {
+      const run = runById(runId);
+      if (!run) return;
       const promote = run.phases.find((p) => p.approval?.state === "awaiting");
+      if (live) {
+        // promote-to-main is gated server-side (ENABLE_PROMOTE_TO_MAIN); recorded as a
+        // Gate-D-adjacent approval on the eval+promote phase via the gate endpoint.
+        if (promote) postGate(runId, "D", "approved");
+        return;
+      }
       if (promote) emit(run, "phase", { phase: promote.id, status: "done", approval: { kind: "promote-to-main", state: "approved" } });
     },
-    [emit, runById]
+    [emit, runById, live, postGate]
   );
   const onReject = useCallback(
     (runId: string, gate: GateId) => {
       const run = runById(runId);
       if (!run) return;
+      if (live) {
+        postGate(runId, gate, "rejected");
+        return;
+      }
       const g = run.gates.find((x) => x.id === gate);
       if (g) emit(run, "gate", { id: gate, status: "rejected", severity: g.severity, summary: `${g.summary} — rejected` });
       emit(run, "health", { verdict: "degraded", note: `Gate ${gate} rejected` });
     },
-    [emit, runById]
+    [emit, runById, live, postGate]
   );
   const onAbort = useCallback(
     (runId: string) => {
@@ -109,15 +168,27 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
   );
   const onLaunch = useCallback(
     (p: LaunchPayload) => {
-      // Local optimistic launch — a fresh run in decompose. ponytail: real harness.sh
-      // spawn (POST /api/runs → daemon) lands with the live bridge (Batch B+).
+      if (live) {
+        // Real spawn: the daemon mints provenance + drives harness.sh; the SSE stream
+        // delivers the run's events (no optimistic local run — the server is the source).
+        void fetch("/api/runs", {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-harness-request": "1" },
+          body: JSON.stringify({ projectId: p.projectId, brief: p.brief, routing: p.modelRouting }),
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => d?.id && setSelected(d.id))
+          .catch(() => {});
+        return;
+      }
+      // Fixture mode: local optimistic launch — a fresh run in decompose (unchanged).
       const runId = `run-${Date.now()}`;
       const run = newRun(runId, p.projectId, p.projectName, p.brief, nowSec());
       store.apply({ runId, projectId: p.projectId, agentId: "operator", ts: nowSec(), type: "sync", payload: { run } });
       store.apply({ runId, projectId: p.projectId, agentId: "orchestrator", ts: nowSec(), type: "phase", payload: { phase: 1, status: "active" } });
       setSelected(runId);
     },
-    [store]
+    [store, live]
   );
 
   const feedStale = status === "reconnecting";
@@ -147,10 +218,12 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
               key={run.runId}
               run={run}
               feedStale={feedStale}
+              nowSec={now}
               selected={selected === run.runId}
               onSelect={setSelected}
               onApprove={onApprove}
               onReject={onReject}
+              onApprovePromote={onApprovePromote}
             />
           ))}
         </div>

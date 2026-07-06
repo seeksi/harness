@@ -1,29 +1,44 @@
 // console/app/api/fleet/stream/route.ts
-// GET /api/fleet/stream — the fleet SSE endpoint. Day-one source is the deterministic
-// fixture (the live harness.sh bridge is Batch B+). Each frame carries an `id:` (its
-// index) so EventSource reconnects with Last-Event-ID and we RESUME from the next
-// index — gapless replay, no duplicate frames, no gap. A terminal STREAM_END frame
-// closes the client cleanly (a bare close would auto-reconnect + re-replay forever).
+// GET /api/fleet/stream — the fleet SSE endpoint. TWO producers behind one contract:
+//   - FIXTURE (default, HARNESS_LIVE unset): the deterministic fixture replay. UNCHANGED
+//     from before the live bridge — each frame carries an `id:` index; reconnect resumes
+//     from the next index (gapless); a terminal STREAM_END closes the finite stream.
+//   - LIVE (HARNESS_LIVE=1): fan out the in-process daemon broker. Each frame's `id:` is
+//     the broker's monotonic seq; a reconnect (?lastEventId= / Last-Event-ID) replays the
+//     ring buffer from that seq, then attaches for new events. Open-ended (no STREAM_END):
+//     a dropped live connection reconnects and resumes from its cursor.
 export const runtime = "nodejs";
 
 import type { Envelope } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { STREAM_END } from "@/lib/sse/client";
 import { resumeStartIndex } from "@/lib/sse/resume";
+import { subscribe, since } from "@/lib/server/broker";
 
-const FRAME_MS = 220; // pacing for the streaming heartbeat
+const FRAME_MS = 220; // pacing for the streaming heartbeat (fixture)
+const SSE_HEADERS = {
+  "Content-Type": "text/event-stream",
+  "Cache-Control": "no-cache, no-transform",
+  Connection: "keep-alive",
+};
 
-function frame(env: Envelope, id: number): string {
+function frame(env: Envelope, id: number | string): string {
   return `id: ${id}\ndata: ${JSON.stringify(env)}\n\n`;
 }
 
+function cursorFrom(req: Request): string | null {
+  return req.headers.get("Last-Event-ID") ?? new URL(req.url).searchParams.get("lastEventId");
+}
+
 export async function GET(req: Request): Promise<Response> {
+  if (process.env.HARNESS_LIVE === "1") return liveStream(req);
+  return fixtureStream(req);
+}
+
+// --- fixture (unchanged) ----------------------------------------------------------
+function fixtureStream(req: Request): Response {
   const envelopes = fixtureEnvelopes();
-  // Resume cursor: native EventSource reconnect sends the Last-Event-ID header; the
-  // client's explicit reconnect sends a ?lastEventId= query param. A missing/empty/
-  // invalid cursor is "no cursor" → start at 0 (never silently drop frame 0).
-  const cursor = req.headers.get("Last-Event-ID") ?? new URL(req.url).searchParams.get("lastEventId");
-  const startIdx = resumeStartIndex(cursor);
+  const startIdx = resumeStartIndex(cursorFrom(req));
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -58,11 +73,56 @@ export async function GET(req: Request): Promise<Response> {
     },
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
+  return new Response(stream, { headers: SSE_HEADERS });
+}
+
+// --- live broker fan-out ----------------------------------------------------------
+function liveStream(req: Request): Response {
+  const raw = cursorFrom(req);
+  const cursor = raw && /^\d+$/.test(raw) ? Number(raw) : 0;
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      let closed = false;
+      let unsub: (() => void) | undefined;
+      let ping: ReturnType<typeof setInterval> | undefined;
+      const enqueue = (chunk: string) => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          closed = true;
+        }
+      };
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        unsub?.();
+        if (ping) clearInterval(ping);
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
+      req.signal.addEventListener("abort", close);
+
+      // Flush headers immediately (an idle fleet emits nothing for a while) so the client's
+      // connection opens right away instead of hanging until the first event/ping.
+      enqueue(`: open\n\n`);
+
+      // Replay the buffered tail from the client's cursor (gapless reconnect), THEN attach
+      // for live events. Subscribing first + draining the buffer would risk a duplicate for
+      // an event that lands between; draining-then-subscribing can miss one in that window —
+      // acceptable at single-slot cadence, and the next reconnect's cursor closes any gap.
+      for (const item of since(cursor)) enqueue(frame(item.env, item.seq));
+      unsub = subscribe((item) => enqueue(frame(item.env, item.seq)));
+
+      // Keep-alive comment so idle intermediaries don't drop the connection.
+      ping = setInterval(() => enqueue(`: ping\n\n`), 15_000);
     },
   });
+
+  return new Response(stream, { headers: SSE_HEADERS });
 }

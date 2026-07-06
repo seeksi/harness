@@ -14,14 +14,22 @@ import { BurnMeter, HealthBadge } from "./meters";
 interface Props {
   run: RunState;
   feedStale: boolean;
+  // Wall-clock now (epoch seconds), ticked by the parent so the staleness/stuck rule in
+  // deriveHealth actually advances while a run goes silent. Falls back to a fresh read so
+  // the lane is correct even if a caller forgets to thread it.
+  nowSec?: number;
   selected?: boolean;
   onSelect: (runId: string) => void;
   onApprove: (runId: string, gate: GateId) => void;
   onReject: (runId: string, gate: GateId) => void;
+  onApprovePromote?: (runId: string) => void;
 }
 
-export function RunLane({ run, feedStale, selected, onSelect, onApprove, onReject }: Props) {
-  const verdict = deriveHealth({ run, nowSec: run.lastEventTs, feedStale });
+export function RunLane({ run, feedStale, nowSec, selected, onSelect, onApprove, onReject, onApprovePromote }: Props) {
+  // §6 staleness/stuck is measured against WALL-CLOCK now, NOT run.lastEventTs (which
+  // would make silenceSec always 0 and the stuck rule dead). A silent run must age.
+  const now = nowSec ?? Math.floor(Date.now() / 1000);
+  const verdict = deriveHealth({ run, nowSec: now, feedStale });
   const counts = subtaskCounts(run);
   const gates = raisedGates(run);
   const cur = currentPhase(run);
@@ -87,7 +95,7 @@ export function RunLane({ run, feedStale, selected, onSelect, onApprove, onRejec
         <div style={{ padding: 8, borderRadius: 6, background: "var(--live-fill)", border: "1px solid var(--live)" }}>
           <div className="mono" style={{ fontSize: 11, color: "var(--live)" }}>PROMOTE · awaiting</div>
           <div style={{ fontSize: 12, color: "var(--text)", margin: "3px 0 7px" }}>eval+promote ready — approve to fast-forward main</div>
-          <ActionBtn kind="ok" label="Approve promote" onClick={() => onApprove(run.runId, "A")} />
+          <ActionBtn kind="ok" label="Approve promote" onClick={() => (onApprovePromote ?? (() => onApprove(run.runId, "A")))(run.runId)} />
         </div>
       )}
 

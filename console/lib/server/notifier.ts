@@ -4,6 +4,8 @@
 // deep-link (Click header) back to the item. NO-OP when either env var is unset —
 // notification failures NEVER block a run (best-effort, swallow errors).
 
+import type { RunState } from "@/lib/contract/types";
+
 export type NotifyKind = "gate-raised" | "run-failed" | "run-stuck" | "run-completed";
 
 export interface NotifyInput {
@@ -68,4 +70,44 @@ export async function notify(input: NotifyInput, fetchImpl: typeof fetch = fetch
     // Best-effort: a down ntfy server must never fail the run.
     return false;
   }
+}
+
+// Diff two successive run snapshots and emit the alert conditions that fired on THIS
+// transition (§6: gate raised · run failed/stuck · run completed). Pure + edge-triggered
+// (fires once when the condition first becomes true) so the daemon can call notify() for
+// each without re-alerting on every event. Deep-link is the run route.
+export function notificationsFor(before: RunState | undefined, after: RunState): NotifyInput[] {
+  const out: NotifyInput[] = [];
+  const base = { runId: after.runId, projectName: after.projectName, link: `/runs/${after.runId}` };
+
+  // gate-raised: a gate now `raised` that was absent or not-raised before.
+  for (const g of after.gates) {
+    if (g.status !== "raised") continue;
+    const prev = before?.gates.find((x) => x.id === g.id);
+    if (!prev || prev.status !== "raised") {
+      out.push({
+        ...base,
+        kind: "gate-raised",
+        detail: `Gate ${g.id} raised${g.subtaskId ? ` on ${g.subtaskId}` : ""}: ${g.summary}`,
+      });
+    }
+  }
+
+  // run-completed: reached `done` this transition.
+  if (after.status === "done" && before?.status !== "done") {
+    out.push({ ...base, kind: "run-completed", detail: `${after.projectName} run completed` });
+  }
+
+  // run-failed / run-stuck: became failed OR the producer flagged a trajectory anomaly.
+  const failedNow = after.status === "failed";
+  const failedBefore = before?.status === "failed";
+  const stuckNow = after.reportedHealth === "stuck";
+  const stuckBefore = before?.reportedHealth === "stuck";
+  if (failedNow && !failedBefore) {
+    out.push({ ...base, kind: "run-failed", detail: `${after.projectName} run failed` });
+  } else if (stuckNow && !stuckBefore && !failedNow) {
+    out.push({ ...base, kind: "run-stuck", detail: `${after.projectName} run stuck (trajectory anomaly)` });
+  }
+
+  return out;
 }

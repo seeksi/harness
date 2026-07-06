@@ -12,6 +12,13 @@ import type { Envelope } from "@/lib/contract/events";
 
 const DB_PATH = process.env.HARNESS_DB_PATH ?? "./data/console.db";
 const RUNS_PER_PROJECT = 20;
+// Per-run event ring: multi-hour live runs must not grow the event log unbounded. On
+// each append we prune this run's oldest events beyond the cap (the client feed is
+// already ring-buffered at TRACE_WINDOW; this bounds the durable store the same way).
+const EVENTS_PER_RUN = Number(process.env.HARNESS_EVENTS_PER_RUN) || 5000;
+// Default page size for eventsSince — a live reconnect replays in bounded pages, never
+// one unbounded SELECT. High enough that existing full-replay callers are unaffected.
+const EVENTS_PAGE_DEFAULT = 2000;
 
 let _db: Database.Database | null = null;
 
@@ -45,7 +52,56 @@ function initSchema(db: Database.Database): void {
       payload TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id, seq);
+    CREATE TABLE IF NOT EXISTS audit (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts       INTEGER NOT NULL,
+      cmd      TEXT NOT NULL,
+      argv     TEXT NOT NULL,
+      outcome  TEXT NOT NULL,
+      code     INTEGER,
+      error    TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit(ts);
   `);
+}
+
+// One append-only audit row per harness spawn attempt (threat model T7). NEVER stores
+// stdout/stderr or an error message — only argv + outcome + ts + exit code + error CLASS.
+export interface AuditRecord {
+  ts: number;
+  cmd: string;
+  argv: string[];
+  outcome: string;
+  code?: number | null;
+  error?: string;
+}
+
+export function appendAudit(rec: AuditRecord): void {
+  const db = getDb();
+  db.prepare("INSERT INTO audit (ts, cmd, argv, outcome, code, error) VALUES (?, ?, ?, ?, ?, ?)").run(
+    rec.ts,
+    rec.cmd,
+    JSON.stringify(rec.argv),
+    rec.outcome,
+    rec.code ?? null,
+    rec.error ?? null
+  );
+}
+
+export function listAudit(limit = 100): AuditRecord[] {
+  const db = getDb();
+  const n = Math.max(1, Math.floor(limit) || 1);
+  const rows = db
+    .prepare("SELECT ts, cmd, argv, outcome, code, error FROM audit ORDER BY id DESC LIMIT ?")
+    .all(n) as Array<{ ts: number; cmd: string; argv: string; outcome: string; code: number | null; error: string | null }>;
+  return rows.map((r) => ({
+    ts: r.ts,
+    cmd: r.cmd,
+    argv: JSON.parse(r.argv) as string[],
+    outcome: r.outcome,
+    code: r.code,
+    error: r.error ?? undefined,
+  }));
 }
 
 export function upsertRun(state: RunState): void {
@@ -64,7 +120,7 @@ export function finalizeRun(runId: string, outcome: "done" | "failed", endedAt: 
   db.prepare("UPDATE runs SET ended_at = ?, outcome = ? WHERE id = ?").run(endedAt, outcome, runId);
 }
 
-export function appendEvent(env: Envelope): void {
+export function appendEvent(env: Envelope, cap = EVENTS_PER_RUN): void {
   const db = getDb();
   db.prepare("INSERT INTO events (run_id, ts, type, payload) VALUES (?, ?, ?, ?)").run(
     env.runId,
@@ -72,14 +128,31 @@ export function appendEvent(env: Envelope): void {
     env.type,
     JSON.stringify(env)
   );
+  // Per-run ring: drop this run's oldest events beyond the cap so a multi-hour run's
+  // durable log stays bounded. Cheap (one COUNT + at most one bounded DELETE per append).
+  const count = (db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id = ?").get(env.runId) as { n: number }).n;
+  if (count > cap) {
+    db.prepare(
+      `DELETE FROM events WHERE run_id = ? AND seq NOT IN (
+         SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT ?
+       )`
+    ).run(env.runId, env.runId, cap);
+  }
 }
 
-// Gapless replay source: every event for a run from a given seq onward, in order.
-export function eventsSince(runId: string, afterSeq = 0): Array<{ seq: number; env: Envelope }> {
+// Gapless replay source: events for a run from a given seq onward, in order, capped at
+// `limit` per page. Page again from the last returned seq for the next slice — a live
+// reconnect never issues one unbounded SELECT.
+export function eventsSince(
+  runId: string,
+  afterSeq = 0,
+  limit = EVENTS_PAGE_DEFAULT
+): Array<{ seq: number; env: Envelope }> {
   const db = getDb();
+  const n = Math.max(1, Math.floor(limit) || 1);
   const rows = db
-    .prepare("SELECT seq, payload FROM events WHERE run_id = ? AND seq > ? ORDER BY seq ASC")
-    .all(runId, afterSeq) as Array<{ seq: number; payload: string }>;
+    .prepare("SELECT seq, payload FROM events WHERE run_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?")
+    .all(runId, afterSeq, n) as Array<{ seq: number; payload: string }>;
   return rows.map((r) => ({ seq: r.seq, env: JSON.parse(r.payload) as Envelope }));
 }
 
@@ -121,6 +194,53 @@ export function listRecentRuns(projectId: string, limit = RUNS_PER_PROJECT): Run
     endedAt: r.ended_at,
     outcome: r.outcome,
   }));
+}
+
+// Batched variant of listRecentRuns for many projects: ONE query for all project ids
+// (grouped + capped per project in JS) instead of N queries — kills the /api/projects
+// N+1. Returns a map keyed by projectId; a project with no runs is absent (caller defaults
+// to []). Unknown/empty input → empty map (no query).
+export function listRecentRunsForProjects(
+  projectIds: string[],
+  perProject = RUNS_PER_PROJECT
+): Map<string, RunRow[]> {
+  const out = new Map<string, RunRow[]>();
+  const ids = [...new Set(projectIds)].filter((s) => typeof s === "string" && s.length > 0);
+  if (ids.length === 0) return out;
+  const cap = Math.min(Math.max(1, Math.floor(perProject) || 1), RUNS_PER_PROJECT);
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = db
+    .prepare(
+      `SELECT id, project_id, brief, started_at, ended_at, outcome
+         FROM runs WHERE project_id IN (${placeholders})
+         ORDER BY project_id ASC, started_at DESC`
+    )
+    .all(...ids) as Array<{
+    id: string;
+    project_id: string;
+    brief: string;
+    started_at: number;
+    ended_at: number | null;
+    outcome: string | null;
+  }>;
+  for (const r of rows) {
+    let bucket = out.get(r.project_id);
+    if (!bucket) {
+      bucket = [];
+      out.set(r.project_id, bucket);
+    }
+    if (bucket.length >= cap) continue; // rows are already newest-first per project
+    bucket.push({
+      id: r.id,
+      projectId: r.project_id,
+      brief: r.brief,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      outcome: r.outcome,
+    });
+  }
+  return out;
 }
 
 // Retention: keep the newest RUNS_PER_PROJECT runs per project; prune the rest and
