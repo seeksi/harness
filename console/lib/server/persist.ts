@@ -9,6 +9,7 @@ import path from "path";
 import fs from "fs";
 import type { RunState } from "@/lib/contract/types";
 import type { Envelope } from "@/lib/contract/events";
+import { slugFor } from "./discovery";
 
 const DB_PATH = process.env.HARNESS_DB_PATH ?? "./data/console.db";
 const RUNS_PER_PROJECT = 20;
@@ -29,7 +30,53 @@ function getDb(): Database.Database {
   _db = new Database(abs);
   _db.pragma("journal_mode = WAL");
   initSchema(_db);
+  runLegacyIdMigration(_db);
   return _db;
+}
+
+// One-time, idempotent startup migration: pre-migration persisted runs.project_id
+// rows hold absolute filesystem paths (from before discovery ids became opaque
+// basename-hash slugs — see discovery.ts's slugFor). A path-shaped project_id is
+// orphaned under every current slug-keyed query (recent-runs lookups, retention —
+// discovery never yields a path as an id anymore), so rewrite it in place to the
+// slug the SAME path produces today. The persisted snapshot JSON (read back verbatim
+// by getSnapshot()/SSE resync) embeds its own projectId field, so it's rewritten in
+// the same pass — otherwise a migrated row's column is fixed but every snapshot read
+// still hands the client the old absolute path. Safe to run on every boot: an
+// already-migrated (non-path-shaped) project_id never matches the '/'-prefixed
+// selector below, so a repeat run is a no-op.
+function runLegacyIdMigration(db: Database.Database): number {
+  const rows = db.prepare("SELECT id, project_id, snapshot FROM runs WHERE project_id LIKE '/%'").all() as Array<{
+    id: string;
+    project_id: string;
+    snapshot: string;
+  }>;
+  if (rows.length === 0) return 0;
+  const update = db.prepare("UPDATE runs SET project_id = ?, snapshot = ? WHERE id = ?");
+  const tx = db.transaction((items: Array<{ id: string; project_id: string; snapshot: string }>) => {
+    for (const { id, project_id, snapshot } of items) {
+      const slug = slugFor(project_id);
+      let nextSnapshot = snapshot;
+      try {
+        const parsed = JSON.parse(snapshot) as Record<string, unknown>;
+        if (parsed && typeof parsed === "object") {
+          parsed.projectId = slug;
+          nextSnapshot = JSON.stringify(parsed);
+        }
+      } catch {
+        // malformed snapshot JSON — still rewrite project_id, leave snapshot as-is.
+      }
+      update.run(slug, nextSnapshot, id);
+    }
+  });
+  tx(rows);
+  return rows.length;
+}
+
+// Test/ops hook: re-run the legacy-id migration against the current db (e.g. after
+// seeding an old-style path-shaped row, or to confirm idempotency on a live db).
+export function migrateLegacyProjectIds(): number {
+  return runLegacyIdMigration(getDb());
 }
 
 function initSchema(db: Database.Database): void {
@@ -296,5 +343,6 @@ export function resetDb(overridePath?: string): void {
     _db = new Database(abs);
     _db.pragma("journal_mode = WAL");
     initSchema(_db);
+    runLegacyIdMigration(_db);
   }
 }

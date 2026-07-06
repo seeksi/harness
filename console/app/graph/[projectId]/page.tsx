@@ -9,7 +9,7 @@ import { foldFleet } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { initialFleetState } from "@/lib/contract/types";
 import { GraphView } from "@/components/graph/GraphView";
-import { resolveProject, rosterFromProject } from "../roster";
+import { resolveProject, rosterFromProject, projectAliases } from "../roster";
 import type { RosterAgent } from "@/components/graph/model";
 
 export default async function Page({ params }: { params: Promise<{ projectId: string }> }) {
@@ -17,17 +17,19 @@ export default async function Page({ params }: { params: Promise<{ projectId: st
   const initial = foldFleet(fixtureEnvelopes(), initialFleetState);
 
   let projectName = projectId;
-  // The route param is a basename slug (see roster.ts), but a run's own projectId
-  // is whatever the launcher stamped it with — for real (discovered) projects
-  // that's the canonical absolute repo path, which never equals the slug. Pass
-  // both down so GraphView can match live runs against either identity.
-  let canonicalProjectId: string | undefined;
+  // The route param may be the current discovery slug OR a legacy basename (see
+  // roster.ts's resolveProject) — both resolve to the same discovered project here.
+  // `aliases` is every id shape a run for this project might carry; resolved
+  // server-side so GraphView never has to re-derive a basename from a path
+  // client-side. A fixture-only projectId or one with no backing repo just yields
+  // its own value as the sole alias — the graph still renders off agentEvents alone.
+  let aliases = [projectId];
   let rosterAgents: RosterAgent[] = [];
   try {
     const project = resolveProject(projectId);
     if (project) {
       projectName = project.name;
-      canonicalProjectId = project.id;
+      aliases = projectAliases(project);
       rosterAgents = rosterFromProject(project);
     }
   } catch {
@@ -38,7 +40,7 @@ export default async function Page({ params }: { params: Promise<{ projectId: st
     <GraphView
       initial={initial}
       projectId={projectId}
-      canonicalProjectId={canonicalProjectId}
+      aliases={aliases}
       projectName={projectName}
       rosterAgents={rosterAgents}
     />

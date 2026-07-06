@@ -5,35 +5,27 @@
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";
-import path from "path";
 import { foldFleet } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { initialFleetState } from "@/lib/contract/types";
-import { discoverProjects } from "@/lib/server/discovery";
-
-// [projectId] is a single dynamic segment — Next.js leaves a literal "%2F" inside
-// it un-decoded (avoids path-separator ambiguity), so an absolute-path discovery id
-// can never round-trip through it as-is. Link (and roster.ts's resolveProject)
-// both key on the basename instead; the fixture's slugs (no slashes) pass through
-// unchanged either way.
-function slugOf(id: string): string {
-  return id.includes("/") ? path.basename(id) : id;
-}
+import { discoverProjects, type Project } from "@/lib/server/discovery";
+import { foldProjectIndex } from "./roster";
 
 export default function Page() {
   const state = foldFleet(fixtureEnvelopes(), initialFleetState);
-  const fromRuns = new Map(Object.values(state.runs).map((r) => [r.projectId, r.projectName]));
 
-  let discovered: string[] = [];
+  let discovered: Project[] = [];
   try {
-    discovered = discoverProjects().map((p) => p.id);
+    discovered = discoverProjects();
   } catch {
     discovered = [];
   }
-  for (const id of discovered) {
-    const slug = slugOf(id);
-    if (!fromRuns.has(slug)) fromRuns.set(slug, path.basename(id));
-  }
+
+  // Fold each run's projectId into its discovered project (server-side
+  // basename-or-slug resolution — see roster.ts's foldProjectIndex) so a
+  // fixture/persisted run stamped with a legacy basename lands on the SAME row as
+  // the discovered project's slug id, instead of double-listing the same repo.
+  const fromRuns = foldProjectIndex(Object.values(state.runs), discovered);
 
   const ids = [...fromRuns.keys()].sort();
 

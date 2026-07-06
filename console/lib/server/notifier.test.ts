@@ -31,8 +31,18 @@ describe("ntfy notifier", () => {
     const h = opts.headers as Record<string, string>;
     expect(h.Title).toContain("vector");
     expect(h.Priority).toBe("high");
-    expect(h.Click).toBe("https://console.tail.net/runs/r1");
+    expect(h.Click).toBe("https://console.tail.net/run/r1");
     expect(opts.body).toBe("Gate B raised on px-b");
+  });
+
+  it("falls back to NTFY_DEEPLINK_BASE when CONSOLE_BASE_URL is unset", async () => {
+    delete process.env.CONSOLE_BASE_URL;
+    process.env.NTFY_DEEPLINK_BASE = "https://alt.tail.net";
+    const fetchMock = vi.fn(async () => ({ ok: true }) as Response);
+    await notify({ kind: "gate-raised", runId: "r1", projectName: "vector" }, fetchMock as unknown as typeof fetch);
+    const h = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(h.Click).toBe("https://alt.tail.net/run/r1");
+    delete process.env.NTFY_DEEPLINK_BASE;
   });
 
   it("is a NO-OP (no fetch) when NTFY env is unset", async () => {

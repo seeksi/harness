@@ -7,6 +7,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import type { FleetState, GateId } from "@/lib/contract/types";
 import type { Envelope } from "@/lib/contract/events";
 import { raisedGates, currentPhase } from "@/lib/contract/selectors";
@@ -14,8 +15,11 @@ import { deriveHealth } from "@/lib/contract/health";
 import { PHASE_LABELS } from "@/lib/contract/types";
 import { createFleetStore, type FleetStore } from "@/lib/store/fleetStore";
 import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
-import { fmtClock } from "@/lib/format";
+import { fmtClock, projectLabel } from "@/lib/format";
+import { deckRunRoute } from "@/lib/routes";
 import { HealthBadge } from "@/components/meters";
+import { useChimeMuted, useDeskChime } from "@/lib/chime";
+import { ChimeToggle } from "@/components/ChimeToggle";
 import { lookupRun } from "./selectRun";
 import { PositionPanel } from "./PositionPanel";
 import { GateCard } from "./GateCard";
@@ -70,6 +74,12 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
   }, [store]);
 
   useEffect(() => scheduleStaleTick(() => setNow(nowSec())), []);
+
+  // Desk chime (§5/§6): edge-triggered tone on gate-raise/fail/stuck/complete for
+  // whichever run this tab is focused on. Muted by default under
+  // prefers-reduced-motion; the toggle's choice persists in localStorage after that.
+  const [chimeMuted, setChimeMuted] = useChimeMuted();
+  useDeskChime(state, chimeMuted);
 
   const { run, notFound } = lookupRun(state, runId);
 
@@ -144,9 +154,13 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
           <a href="/" className="mono" style={{ fontSize: 11, color: "var(--text-faint)", textDecoration: "none" }}>← fleet</a>
           <span className="display" style={{ fontSize: 22, fontWeight: 700, color: "var(--text)" }}>{run.projectName}</span>
-          <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{run.projectId} · {run.brief}</span>
+          <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{projectLabel(run.projectId, run.projectName)} · {run.brief}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Link href={deckRunRoute(run.runId)} className="mono" style={{ fontSize: 11, color: "var(--info)", textDecoration: "none" }}>
+            open deck for this run →
+          </Link>
+          <ChimeToggle muted={chimeMuted} onToggle={() => setChimeMuted(!chimeMuted)} />
           <HealthBadge verdict={verdict} />
           {banner.stale && (
             <span className="mono pulse" role="status" style={{ fontSize: 11, color: "var(--amber)" }}>
@@ -168,7 +182,7 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
             </div>
           )}
           {gates.map((g) => (
-            <GateCard key={g.id} gate={g} onApprove={onApprove} onReject={onReject} />
+            <GateCard key={g.id} gate={g} runId={run.runId} onApprove={onApprove} onReject={onReject} />
           ))}
           {promote && (
             // Pending/interactive, not yet decided — amber, not green. Green (--live)

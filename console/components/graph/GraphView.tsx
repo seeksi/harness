@@ -18,15 +18,6 @@ import { buildGraph, computeLayout, summarizeActivity, type RosterAgent } from "
 import { GraphCanvas } from "./GraphCanvas";
 import { Inspector } from "./Inspector";
 
-// Last path segment, without pulling in the "path" module (this file is client-only
-// and browser bundles don't get node's fs/path polyfills for free). Mirrors
-// roster.ts's resolveProject basename fallback so a run stamped with either the
-// slug or the discovery id's basename still matches.
-function basename(id: string): string {
-  const i = Math.max(id.lastIndexOf("/"), id.lastIndexOf("\\"));
-  return i === -1 ? id : id.slice(i + 1);
-}
-
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
   useEffect(() => {
@@ -42,14 +33,16 @@ function usePrefersReducedMotion(): boolean {
 export interface GraphViewProps {
   initial: FleetState;
   projectId: string;
-  // The resolved project's canonical (discovery) id, when it differs from the route
-  // slug — see [projectId]/page.tsx. Runs are matched against either.
-  canonicalProjectId?: string;
+  // Every id shape a run for this project might carry — the route slug plus any
+  // legacy basename — resolved server-side (see roster.ts's projectAliases /
+  // [projectId]/page.tsx). No client-side path-parsing or basename derivation:
+  // matching is a plain membership check against this precomputed set.
+  aliases?: string[];
   projectName: string;
   rosterAgents: RosterAgent[];
 }
 
-export function GraphView({ initial, projectId, canonicalProjectId, projectName, rosterAgents }: GraphViewProps) {
+export function GraphView({ initial, projectId, aliases, projectName, rosterAgents }: GraphViewProps) {
   const storeRef = useRef<FleetStore | null>(null);
   if (!storeRef.current) storeRef.current = createFleetStore(initial);
   const store = storeRef.current;
@@ -57,14 +50,11 @@ export function GraphView({ initial, projectId, canonicalProjectId, projectName,
   const getServer = useCallback(() => initial, [initial]);
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, getServer);
 
-  // The route slug (basename) and the run's own projectId (often the canonical
-  // absolute discovery id) can legitimately differ — see [projectId]/page.tsx.
-  // Match on either, plus a basename fallback, so live runs for a project whose
-  // id isn't the slug still show up instead of silently vanishing.
-  const matchesProject = useCallback(
-    (pid: string) => pid === projectId || pid === canonicalProjectId || basename(pid) === projectId,
-    [projectId, canonicalProjectId]
-  );
+  // The accepted id set is computed server-side (aliases), never derived here —
+  // matching is just membership. Falls back to the bare route projectId when the
+  // caller doesn't resolve a project (fixture-only id with no backing repo).
+  const aliasSet = useMemo(() => new Set(aliases && aliases.length ? aliases : [projectId]), [aliases, projectId]);
+  const matchesProject = useCallback((pid: string) => aliasSet.has(pid), [aliasSet]);
 
   // Deterministic seed for both the "now" clock and the connection pill's
   // lastEventMs — derived from the server-rendered `initial` data's own event
@@ -214,7 +204,7 @@ export function GraphView({ initial, projectId, canonicalProjectId, projectName,
         </div>
       </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 14, alignItems: "start" }}>
+      <div className="graph-grid" style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 14, alignItems: "start" }}>
         <div ref={graphAreaRef} style={{ height: "70vh", minHeight: 420 }}>
           <GraphCanvas
             nodes={graph.nodes}
@@ -237,6 +227,16 @@ export function GraphView({ initial, projectId, canonicalProjectId, projectName,
           No agent roster or activity observed yet for this project — the graph fills in as runs report agentEvents.
         </div>
       )}
+
+      {/* Phone restack (§5): single-column below 1024px, canvas first (same hierarchy
+          order as desktop — spectacle first), legend/inspector stacked below it. The
+          canvas itself is touch-driven already (GraphCanvas's Pointer Events unify
+          mouse + touch pan/zoom/pinch/tap). */}
+      <style>{`
+        @media (max-width: 1024px) {
+          .graph-grid { grid-template-columns: 1fr !important; }
+        }
+      `}</style>
     </main>
   );
 }

@@ -60,3 +60,35 @@ describe("discoverProjects", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 });
+
+describe("discoverProjects — opaque id shape", () => {
+  it("id is never the filesystem path — a basename-hash slug instead", () => {
+    const alpha = discoverProjects([root]).find((p) => p.name === "alpha")!;
+    expect(alpha.id).not.toBe(alpha.path);
+    expect(alpha.id).not.toContain(path.sep);
+    expect(alpha.id).toMatch(/^alpha-[0-9a-f]{8}$/);
+    // `path` still carries the real fs location for server-side use.
+    expect(alpha.path).toBe(path.join(root, "alpha"));
+  });
+
+  it("id is deterministic across repeated discovery calls (no persisted mapping needed)", () => {
+    const a = discoverProjects([root]).find((p) => p.name === "alpha")!.id;
+    const b = discoverProjects([root]).find((p) => p.name === "alpha")!.id;
+    expect(a).toBe(b);
+  });
+
+  it("repos sharing a basename under different roots get distinct, stable ids", () => {
+    const rootA = fs.mkdtempSync(path.join(os.tmpdir(), "disc-a-"));
+    const rootB = fs.mkdtempSync(path.join(os.tmpdir(), "disc-b-"));
+    try {
+      mkRepo(path.join(rootA, "same"), ["x.md"]);
+      mkRepo(path.join(rootB, "same"), ["y.md"]);
+      const matches = discoverProjects([rootA, rootB]).filter((p) => p.name === "same");
+      expect(matches).toHaveLength(2);
+      expect(matches[0].id).not.toBe(matches[1].id);
+    } finally {
+      fs.rmSync(rootA, { recursive: true, force: true });
+      fs.rmSync(rootB, { recursive: true, force: true });
+    }
+  });
+});

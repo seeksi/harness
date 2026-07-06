@@ -11,7 +11,9 @@ import {
   getSnapshot,
   appendAudit,
   listAudit,
+  migrateLegacyProjectIds,
 } from "./persist";
+import { slugFor } from "./discovery";
 import { newRun } from "@/lib/contract/types";
 import type { Envelope } from "@/lib/contract/events";
 
@@ -123,6 +125,50 @@ describe("listRecentRunsForProjects — batched (no N+1)", () => {
 
   it("empty input → empty map (no query)", () => {
     expect(listRecentRunsForProjects([]).size).toBe(0);
+  });
+});
+
+describe("migrateLegacyProjectIds — rewrites pre-migration path-shaped project_id rows", () => {
+  it("rewrites a seeded old-style path row to the current slug and re-homes its runs", () => {
+    const legacyPath = "/home/alter/HARNESS";
+    upsertRun(newRun("legacy-r1", legacyPath, "HARNESS", "b", 500));
+    // Not yet queryable under the current slug — still orphaned under the old path.
+    expect(listRecentRuns(slugFor(legacyPath))).toHaveLength(0);
+    expect(listRecentRuns(legacyPath)).toHaveLength(1);
+
+    const migrated = migrateLegacyProjectIds();
+    expect(migrated).toBe(1);
+
+    expect(listRecentRuns(slugFor(legacyPath))).toHaveLength(1);
+    expect(listRecentRuns(slugFor(legacyPath))[0].id).toBe("legacy-r1");
+    expect(listRecentRuns(legacyPath)).toHaveLength(0); // old path id no longer resolves
+  });
+
+  it("also rewrites the persisted snapshot JSON's projectId, not just the column", () => {
+    const legacyPath = "/home/alter/HARNESS";
+    upsertRun(newRun("legacy-r3", legacyPath, "HARNESS", "b", 500));
+    // Pre-migration: the snapshot getSnapshot() returns still embeds the raw path.
+    expect(getSnapshot("legacy-r3")?.projectId).toBe(legacyPath);
+
+    expect(migrateLegacyProjectIds()).toBe(1);
+
+    const snap = getSnapshot("legacy-r3");
+    expect(snap?.projectId).toBe(slugFor(legacyPath));
+    // The raw persisted JSON itself must carry no '/'-prefixed (path-shaped) project id —
+    // re-serializing what getSnapshot() parsed straight out of the snapshot column.
+    expect(JSON.stringify(snap)).not.toMatch(/"projectId":"\//);
+  });
+
+  it("is idempotent — a second run is a no-op once already migrated", () => {
+    upsertRun(newRun("legacy-r2", "/home/alter/HARNESS", "HARNESS", "b", 500));
+    expect(migrateLegacyProjectIds()).toBe(1);
+    expect(migrateLegacyProjectIds()).toBe(0);
+  });
+
+  it("never touches an already-opaque (non-path-shaped) project_id", () => {
+    seedRun("r1", "already-a-slug", 100);
+    expect(migrateLegacyProjectIds()).toBe(0);
+    expect(listRecentRuns("already-a-slug")).toHaveLength(1);
   });
 });
 
