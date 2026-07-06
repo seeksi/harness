@@ -105,3 +105,31 @@ status: DASHBOARD REBUILD COMPLETE — Batches A+B+C promoted. Remaining: operat
 5. HIGH sandbox: audit swallowed + no mandatory pre-spawn audit. Fail-closed pre-spawn audit (same pattern live-bridge already adopted).
 6. MED/LOW tests: cover nonzero-exit/null-session/relocate=false fail-closed; timeout test needs pid for process-group kill.
 Claude review pending; reconcile then fix.
+
+# Isolated agent HOME (HANDOFF agenda #1) — base: main, branch feat/agent-home-isolation
+project: harness
+checkpoint: 2026-07-06 (context-guard soft limit; implementation done, tests green)
+
+## Investigation results (verified live, scratchpad probes)
+- Headless claude 2.1.202 auths fine from a HOME containing ONLY .claude/.credentials.json (Max plan, no API key).
+- CLI self-provisions .claude.json/projects/sessions in the fresh HOME; credential untouched on a normal run.
+- Project-level PostToolUse hooks ($CLAUDE_PROJECT_DIR-relative) STILL FIRE under fresh HOME -> Gate D trace pipeline intact.
+- Gap found: fresh HOME has no ~/.gitconfig -> agent `git commit` would die; provisioner writes one.
+
+## Done (on feat/agent-home-isolation)
+- NEW console/lib/sandbox/agent-home.ts: ensureAgentHome() -> AGENT_ISOLATED_HOME ?? ~/.gantry/agent-home;
+  0700 dirs, symlink-refusal, credential RE-COPIED each spawn (0600, tmp+wx+rename), one-time .gitconfig
+  (operator identity via `git config --get`, fallback GANTRY Agent <agent@gantry.local>), fail closed if
+  operator cred missing. ponytail note: copy-at-spawn divergence ceiling documented in-file.
+- agent-runner.ts: spawnAgent provisions isolated home in DIRECT mode when AGENT_HOME unset (AGENT_HOME set =
+  explicit legacy override; drop mode untouched — sudo -H owns HOME). Provision failure fails closed (audit "error",
+  no spawn). buildInvocation/agentEnv take optional isolatedHome param. index.ts re-exports ensureAgentHome.
+- Tests: agent-home.test.ts (6 cases) + 3 spawnAgent isolated-home cases; agent-runner.test.ts beforeEach now stubs
+  AGENT_HOME (keeps legacy-path tests off the real fs). Sandbox suite 64/64 green.
+
+## Next steps
+1. Full console suite (npx vitest run) + tsc + eslint + next build.
+2. Update HANDOFF.md: agenda #1 done; run recipe drops AGENT_HOME=/home/alter (isolated is the new default).
+3. Update memory agent-exec-gate (isolated HOME shipped note).
+4. cross-review skill on the diff (spawn boundary rule), then merge branch -> main.
+5. Optional operator live smoke: run a real GANTRY run and confirm trace no longer carries global CLAUDE.md noise.
