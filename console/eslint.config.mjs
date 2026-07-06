@@ -14,6 +14,8 @@
 // import()/require() or re-export laundering — the runtime controls (provenance/schema/
 // credential/env gates) are the actual security boundary; this is a convention tripwire.
 
+import tsParser from "@typescript-eslint/parser";
+
 const HARNESS_SPAWN = {
   group: ["**/lib/bridge/harness-bridge"],
   message:
@@ -29,6 +31,10 @@ export default [
   { ignores: [".next/**", "node_modules/**", "next-env.d.ts", "eslint.config.mjs"] },
   {
     files: ["**/*.{ts,tsx}"],
+    // TS parser so ESLint can read the tree at all (no eslint-config-next preset here). Only
+    // the import-boundary rule is security-relevant, so this is a plain syntax parse — no
+    // type-aware `project` wiring needed, keeping the lint fast and dependency-light.
+    languageOptions: { parser: tsParser, parserOptions: { ecmaVersion: "latest", sourceType: "module" } },
     rules: {
       // Default-deny BOTH sinks; sanctioned files re-enable only their assigned sink below.
       "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN, DAEMON] }],

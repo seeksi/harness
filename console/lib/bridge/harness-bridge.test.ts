@@ -252,6 +252,69 @@ describe("spawnHarness — shell:false + audit row per spawn (T7)", () => {
     expect(listAudit()[0]).toMatchObject({ cmd: "wt-verify", outcome: "error", error: "stdout-flood" });
   });
 
+  it("bounds a newline-less flood to the cap: never buffers unbounded, never crashes (T6)", async () => {
+    mintLane("lane-nonl");
+    // ONE logical line: 200 × 64 KiB chunks, NO newline ever → 12.8 MiB of stdout. A readline
+    // reader would buffer the whole thing; the byte-capped reader discards past MAX_LINE_LEN.
+    const chunk = "x".repeat(64 * 1024);
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: Readable;
+      stderr: Readable;
+      pid: number;
+      kill: (s?: NodeJS.Signals) => boolean;
+    };
+    child.stdout = Readable.from(Array.from({ length: 200 }, () => chunk)); // never a "\n"
+    child.stderr = Readable.from([]);
+    child.pid = undefined as unknown as number;
+    const killed: NodeJS.Signals[] = [];
+    child.kill = ((s: NodeJS.Signals) => {
+      killed.push(s);
+      return true;
+    }) as never;
+    child.stdout.on("end", () => setImmediate(() => child.emit("close", 0)));
+    const spawnFn = vi.fn(() => child as never);
+    const events: ParsedHarnessEvent[] = [];
+    // A single newline-less line counts as ONE oversize line (< threshold): it is bounded and
+    // dropped, the run still exits cleanly — no flood kill, no crash, no forwarded garbage.
+    const { code } = await spawnHarness({ cmd: "wt-verify", slug: "lane-nonl" }, (e) => events.push(e), { spawnFn });
+    expect(code).toBe(0);
+    expect(events).toHaveLength(0); // the giant line is never parsed/forwarded
+    expect(killed).not.toContain("SIGKILL"); // one line ≠ a flood
+  });
+
+  it("counts an oversize line accumulated across newline-less chunks toward the flood kill (T6)", async () => {
+    mintLane("lane-nonl-flood");
+    // 51 logical lines, each built from 3 × 32 KiB newline-less chunks (96 KiB > 64 KiB cap)
+    // then a lone "\n". Each line must be counted ONCE as oversize despite arriving in pieces;
+    // 51 > MAX_OVERSIZE_LINES(50) → SIGKILL + reject, proving per-line accounting across chunks.
+    const part = "y".repeat(32 * 1024);
+    const pieces: string[] = [];
+    for (let i = 0; i < 51; i++) pieces.push(part, part, part, "\n");
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: Readable;
+      stderr: Readable;
+      pid: number;
+      kill: (s?: NodeJS.Signals) => boolean;
+    };
+    child.stdout = Readable.from(pieces);
+    child.stderr = Readable.from([]);
+    child.pid = undefined as unknown as number;
+    const killed: NodeJS.Signals[] = [];
+    child.kill = ((s: NodeJS.Signals) => {
+      killed.push(s);
+      return true;
+    }) as never;
+    child.stdout.on("end", () => setImmediate(() => child.emit("close", 0)));
+    const spawnFn = vi.fn(() => child as never);
+    const events: ParsedHarnessEvent[] = [];
+    await expect(
+      spawnHarness({ cmd: "wt-verify", slug: "lane-nonl-flood" }, (e) => events.push(e), { spawnFn })
+    ).rejects.toThrow(/flood/);
+    expect(events).toHaveLength(0);
+    expect(killed).toContain("SIGKILL");
+    expect(listAudit()[0]).toMatchObject({ cmd: "wt-verify", outcome: "error", error: "stdout-flood" });
+  });
+
   it("times out a hung child (SIGTERM→SIGKILL) and rejects HarnessTimeoutError", async () => {
     mintLane("lane-hang");
     const child = new EventEmitter() as EventEmitter & { stdout: Readable; stderr: Readable; pid: number; kill: () => boolean };

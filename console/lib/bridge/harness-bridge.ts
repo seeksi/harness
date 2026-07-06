@@ -17,7 +17,6 @@
 // any human/non-JSON output is ignored.
 
 import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildProcess } from "child_process";
-import { createInterface } from "readline";
 import path from "path";
 import { isLane, isSession, isPlanFile } from "./registry";
 import { HarnessArgError, HarnessTimeoutError } from "./errors";
@@ -312,9 +311,14 @@ const DEFAULT_KILL_GRACE_MS = 5_000;
 // exhaust memory). A single line over MAX_LINE_LEN is dropped (never parsed/forwarded);
 // once MAX_OVERSIZE_LINES such lines arrive, the child is SIGKILLed and the run fails —
 // that is an egregious flood, not a stray long line.
-// ponytail: readline still buffers a pending line up to its own limits BEFORE emitting it,
-// so a single newline-less multi-GB line is bounded by node's readline, not this cap.
-// add when: a raw byte-capped reader replaces readline (only if a real flood is observed).
+// A hand-rolled chunk reader (not readline) enforces the cap on the PARTIAL line as it
+// accumulates: a child spewing gigabytes without a newline never buffers past MAX_LINE_LEN
+// (the remainder of the oversize line is discarded, the line counted once), so the memory
+// bound holds even for a newline-less flood — which node's readline would buffer unbounded.
+// ponytail: cap counts UTF-16 code units post-decode, not raw bytes — worst case ~4x
+// byte slack (≤256KiB/line), still a hard constant bound; per-field 8KiB caps in
+// parseHarnessLine drop oversized events regardless. Upgrade path: Buffer-level
+// byteLength accounting with StringDecoder if byte-exact caps ever matter.
 const MAX_LINE_LEN = 64 * 1024;
 const MAX_OVERSIZE_LINES = 50;
 
@@ -430,21 +434,50 @@ export function spawnHarness(
     // forwarded to the client (may contain noise); bounded by discarding.
     child.stderr?.resume();
     // stdout flood defense (T6): drop any single line over the cap, count it, and if the
-    // child keeps spewing oversize lines, SIGKILL the tree and fail the run.
+    // child keeps spewing oversize lines, SIGKILL the tree and fail the run. Hand-rolled
+    // line splitting (not readline) so the cap is enforced on the PARTIAL line as it grows:
+    // a newline-less multi-GB stream is bounded to MAX_LINE_LEN in memory, not buffered whole.
     let flooded = false;
     let oversizeLines = 0;
-    const rl = createInterface({ input: child.stdout });
-    rl.on("line", (line) => {
-      if (line.length > MAX_LINE_LEN) {
-        oversizeLines += 1;
-        if (oversizeLines > MAX_OVERSIZE_LINES && !flooded) {
-          flooded = true;
-          killTree("SIGKILL"); // egregious flood → kill now; `close` settles the reject
-        }
-        return; // drop the oversize line: never parse or forward it
+    let lineBuf = ""; // the current line accumulated so far (never grows past MAX_LINE_LEN)
+    let dropping = false; // current line already exceeded the cap → discard until the newline
+    const countOversize = () => {
+      oversizeLines += 1;
+      if (oversizeLines > MAX_OVERSIZE_LINES && !flooded) {
+        flooded = true;
+        killTree("SIGKILL"); // egregious flood → kill now; `close` settles the reject
       }
+    };
+    const emitLine = (line: string) => {
       const event = parseHarnessLine(line);
       if (event) onEvent(event);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      let idx = 0;
+      while (idx < chunk.length) {
+        const nl = chunk.indexOf("\n", idx);
+        const seg = chunk.slice(idx, nl === -1 ? undefined : nl);
+        if (dropping) {
+          // still swallowing the tail of an oversize line; only a newline resets us.
+        } else if (lineBuf.length + seg.length > MAX_LINE_LEN) {
+          countOversize(); // count this line ONCE; discard it without buffering the remainder
+          lineBuf = "";
+          dropping = true;
+        } else {
+          lineBuf += seg;
+        }
+        if (nl === -1) break; // no newline yet: keep the partial (bounded) for the next chunk
+        if (!dropping) emitLine(lineBuf); // a complete, within-cap line
+        lineBuf = "";
+        dropping = false;
+        idx = nl + 1;
+      }
+    });
+    // Flush a final newline-less partial line on EOF (matches readline's last-line behavior).
+    child.stdout.on("end", () => {
+      if (!dropping && lineBuf.length > 0) emitLine(lineBuf);
+      lineBuf = "";
     });
 
     // Kill the whole process group (negative pid) so children spawned by harness.sh die
@@ -470,7 +503,6 @@ export function spawnHarness(
       settled = true;
       clearTimeout(deadline);
       if (killTimer) clearTimeout(killTimer);
-      rl.close();
       action();
     };
 

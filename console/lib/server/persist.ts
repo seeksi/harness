@@ -162,6 +162,17 @@ export function getSnapshot(runId: string): RunState | null {
   return row ? (JSON.parse(row.snapshot) as RunState) : null;
 }
 
+/**
+ * Every known run id across all projects. Used by the SSE stream to re-seed a stale-cursor
+ * client with a snapshot per run — including runs whose events have been fully evicted from
+ * the in-memory broker ring (so a reconnect can't silently keep one run stale).
+ */
+export function listRunIds(): string[] {
+  const db = getDb();
+  const rows = db.prepare("SELECT id FROM runs").all() as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
 export interface RunRow {
   id: string;
   projectId: string;

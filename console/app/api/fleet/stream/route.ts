@@ -14,7 +14,7 @@ import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { STREAM_END } from "@/lib/sse/client";
 import { resumeStartIndex } from "@/lib/sse/resume";
 import { attachReplay, since } from "@/lib/server/broker";
-import { getSnapshot } from "@/lib/server/persist";
+import { getSnapshot, listRunIds } from "@/lib/server/persist";
 
 const FRAME_MS = 220; // pacing for the streaming heartbeat (fixture)
 const SSE_HEADERS = {
@@ -124,9 +124,12 @@ function liveStream(req: Request): Response {
         {
           onGap: () => {
             // Emit an authoritative full-run snapshot (a `sync` frame, wholesale-applied by
-            // the reducer) for every run still referenced in the retained ring. No `id:` line
-            // so the client's resume cursor is only advanced by the numeric replay frames.
-            const runIds = new Set(since(0).map((i) => i.env.runId));
+            // the reducer) for every KNOWN run — enumerated from persistence, not just the
+            // retained ring: a run whose events were fully evicted from the ring is absent
+            // from `since(0)` and would otherwise stay silently stale on this client. Union
+            // persistence with the ring so an in-flight run not yet snapshotted is still
+            // covered. No `id:` line so the resume cursor is only advanced by replay frames.
+            const runIds = new Set<string>([...listRunIds(), ...since(0).map((i) => i.env.runId)]);
             for (const runId of runIds) {
               const snap = getSnapshot(runId);
               if (snap) {
