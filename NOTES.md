@@ -84,3 +84,5 @@ note: deck router said cheap; orchestrator held default (search/filter/virtualiz
 - S4: 4 lanes merged clean, zero conflicts (live-bridge -> run-focus -> deck -> graph). Gate C: console 200/200 (24 files) + build + lint; web 277 pass.
 - Gate D L2: trace dc1819a5 flags EXPLOSION 981>200. Assessment: false positive — aggregate orchestrator session (2 batches, 22 subagents, 13 codex reviews); no LOOP (run=1), no THRASH (Bash 33%). Carried to S6 human checkpoint as tie-break, not self-dismissed. Per-lane Batch A trace was clean (94 calls).
 - Accepted ceiling (documented in-code): stdout line cap counts UTF-16 code units (~4x byte slack, still hard-bounded; 8KiB field caps downstream).
+
+## Batch B S6: GO (human, 2026-07-06) — trace EXPLOSION accepted as FP (session aggregation; human tie-break). Judge blocker (fleet->run nav) + third wall fixed on integration, re-verified 203/203.
