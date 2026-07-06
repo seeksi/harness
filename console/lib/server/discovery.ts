@@ -26,7 +26,11 @@ export interface Project {
 // it unique and stable: deterministic per resolved path, so two repos that happen
 // to share a basename under different roots never collide, and the same repo
 // yields the same id across requests/restarts (no persisted mapping needed).
-function slugFor(repoPath: string): string {
+// Exported for lib/server/persist.ts's one-time legacy-id migration (pre-migration
+// persisted runs.project_id rows hold absolute paths — this is the SAME algorithm
+// used to turn one back into the current opaque id, so a migrated row round-trips
+// to exactly what discovery would produce for that path today).
+export function slugFor(repoPath: string): string {
   const abs = path.resolve(repoPath);
   const base =
     path

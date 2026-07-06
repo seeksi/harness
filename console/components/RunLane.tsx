@@ -13,6 +13,7 @@ import { subtaskCounts, raisedGates, currentPhase } from "@/lib/contract/selecto
 import { PHASE_LABELS } from "@/lib/contract/types";
 import { PhaseRail } from "./PhaseRail";
 import { BurnMeter, HealthBadge } from "./meters";
+import { projectLabel } from "@/lib/format";
 
 interface Props {
   run: RunState;
@@ -74,7 +75,7 @@ export function RunLane({ run, feedStale, live, nowSec, selected, onSelect, onAp
             {run.projectName}
           </div>
           <div className="mono" style={{ fontSize: 10, color: "var(--text-faint)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {run.projectId} · {run.brief}
+            {projectLabel(run.projectId, run.projectName)} · {run.brief}
           </div>
         </button>
         <HealthBadge verdict={verdict} />

@@ -9,19 +9,15 @@
 // ntfy tap resolves to wherever the console is actually reachable (tailnet name,
 // port, etc. — deploy-specific, never baked in).
 
-import type { RunState } from "@/lib/contract/types";
 import { runRoute } from "@/lib/routes";
+// The transition logic (NotifyKind/NotifyInput/notificationsFor) lives in the
+// neutral lib/contract/alerts.ts, shared with the client-side desk chime
+// (lib/chime.ts) — re-exported here so existing importers of this module (daemon.ts,
+// transitions.test.ts) are unaffected. No behavior change.
+import { notificationsFor, type NotifyKind, type NotifyInput } from "@/lib/contract/alerts";
 
-export type NotifyKind = "gate-raised" | "run-failed" | "run-stuck" | "run-completed";
-
-export interface NotifyInput {
-  kind: NotifyKind;
-  runId: string;
-  projectName: string;
-  detail?: string; // e.g. "Gate B raised on px-b"
-  // Absolute or path deep-link to the item; combined with CONSOLE_BASE_URL if relative.
-  link?: string;
-}
+export { notificationsFor };
+export type { NotifyKind, NotifyInput };
 
 const TITLES: Record<NotifyKind, string> = {
   "gate-raised": "Gate raised",
@@ -76,44 +72,4 @@ export async function notify(input: NotifyInput, fetchImpl: typeof fetch = fetch
     // Best-effort: a down ntfy server must never fail the run.
     return false;
   }
-}
-
-// Diff two successive run snapshots and emit the alert conditions that fired on THIS
-// transition (§6: gate raised · run failed/stuck · run completed). Pure + edge-triggered
-// (fires once when the condition first becomes true) so the daemon can call notify() for
-// each without re-alerting on every event. Deep-link is the run route.
-export function notificationsFor(before: RunState | undefined, after: RunState): NotifyInput[] {
-  const out: NotifyInput[] = [];
-  const base = { runId: after.runId, projectName: after.projectName, link: runRoute(after.runId) };
-
-  // gate-raised: a gate now `raised` that was absent or not-raised before.
-  for (const g of after.gates) {
-    if (g.status !== "raised") continue;
-    const prev = before?.gates.find((x) => x.id === g.id);
-    if (!prev || prev.status !== "raised") {
-      out.push({
-        ...base,
-        kind: "gate-raised",
-        detail: `Gate ${g.id} raised${g.subtaskId ? ` on ${g.subtaskId}` : ""}: ${g.summary}`,
-      });
-    }
-  }
-
-  // run-completed: reached `done` this transition.
-  if (after.status === "done" && before?.status !== "done") {
-    out.push({ ...base, kind: "run-completed", detail: `${after.projectName} run completed` });
-  }
-
-  // run-failed / run-stuck: became failed OR the producer flagged a trajectory anomaly.
-  const failedNow = after.status === "failed";
-  const failedBefore = before?.status === "failed";
-  const stuckNow = after.reportedHealth === "stuck";
-  const stuckBefore = before?.reportedHealth === "stuck";
-  if (failedNow && !failedBefore) {
-    out.push({ ...base, kind: "run-failed", detail: `${after.projectName} run failed` });
-  } else if (stuckNow && !stuckBefore && !failedNow) {
-    out.push({ ...base, kind: "run-stuck", detail: `${after.projectName} run stuck (trajectory anomaly)` });
-  }
-
-  return out;
 }

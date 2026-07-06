@@ -1,6 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { newRun, type FleetState, type RunState, type Gate } from "@/lib/contract/types";
-import { chimeKindsFor, loadMutePref, saveMutePref, prefersReducedMotion, playChime, type AudioHost } from "./chime";
+import {
+  chimeKindsFor,
+  loadMutePref,
+  saveMutePref,
+  prefersReducedMotion,
+  playChime,
+  shouldSuppressChime,
+  type AudioHost,
+} from "./chime";
 
 function fleet(runs: RunState[]): FleetState {
   const out: FleetState = { runs: {}, order: [] };
@@ -31,6 +39,69 @@ describe("chimeKindsFor — edge-triggered, mirrors the ntfy notifier's rule", (
 
   it("has no baseline (before=undefined) → no chime kinds", () => {
     expect(chimeKindsFor(undefined, fleet([run()]))).toEqual([]);
+  });
+});
+
+describe("shouldSuppressChime — useDeskChime's no-baseline guard", () => {
+  it("suppresses when there is no prior snapshot, regardless of mute state", () => {
+    expect(shouldSuppressChime(false, null)).toBe(true);
+    expect(shouldSuppressChime(true, null)).toBe(true);
+  });
+
+  it("suppresses when muted even with a real prior snapshot", () => {
+    expect(shouldSuppressChime(true, fleet([run()]))).toBe(true);
+  });
+
+  it("does not suppress once unmuted with a real prior snapshot", () => {
+    expect(shouldSuppressChime(false, fleet([run()]))).toBe(false);
+  });
+});
+
+describe("useDeskChime baseline (§5/§6 regression): pre-existing raised/failed/done state stays silent on first observation", () => {
+  // Mirrors useDeskChime's own effect body exactly (prevRef starts at null; the
+  // guard runs before chimeKindsFor is ever computed) without needing to mount a
+  // component — this is the same shape the hook drives on every render.
+  function simulateDeskChime() {
+    let prev: FleetState | null = null;
+    const played: string[] = [];
+    return {
+      played,
+      observe(muted: boolean, state: FleetState) {
+        const localPrev = prev;
+        prev = state;
+        if (shouldSuppressChime(muted, localPrev)) return;
+        for (const kind of chimeKindsFor(localPrev ?? undefined, state)) played.push(kind);
+      },
+    };
+  }
+
+  it("an SSR/fixture-seeded fleet that's ALREADY raised+failed+done on mount never chimes", () => {
+    const alreadyAlerting = fleet([
+      run({ runId: "r1", gates: [raised("B")] }),
+      run({ runId: "r2", status: "failed" }),
+      run({ runId: "r3", status: "done" }),
+    ]);
+    const sim = simulateDeskChime();
+    sim.observe(false, alreadyAlerting); // first-ever observation, unmuted
+    expect(sim.played).toEqual([]);
+  });
+
+  it("a genuinely new transition on the NEXT observation still chimes normally", () => {
+    const alreadyAlerting = fleet([
+      run({ runId: "r1", gates: [raised("B")] }),
+      run({ runId: "r2", status: "failed" }),
+      run({ runId: "r3", status: "done" }),
+    ]);
+    const sim = simulateDeskChime();
+    sim.observe(false, alreadyAlerting); // baseline established, silent
+    const nextAlerting = fleet([
+      run({ runId: "r1", gates: [raised("B")] }),
+      run({ runId: "r2", status: "failed" }),
+      run({ runId: "r3", status: "done" }),
+      run({ runId: "r4", gates: [raised("C")] }), // NEW edge-trigger
+    ]);
+    sim.observe(false, nextAlerting);
+    expect(sim.played).toEqual(["gate-raised"]);
   });
 });
 

@@ -2,9 +2,11 @@
 // Desk chime (§5/§6 alerting): a short Web-Audio synth tone fired client-side, from
 // whichever tab is open, on the SAME edge-triggered alert conditions as the ntfy
 // notifier — gate raised · run failed/stuck · run completed. `chimeKindsFor` reuses
-// the ntfy notifier's own `notificationsFor` (lib/server/notifier.ts; it's pure —
-// no fs/child_process — so it's safe to share into a client bundle) so the two
-// channels can never drift out of sync on what counts as an alert.
+// the shared, neutral `notificationsFor` (lib/contract/alerts.ts — no fs/
+// child_process/env access, so it's safe in a client bundle) so the two channels
+// can never drift out of sync on what counts as an alert. This file must never
+// import lib/server/* directly — that's a Node-only boundary a client bundle can't
+// cross; lib/contract/alerts.ts is the neutral module both sides share.
 //
 // No audio assets: three oscillator tones distinguished by pitch/duration. Mute is
 // a user preference persisted in localStorage (MUTE_KEY); the FIRST-EVER default
@@ -13,7 +15,7 @@
 // of the media query.
 import { useEffect, useRef, useState } from "react";
 import type { FleetState } from "@/lib/contract/types";
-import { notificationsFor, type NotifyKind } from "@/lib/server/notifier";
+import { notificationsFor, type NotifyKind } from "@/lib/contract/alerts";
 
 const MUTE_KEY = "harness.chime.muted";
 
@@ -60,12 +62,31 @@ export interface AudioHost {
   webkitAudioContext?: typeof AudioContext;
 }
 
-/** Synthesize + play one chime. No-ops (never throws) if Web Audio isn't available. */
-export function playChime(kind: NotifyKind, win: AudioHost = window as unknown as AudioHost): void {
+// Acquire (or resume) the shared AudioContext. Browsers only let a context start
+// truly running from within a real user-gesture call stack (autoplay policy) — so
+// this is called both from the toggle's click handler (unlockChimeAudio, below)
+// AND from playChime itself, which fires later from an async SSE event and just
+// needs the already-unlocked context to still be usable.
+function acquireCtx(win: AudioHost): AudioContext | null {
   const Ctor = win.AudioContext ?? win.webkitAudioContext;
-  if (!Ctor) return;
+  if (!Ctor) return null;
   const ctx = sharedCtx ?? (sharedCtx = new Ctor());
   if (ctx.state === "suspended") void ctx.resume();
+  return ctx;
+}
+
+/** Create/resume the shared AudioContext from within a user gesture (the unmute
+ * click) so the browser's autoplay policy is satisfied before the first real
+ * chime tries to play later, asynchronously, off an SSE event. No-op (never
+ * throws) if Web Audio isn't available. */
+export function unlockChimeAudio(win: AudioHost = window as unknown as AudioHost): void {
+  acquireCtx(win);
+}
+
+/** Synthesize + play one chime. No-ops (never throws) if Web Audio isn't available. */
+export function playChime(kind: NotifyKind, win: AudioHost = window as unknown as AudioHost): void {
+  const ctx = acquireCtx(win);
+  if (!ctx) return;
   const { freqs, dur } = TONE[kind];
   const t0 = ctx.currentTime;
   for (let i = 0; i < freqs.length; i++) {
@@ -101,13 +122,22 @@ export function useChimeMuted(): [boolean, (v: boolean) => void] {
   return [muted, setMuted];
 }
 
+// Extracted as a pure predicate (not inlined in the effect) so the "no baseline →
+// silent" guarantee is directly unit-testable: an SSR/fixture-seeded FleetState can
+// ALREADY contain raised/failed/done runs on the very first render, and that must
+// never be treated as a fresh edge-trigger — there's no prior snapshot to diff
+// against, so nothing "just happened". Muting is the same kind of suppression.
+export function shouldSuppressChime(muted: boolean, prev: FleetState | null): boolean {
+  return muted || !prev;
+}
+
 /** Fires a chime for each alert edge-triggered since the previous render's state. */
 export function useDeskChime(state: FleetState, muted: boolean): void {
   const prevRef = useRef<FleetState | null>(null);
   useEffect(() => {
     const prev = prevRef.current;
     prevRef.current = state;
-    if (muted || !prev) return; // no baseline on the first render — never chime on load
-    for (const kind of chimeKindsFor(prev, state)) playChime(kind);
+    if (shouldSuppressChime(muted, prev)) return; // no baseline on the first render — never chime on load
+    for (const kind of chimeKindsFor(prev ?? undefined, state)) playChime(kind);
   }, [state, muted]);
 }

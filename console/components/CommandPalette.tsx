@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { RunState, GateId } from "@/lib/contract/types";
 import { raisedGates } from "@/lib/contract/selectors";
 import { deckRunRoute } from "@/lib/routes";
+import { sanitizeProjectId } from "@/lib/format";
 
 interface Cmd {
   id: string;
@@ -38,7 +39,7 @@ export function CommandPalette({ open, runs, onClose, onSelect, onApprove, onAbo
   const commands = useMemo<Cmd[]>(() => {
     const list: Cmd[] = [{ id: "launch", label: "Launch a run", hint: "new", run: onLaunch }];
     for (const r of runs) {
-      list.push({ id: `jump:${r.runId}`, label: `Jump to ${r.projectName}`, hint: r.projectId, run: () => onSelect(r.runId) });
+      list.push({ id: `jump:${r.runId}`, label: `Jump to ${r.projectName}`, hint: sanitizeProjectId(r.projectId), run: () => onSelect(r.runId) });
       list.push({ id: `deck:${r.runId}`, label: `Open deck for ${r.projectName}`, hint: "deck", run: () => onOpenDeck(deckRunRoute(r.runId)) });
       for (const g of raisedGates(r)) {
         list.push({ id: `approve:${r.runId}:${g.id}`, label: `Approve gate ${g.id} — ${r.projectName}`, hint: "gate", run: () => onApprove(r.runId, g.id) });

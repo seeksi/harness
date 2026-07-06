@@ -8,24 +8,24 @@ import Link from "next/link";
 import { foldFleet } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { initialFleetState } from "@/lib/contract/types";
-import { discoverProjects } from "@/lib/server/discovery";
+import { discoverProjects, type Project } from "@/lib/server/discovery";
+import { foldProjectIndex } from "./roster";
 
 export default function Page() {
   const state = foldFleet(fixtureEnvelopes(), initialFleetState);
-  const fromRuns = new Map(Object.values(state.runs).map((r) => [r.projectId, r.projectName]));
 
-  // Discovery ids are opaque basename-hash slugs (never a path — see discovery.ts's
-  // slugFor), so they pass through this single dynamic route segment unchanged;
-  // no basename-of-a-path extraction is needed to build the link below.
-  let discovered: Array<{ id: string; name: string }> = [];
+  let discovered: Project[] = [];
   try {
-    discovered = discoverProjects().map((p) => ({ id: p.id, name: p.name }));
+    discovered = discoverProjects();
   } catch {
     discovered = [];
   }
-  for (const p of discovered) {
-    if (!fromRuns.has(p.id)) fromRuns.set(p.id, p.name);
-  }
+
+  // Fold each run's projectId into its discovered project (server-side
+  // basename-or-slug resolution — see roster.ts's foldProjectIndex) so a
+  // fixture/persisted run stamped with a legacy basename lands on the SAME row as
+  // the discovered project's slug id, instead of double-listing the same repo.
+  const fromRuns = foldProjectIndex(Object.values(state.runs), discovered);
 
   const ids = [...fromRuns.keys()].sort();
 

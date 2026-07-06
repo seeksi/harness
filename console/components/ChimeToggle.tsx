@@ -5,11 +5,22 @@
 // localStorage by the parent.
 "use client";
 
+import { unlockChimeAudio } from "@/lib/chime";
+
 export function ChimeToggle({ muted, onToggle }: { muted: boolean; onToggle: () => void }) {
+  // Unmuting is the click that satisfies the browser's autoplay-gesture policy —
+  // create/resume the shared AudioContext HERE, synchronously inside the click, so
+  // the first real chime (which fires later, asynchronously, off an SSE event) can
+  // actually play instead of silently sitting suspended.
+  const handleClick = () => {
+    if (muted) unlockChimeAudio();
+    onToggle();
+  };
+
   return (
     <button
       type="button"
-      onClick={onToggle}
+      onClick={handleClick}
       aria-pressed={!muted}
       aria-label={muted ? "unmute desk chime" : "mute desk chime"}
       title={muted ? "desk chime muted — click to unmute" : "desk chime on — click to mute"}

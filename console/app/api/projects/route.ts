@@ -17,7 +17,14 @@ export async function GET(): Promise<NextResponse> {
     } catch {
       runsByProject = new Map(); // DB not yet initialized / empty — fail open
     }
-    const withRuns = projects.map((p) => ({ ...p, recentRuns: runsByProject.get(p.id) ?? [] }));
+    // Project.path is an absolute fs path — server-side only, never for the client
+    // contract. Pick fields explicitly rather than spreading the full Project.
+    const withRuns = projects.map((p) => ({
+      id: p.id,
+      name: p.name,
+      agentCount: p.agentCount,
+      recentRuns: runsByProject.get(p.id) ?? [],
+    }));
     return NextResponse.json({ projects: withRuns });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "discovery failed";

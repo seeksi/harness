@@ -15,7 +15,7 @@ import { deriveHealth } from "@/lib/contract/health";
 import { PHASE_LABELS } from "@/lib/contract/types";
 import { createFleetStore, type FleetStore } from "@/lib/store/fleetStore";
 import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
-import { fmtClock } from "@/lib/format";
+import { fmtClock, projectLabel } from "@/lib/format";
 import { deckRunRoute } from "@/lib/routes";
 import { HealthBadge } from "@/components/meters";
 import { useChimeMuted, useDeskChime } from "@/lib/chime";
@@ -154,7 +154,7 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
           <a href="/" className="mono" style={{ fontSize: 11, color: "var(--text-faint)", textDecoration: "none" }}>← fleet</a>
           <span className="display" style={{ fontSize: 22, fontWeight: 700, color: "var(--text)" }}>{run.projectName}</span>
-          <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{run.projectId} · {run.brief}</span>
+          <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{projectLabel(run.projectId, run.projectName)} · {run.brief}</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <Link href={deckRunRoute(run.runId)} className="mono" style={{ fontSize: 11, color: "var(--info)", textDecoration: "none" }}>
