@@ -7,16 +7,19 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import type { Gate, GateId } from "@/lib/contract/types";
+import { deckRunRoute } from "@/lib/routes";
 import { armOrConfirmReject, isArmed, type GateConfirmState } from "./gateActions";
 
 interface Props {
   gate: Gate;
+  runId: string; // the deck target for this gate's evidence links (§4 drill-through)
   onApprove: (gate: GateId) => void;
   onReject: (gate: GateId) => void;
 }
 
-export function GateCard({ gate, onApprove, onReject }: Props) {
+export function GateCard({ gate, runId, onApprove, onReject }: Props) {
   const [confirm, setConfirm] = useState<GateConfirmState>(null);
   const armed = isArmed(confirm, gate.id);
 
@@ -46,14 +49,20 @@ export function GateCard({ gate, onApprove, onReject }: Props) {
       <div style={{ fontSize: 13, color: "var(--text)", margin: "5px 0 8px" }}>{gate.summary}</div>
 
       {evidenceLinks.length > 0 && (
-        <div style={{ display: "flex", gap: 10, marginBottom: 9 }}>
+        <div style={{ display: "flex", gap: 10, marginBottom: 9, flexWrap: "wrap" }}>
           {evidenceLinks.map((k) => (
-            // Plain label, not a link: these have no real target yet (the deck view
-            // that provides one lands in a later lane) — a dead `#` anchor would be
-            // a false affordance.
-            <span key={k} className="mono" style={{ fontSize: 11, color: "var(--info)" }}>
+            // The deck (run-scoped) is now a real target for this gate's evidence —
+            // link into it instead of a plain label (§4 drill-through). The deck
+            // itself is where the diff/trace/eval this cites gets inspected.
+            <Link
+              key={k}
+              href={deckRunRoute(runId)}
+              className="mono"
+              style={{ fontSize: 11, color: "var(--info)", textDecoration: "underline" }}
+              title={`open ${k} in the observability deck`}
+            >
               {k}: {evidence[k]}
-            </span>
+            </Link>
           ))}
         </div>
       )}

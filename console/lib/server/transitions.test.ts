@@ -21,7 +21,7 @@ describe("notificationsFor — edge-triggered alert transitions (§6)", () => {
     const n = notificationsFor(before, after);
     expect(n).toHaveLength(1);
     expect(n[0].kind).toBe("gate-raised");
-    expect(n[0].link).toBe("/runs/r1");
+    expect(n[0].link).toBe("/run/r1");
     expect(n[0].detail).toContain("Gate B");
     expect(n[0].detail).toContain("px-b");
     // no re-fire when the same gate stays raised

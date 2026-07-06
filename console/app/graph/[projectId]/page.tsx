@@ -17,10 +17,11 @@ export default async function Page({ params }: { params: Promise<{ projectId: st
   const initial = foldFleet(fixtureEnvelopes(), initialFleetState);
 
   let projectName = projectId;
-  // The route param is a basename slug (see roster.ts), but a run's own projectId
-  // is whatever the launcher stamped it with — for real (discovered) projects
-  // that's the canonical absolute repo path, which never equals the slug. Pass
-  // both down so GraphView can match live runs against either identity.
+  // The route param is the discovery id (an opaque slug — see discovery.ts's
+  // slugFor), which is also what a live run's own projectId gets stamped with
+  // (app/api/runs/route.ts passes `project.id`). They coincide for real discovered
+  // projects; canonicalProjectId + GraphView's basename fallback remain only for a
+  // fixture-only projectId or any pre-migration value that doesn't resolve here.
   let canonicalProjectId: string | undefined;
   let rosterAgents: RosterAgent[] = [];
   try {

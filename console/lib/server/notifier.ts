@@ -3,8 +3,14 @@
 // run failed/stuck · run completed. HTTP POST to `${NTFY_URL}/${NTFY_TOPIC}` with a
 // deep-link (Click header) back to the item. NO-OP when either env var is unset —
 // notification failures NEVER block a run (best-effort, swallow errors).
+//
+// Deep-link base: CONSOLE_BASE_URL (or its alias NTFY_DEEPLINK_BASE — either name
+// works, first one set wins) instead of a hardcoded host assumption, so a phone's
+// ntfy tap resolves to wherever the console is actually reachable (tailnet name,
+// port, etc. — deploy-specific, never baked in).
 
 import type { RunState } from "@/lib/contract/types";
+import { runRoute } from "@/lib/routes";
 
 export type NotifyKind = "gate-raised" | "run-failed" | "run-stuck" | "run-completed";
 
@@ -33,9 +39,9 @@ const META: Record<NotifyKind, { priority: string; tags: string }> = {
 };
 
 function deepLink(link?: string, runId?: string): string | undefined {
-  const base = process.env.CONSOLE_BASE_URL?.replace(/\/$/, "");
+  const base = (process.env.CONSOLE_BASE_URL ?? process.env.NTFY_DEEPLINK_BASE)?.replace(/\/$/, "");
   if (link && /^https?:\/\//.test(link)) return link;
-  const suffix = link ?? (runId ? `/runs/${runId}` : "");
+  const suffix = link ?? (runId ? runRoute(runId) : "");
   if (base) return `${base}${suffix}`;
   return link; // relative; better than nothing for the ntfy Click header
 }
@@ -78,7 +84,7 @@ export async function notify(input: NotifyInput, fetchImpl: typeof fetch = fetch
 // each without re-alerting on every event. Deep-link is the run route.
 export function notificationsFor(before: RunState | undefined, after: RunState): NotifyInput[] {
   const out: NotifyInput[] = [];
-  const base = { runId: after.runId, projectName: after.projectName, link: `/runs/${after.runId}` };
+  const base = { runId: after.runId, projectName: after.projectName, link: runRoute(after.runId) };
 
   // gate-raised: a gate now `raised` that was absent or not-raised before.
   for (const g of after.gates) {

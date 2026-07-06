@@ -15,10 +15,12 @@ import { createFleetStore, type FleetStore } from "@/lib/store/fleetStore";
 import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
 import { fmtTokens, fmtClock } from "@/lib/format";
 import { runRoute } from "@/lib/routes";
+import { useChimeMuted, useDeskChime } from "@/lib/chime";
 import { RunLane } from "./RunLane";
 import { OpsBoard } from "./OpsBoard";
 import { LaunchConsole, type LaunchPayload, type LaunchProject } from "./LaunchConsole";
 import { CommandPalette } from "./CommandPalette";
+import { ChimeToggle } from "./ChimeToggle";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
@@ -84,6 +86,12 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
     return () => clearInterval(t);
   }, []);
 
+  // Desk chime (§5/§6): edge-triggered tone on gate-raise/fail/stuck/complete across
+  // every lane in this tab. Muted by default under prefers-reduced-motion; the
+  // toggle's choice persists in localStorage after that.
+  const [chimeMuted, setChimeMuted] = useChimeMuted();
+  useDeskChime(state, chimeMuted);
+
   // ⌘K toggles the palette.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -109,6 +117,8 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
   // than only flip local `selected` state — a real route so `/run/[id]` is
   // deep-linkable/back-buttonable, not a component-local highlight.
   const goToRun = useCallback((runId: string) => router.push(runRoute(runId)), [router]);
+  // ⌘K "open deck for this run" (§4 drill-through) — a real navigation, same as goToRun.
+  const goToHref = useCallback((href: string) => router.push(href), [router]);
 
   // CSRF-headed POST to a mutating API route (matches lib/server/csrf.ts). Best-effort:
   // the SSE stream is what actually reflects the result, so a network error is swallowed.
@@ -214,6 +224,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <span className="mono" style={{ fontSize: 11, color: "var(--amber)" }}>{fmtTokens(fleetTokens)} tok · {lanes.length}/3 lanes</span>
           <ConnectionPill status={status} lastEventMs={lastEventMs} />
+          <ChimeToggle muted={chimeMuted} onToggle={() => setChimeMuted(!chimeMuted)} />
           <button type="button" onClick={() => setPaletteOpen(true)} className="mono" style={pillBtn}>⌘K</button>
           <button type="button" onClick={() => setLaunchOpen(true)} style={{ ...pillBtn, color: "var(--bg)", background: "var(--amber)", border: "1px solid var(--amber)", fontWeight: 600 }}>Launch</button>
         </div>
@@ -269,6 +280,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
         onApprove={onApprove}
         onAbort={onAbort}
         onLaunch={() => setLaunchOpen(true)}
+        onOpenDeck={goToHref}
       />
     </main>
   );

@@ -7,3 +7,8 @@
 export function runRoute(runId: string): string {
   return `/run/${encodeURIComponent(runId)}`;
 }
+
+/** The deck drill-through deep link for a run (§4): /deck?run=<id>, scoped to that run. */
+export function deckRunRoute(runId: string): string {
+  return `/deck?run=${encodeURIComponent(runId)}`;
+}

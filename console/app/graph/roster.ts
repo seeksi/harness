@@ -10,11 +10,14 @@ import path from "path";
 import { discoverProjects, type Project } from "@/lib/server/discovery";
 import type { RosterAgent } from "@/components/graph/model";
 
-// Fixture projectIds are basenames (e.g. "console"); real discovery ids are
-// absolute repo paths. Match either so the route works for both fixture and live.
+// Discovery ids are opaque basename-hash slugs (never a filesystem path — see
+// discovery.ts's slugFor), so they always round-trip through the [projectId]
+// route segment unchanged; no basename-of-a-path fallback is needed here. A
+// fixture-only projectId (e.g. "console") simply won't match any discovered
+// project, which is fine — the caller treats that as "no roster" and falls back
+// to agentEvents alone.
 export function resolveProject(projectId: string): Project | undefined {
-  const projects = discoverProjects();
-  return projects.find((p) => p.id === projectId || path.basename(p.id) === projectId);
+  return discoverProjects().find((p) => p.id === projectId);
 }
 
 // Minimal top-level YAML frontmatter reader — only need scalar `key: value` lines

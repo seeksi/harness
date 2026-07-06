@@ -19,9 +19,10 @@ import { GraphCanvas } from "./GraphCanvas";
 import { Inspector } from "./Inspector";
 
 // Last path segment, without pulling in the "path" module (this file is client-only
-// and browser bundles don't get node's fs/path polyfills for free). Mirrors
-// roster.ts's resolveProject basename fallback so a run stamped with either the
-// slug or the discovery id's basename still matches.
+// and browser bundles don't get node's fs/path polyfills for free). Discovery ids
+// are opaque slash-free slugs now (discovery.ts's slugFor), so this is a no-op for
+// them; it stays as a defensive fallback for any pre-migration/legacy projectId
+// that was stamped from an absolute path before that change.
 function basename(id: string): string {
   const i = Math.max(id.lastIndexOf("/"), id.lastIndexOf("\\"));
   return i === -1 ? id : id.slice(i + 1);
@@ -214,7 +215,7 @@ export function GraphView({ initial, projectId, canonicalProjectId, projectName,
         </div>
       </header>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 14, alignItems: "start" }}>
+      <div className="graph-grid" style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 14, alignItems: "start" }}>
         <div ref={graphAreaRef} style={{ height: "70vh", minHeight: 420 }}>
           <GraphCanvas
             nodes={graph.nodes}
@@ -237,6 +238,16 @@ export function GraphView({ initial, projectId, canonicalProjectId, projectName,
           No agent roster or activity observed yet for this project — the graph fills in as runs report agentEvents.
         </div>
       )}
+
+      {/* Phone restack (§5): single-column below 1024px, canvas first (same hierarchy
+          order as desktop — spectacle first), legend/inspector stacked below it. The
+          canvas itself is touch-driven already (GraphCanvas's Pointer Events unify
+          mouse + touch pan/zoom/pinch/tap). */}
+      <style>{`
+        @media (max-width: 1024px) {
+          .graph-grid { grid-template-columns: 1fr !important; }
+        }
+      `}</style>
     </main>
   );
 }

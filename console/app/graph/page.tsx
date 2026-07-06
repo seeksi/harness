@@ -5,34 +5,26 @@
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";
-import path from "path";
 import { foldFleet } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { initialFleetState } from "@/lib/contract/types";
 import { discoverProjects } from "@/lib/server/discovery";
 
-// [projectId] is a single dynamic segment — Next.js leaves a literal "%2F" inside
-// it un-decoded (avoids path-separator ambiguity), so an absolute-path discovery id
-// can never round-trip through it as-is. Link (and roster.ts's resolveProject)
-// both key on the basename instead; the fixture's slugs (no slashes) pass through
-// unchanged either way.
-function slugOf(id: string): string {
-  return id.includes("/") ? path.basename(id) : id;
-}
-
 export default function Page() {
   const state = foldFleet(fixtureEnvelopes(), initialFleetState);
   const fromRuns = new Map(Object.values(state.runs).map((r) => [r.projectId, r.projectName]));
 
-  let discovered: string[] = [];
+  // Discovery ids are opaque basename-hash slugs (never a path — see discovery.ts's
+  // slugFor), so they pass through this single dynamic route segment unchanged;
+  // no basename-of-a-path extraction is needed to build the link below.
+  let discovered: Array<{ id: string; name: string }> = [];
   try {
-    discovered = discoverProjects().map((p) => p.id);
+    discovered = discoverProjects().map((p) => ({ id: p.id, name: p.name }));
   } catch {
     discovered = [];
   }
-  for (const id of discovered) {
-    const slug = slugOf(id);
-    if (!fromRuns.has(slug)) fromRuns.set(slug, path.basename(id));
+  for (const p of discovered) {
+    if (!fromRuns.has(p.id)) fromRuns.set(p.id, p.name);
   }
 
   const ids = [...fromRuns.keys()].sort();
