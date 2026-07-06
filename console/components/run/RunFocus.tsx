@@ -27,6 +27,11 @@ import styles from "./RunFocus.module.css";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
+// fmtClock renders in the LOCAL timezone; the server's tz rarely matches the
+// browser's, so formatting it during SSR produces a hydration mismatch. Same
+// hazard/fix as LiveFeed: stable placeholder pre-mount, real clock only after.
+const CLOCK_PLACEHOLDER = "--:--:--";
+
 export function RunFocus({ initial, runId }: { initial: FleetState; runId: string }) {
   const storeRef = useRef<FleetStore | null>(null);
   if (!storeRef.current) storeRef.current = createFleetStore(initial);
@@ -40,6 +45,8 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
   // re-render on its own, so a 1s interval re-evaluates staleness against the wall
   // clock. See staleness.ts for the pure threshold logic this drives.
   const [now, setNow] = useState(nowSec);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // rAF flush loop — one commit + one notify per frame (same discipline as fleet home).
   useEffect(() => {
@@ -118,7 +125,15 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
   // past the staleness window — never silently pretend liveness either way. A clean
   // "closed" status is terminal-but-not-stale (matches FleetHome's ConnectionPill).
   const banner = computeStaleBanner(run, now, status);
-  const verdict = deriveHealth({ run, nowSec: now, feedStale: banner.feedStale });
+  // A cleanly closed stream is terminal — the run is over, silence is expected.
+  // deriveHealth's own runIncomplete/silence→"stuck" rule doesn't know about the
+  // feed's connection status, so freeze the clock it sees at the last real event
+  // once the stream has closed cleanly; this keeps the "data as of" timestamp
+  // informational without ever letting wall-clock silence escalate a closed
+  // stream to stuck/degraded. See computeStaleBanner for the matching short-
+  // circuit on the stale banner itself.
+  const healthNow = status === "closed" ? run.lastEventTs : now;
+  const verdict = deriveHealth({ run, nowSec: healthNow, feedStale: banner.feedStale });
   const gates = raisedGates(run);
   const promote = run.phases.find((p) => p.approval?.state === "awaiting");
   const cur = currentPhase(run);
@@ -135,7 +150,7 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
           <HealthBadge verdict={verdict} />
           {banner.stale && (
             <span className="mono pulse" role="status" style={{ fontSize: 11, color: "var(--amber)" }}>
-              ◐ {banner.reason === "reconnecting" ? "reconnecting" : "no events"} · data as of {fmtClock(run.lastEventTs * 1000)}
+              ◐ {banner.reason === "reconnecting" ? "reconnecting" : "no events"} · data as of {mounted ? fmtClock(run.lastEventTs * 1000) : CLOCK_PLACEHOLDER}
             </span>
           )}
         </div>

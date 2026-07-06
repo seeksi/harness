@@ -48,6 +48,13 @@ describe("computeStaleBanner", () => {
     expect(b.reason).not.toBe("reconnecting");
   });
 
+  it("clean close short-circuits the run-silence rule entirely — never no-events, never stale, no matter how long the wall clock has silenced", () => {
+    const r = run({ status: "running", lastEventTs: 1000 });
+    const b = computeStaleBanner(r, 1000 + STALENESS_WINDOW_SEC + 500, "closed");
+    expect(b.stale).toBe(false);
+    expect(b.reason).toBeNull();
+  });
+
   it("a done run never reports no-events silence, even long after lastEventTs", () => {
     const r = run({ status: "done", lastEventTs: 1000 });
     const b = computeStaleBanner(r, 1000 + STALENESS_WINDOW_SEC + 10_000, "open");

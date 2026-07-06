@@ -32,7 +32,11 @@ export function feedIsStale(status: ConnectionStatus): boolean {
 
 export function computeStaleBanner(run: RunState, nowSec: number, status: ConnectionStatus): StaleBanner {
   const feedStale = feedIsStale(status);
-  const runSilent = run.status === "running" && silenceSeconds(run, nowSec) > STALENESS_WINDOW_SEC;
+  // A cleanly closed stream (STREAM_END or unmount) is a TERMINAL state — the run
+  // is over and silence is expected, so it must never escalate to stale via the
+  // wall-clock run-silence rule. Short-circuit before evaluating silence at all,
+  // regardless of what run.status still says.
+  const runSilent = status !== "closed" && run.status === "running" && silenceSeconds(run, nowSec) > STALENESS_WINDOW_SEC;
   const reason: StaleReason = feedStale ? "reconnecting" : runSilent ? "no-events" : null;
   return { stale: feedStale || runSilent, feedStale, reason };
 }
