@@ -1,0 +1,56 @@
+/*
+ * RunFocus.module.css — run-focus layout only (colors/tokens still come from
+ * globals.css vars). Desktop ≥1024px: position quadrant top-left, gates beside
+ * it, feed + budget below. <1024px: single-column restack, SAME hierarchy order
+ * (position first, then gates, then feed, then budget) per §5.
+ */
+.shell {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 4px 4px 4px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  grid-template-areas:
+    "position gates"
+    "feed feed"
+    "budget budget";
+  gap: 16px;
+}
+
+.position { grid-area: position; min-width: 0; }
+.gates { grid-area: gates; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.feed { grid-area: feed; min-width: 0; }
+.budget { grid-area: budget; min-width: 0; }
+
+.panel {
+  padding: 16px;
+  border-radius: var(--radius);
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 1024px) {
+  .grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "position"
+      "gates"
+      "feed"
+      "budget";
+  }
+}
