@@ -86,3 +86,6 @@ note: deck router said cheap; orchestrator held default (search/filter/virtualiz
 - Accepted ceiling (documented in-code): stdout line cap counts UTF-16 code units (~4x byte slack, still hard-bounded; 8KiB field caps downstream).
 
 ## Batch B S6: GO (human, 2026-07-06) — trace EXPLOSION accepted as FP (session aggregation; human tie-break). Judge blocker (fleet->run nav) + third wall fixed on integration, re-verified 203/203.
+
+## Subtasks (Batch C — off main 3bf12a9)
+- slug: polish-wire  spec: "cross-view seams: deck drill-through from run focus (?run= + palette entries), desk chime on gate-raise (mutable, pref-respecting), phone restack pass on deck/graph, /brand page w/ 3 name proposals as Oxanium wordmarks, Project.id made opaque in discovery (+dependents), ntfy deep-link base URL config"  owns: console/** (cross-cutting, single lane)  tier: default
