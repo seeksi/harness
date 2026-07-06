@@ -68,3 +68,14 @@ project: harness
 - slug: graph        spec: "app/graph/[projectId]: activity-driven progressive-disclosure workflow graph + full-swarm showpiece toggle, pan/zoom, 60fps, capture-worthy"  owns: console/app/graph/**, console/components/graph/**  tier: TBD
 - slug: live-bridge  spec: "real event producer: POST /api/runs spawns harness.sh w/ typed argv (port web harness-bridge security pattern), events -> persist + SSE broadcast + ntfy hooks, wall-clock health nowSec, events cap + eventsSince LIMIT, /api/projects N+1 fix, gate-id-aware approve"  owns: console/lib/server/**, console/app/api/**, console/lib/bridge/**, console/components/RunLane.tsx, console/components/FleetHome.tsx  tier: TBD
 note: deck router said cheap; orchestrator held default (search/filter/virtualization/path-validation logic). Priced default in plan.jsonl.
+
+## Batch B Gate B progress
+- run-focus: BLOCK r1 (stale machine, green promote card, blind gate stub) -> fixed -> BLOCK r2 (closed-stream escalation, SSR clock) -> fixed -> PASS r3. 75 tests. reviewed.
+- deck: BLOCK r1 (traces-dir symlink escape, DiffViewer id/path contract break, green misuse x2, raw panel unvirtualized, hook lines unsearchable). Fix agent running. Ruling: chart amber stays (interface voice per spec).
+- graph: BLOCK r1 (model.ts binary-diff unreviewable, basename/projectId mismatch, Date.now render, canvas font/fillText perf, green connecting). Fix agent running. Ruling: amber activity nodes stay.
+- live-bridge: Codex BLOCK r1 (8 High: wt-new user argv, full env inherit, audit swallowed, replay/subscribe gap, ring overflow, plan-file TOCTOU, GateD sans promote flag, gate route sans HARNESS_LIVE). Claude review pending; reconcile then fix.
+
+## Batch B Gate B outcomes (final per lane)
+- run-focus: PASS r3. deck: PASS by reconciliation r2 (traces-dir realpath ancestry + contract + token + virtualization fixed; Codex residual "Project.id is a path" ruled follow-up — id shape lives in lib/server/discovery.ts, another lane's file; stale fileEvents LOW fixed). graph: PASS r3 (NUL-byte binary root-caused; clock-pinning + ghost-labels fixed; model.ts verified clean text).
+- live-bridge: r2 6/9 resolved; r3 in flight (gap-reseed from persistence for evicted runs, byte-capped stdout reader, eslint actually installed+passing).
+- Follow-ups (Batch C): make Project.id opaque in discovery.ts; readline ponytail note; deck DetailPane session row polish.
