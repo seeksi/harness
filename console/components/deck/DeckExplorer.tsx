@@ -5,7 +5,10 @@
 // (never fabricated args/outputs — see NOTES.tracehook.md, the hook line format is
 // frozen at {ts, tool, sig}). Deep-linkable via ?run=; SSR renders the fixture-folded
 // state so `curl /deck` sees real rows, then the SSE stream + rAF store take over for
-// the kinetic live view — same discipline as FleetHome.
+// the kinetic live view — same discipline as FleetHome. Loading a raw
+// .claude/traces/<session>.jsonl file (RawSessionPanel) merges its lines into this
+// same searchable/filterable event list as origin:"file" ToolCallEvents — that's what
+// "full forensics searchable" means; they aren't stranded in their own panel.
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -15,7 +18,7 @@ import type { Envelope } from "@/lib/contract/events";
 import { createFleetStore } from "@/lib/store/fleetStore";
 import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
 import { fmtTokens, fmtClock } from "@/lib/format";
-import { deriveStoreEvents, filterEvents, facetValues, sortByTs } from "@/app/deck/lib/filters";
+import { deriveStoreEvents, deriveFileEvents, filterEvents, facetValues, sortByTs } from "@/app/deck/lib/filters";
 import type { DeckFilters, ToolCallEvent } from "@/app/deck/lib/types";
 import type { RawTraceLine } from "@/app/deck/lib/traceFile";
 import { DeckCharts } from "./DeckCharts";
@@ -66,6 +69,14 @@ export function DeckExplorer({ initial, envelopes, projects, sessions, initialRu
 
   const [filters, setFilters] = useState<DeckFilters>({ runId: initialRunFilter });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // A loaded raw session file (RawSessionPanel) is merged in here as origin:"file"
+  // events so it's searchable/filterable in the same forensics floor as store events —
+  // "full forensics searchable" per §6, not stranded in its own unpaginated panel.
+  const [fileEvents, setFileEvents] = useState<ToolCallEvent[]>([]);
+  const onSessionLoaded = useCallback((sessionId: string, lines: RawTraceLine[]) => {
+    setFileEvents(deriveFileEvents(sessionId, lines));
+  }, []);
+  const onSessionClear = useCallback(() => setFileEvents([]), []);
 
   const setRunFilter = useCallback(
     (runId: string | undefined) => {
@@ -76,7 +87,7 @@ export function DeckExplorer({ initial, envelopes, projects, sessions, initialRu
   );
 
   const runs = useMemo(() => state.order.map((id) => state.runs[id]).filter(Boolean), [state]);
-  const allEvents = useMemo(() => deriveStoreEvents(state), [state]);
+  const allEvents = useMemo(() => [...deriveStoreEvents(state), ...fileEvents], [state, fileEvents]);
   const runScoped = useMemo(
     () => (filters.runId ? allEvents.filter((e) => e.runId === filters.runId) : allEvents),
     [allEvents, filters.runId]
@@ -117,7 +128,7 @@ export function DeckExplorer({ initial, envelopes, projects, sessions, initialRu
 
       <DiffViewer projects={projects} />
 
-      <RawSessionPanel sessions={sessions} />
+      <RawSessionPanel sessions={sessions} onLoaded={onSessionLoaded} onClear={onSessionClear} />
 
       <style>{`
         @media (max-width: 1024px) {
@@ -129,8 +140,13 @@ export function DeckExplorer({ initial, envelopes, projects, sessions, initialRu
 }
 
 function ConnectionPill({ status, lastEventMs }: { status: ConnectionStatus; lastEventMs: number }) {
-  if (status === "open" || status === "connecting") {
-    return <span className="mono breathe" style={{ fontSize: 11, color: "var(--live)" }}>● {status === "open" ? "live" : "connecting"}</span>;
+  // Green (`--live`) is reserved for the actually-live/healthy state — "connecting"
+  // hasn't opened yet, so it gets the idle amber tone, not the live-signal green.
+  if (status === "open") {
+    return <span className="mono breathe" style={{ fontSize: 11, color: "var(--live)" }}>● live</span>;
+  }
+  if (status === "connecting") {
+    return <span className="mono pulse" style={{ fontSize: 11, color: "var(--amber-rest)" }}>◐ connecting</span>;
   }
   if (status === "reconnecting") {
     return <span className="mono pulse" style={{ fontSize: 11, color: "var(--amber)" }}>◐ reconnecting · data as of {fmtClock(lastEventMs)}</span>;
@@ -345,6 +361,12 @@ function DetailPane({ event }: { event: ToolCallEvent | RawTraceLine | null }) {
             <dd className="mono" style={ddStyle}>{(event as ToolCallEvent).agentId}</dd>
           </>
         )}
+        {isFull && (event as ToolCallEvent).sessionId && (
+          <>
+            <dt style={dtStyle}>session</dt>
+            <dd className="mono" style={ddStyle}>{(event as ToolCallEvent).sessionId}</dd>
+          </>
+        )}
       </dl>
       <div className="mono" style={{ marginTop: 10, fontSize: 10, color: "var(--text-faint)", lineHeight: 1.5 }}>
         args / output / duration: not captured — the PostToolUse hook logs only {"{ts, tool, sig}"} per call
@@ -354,28 +376,48 @@ function DetailPane({ event }: { event: ToolCallEvent | RawTraceLine | null }) {
   );
 }
 
-function RawSessionPanel({ sessions }: { sessions: string[] }) {
+// A raw session file can be up to MAX_TRACE_BYTES (10MB, ~100k lines) — rendering
+// every line as its own DOM node would freeze the tab. The full line set is always
+// handed to `onLoaded` so it's merged into the (already-virtualized) TraceList above
+// as searchable origin:"file" events; this panel's own inline preview is capped.
+const RAW_PREVIEW_CAP = 300;
+
+function RawSessionPanel({
+  sessions,
+  onLoaded,
+  onClear,
+}: {
+  sessions: string[];
+  onLoaded: (sessionId: string, lines: RawTraceLine[]) => void;
+  onClear: () => void;
+}) {
   const [session, setSession] = useState<string>("");
   const [lines, setLines] = useState<RawTraceLine[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (id: string) => {
-    if (!id) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/deck/api/traces?session=${encodeURIComponent(id)}`);
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `request failed (${res.status})`);
-      setLines(body.lines);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "failed to load trace");
-      setLines(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (id: string) => {
+      if (!id) return;
+      setLoading(true);
+      setError(null);
+      onClear();
+      try {
+        const res = await fetch(`/deck/api/traces?session=${encodeURIComponent(id)}`);
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? `request failed (${res.status})`);
+        setLines(body.lines);
+        onLoaded(id, body.lines);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "failed to load trace");
+        setLines(null);
+        onClear();
+      } finally {
+        setLoading(false);
+      }
+    },
+    [onLoaded, onClear]
+  );
 
   return (
     <section aria-label="raw hook traces" style={{ marginTop: 22 }}>
@@ -396,15 +438,23 @@ function RawSessionPanel({ sessions }: { sessions: string[] }) {
         lines.length === 0 ? (
           <div style={{ color: "var(--text-faint)", fontSize: 12 }}>this session produced no tool calls</div>
         ) : (
-          <div className="mono" style={{ fontSize: 11, maxHeight: 200, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 8 }}>
-            {lines.map((l, i) => (
-              <div key={i} style={{ display: "flex", gap: 10, padding: "2px 0", borderBottom: "1px solid var(--border)" }}>
-                <span style={{ color: "var(--text-faint)" }}>{fmtClock(l.ts * 1000)}</span>
-                <span style={{ color: "var(--amber-rest)" }}>{l.tool}</span>
-                <span style={{ color: "var(--text-dim)" }}>{l.sig}</span>
+          <>
+            <div className="mono" style={{ fontSize: 11, maxHeight: 200, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 8 }}>
+              {lines.slice(0, RAW_PREVIEW_CAP).map((l, i) => (
+                <div key={i} style={{ display: "flex", gap: 10, padding: "2px 0", borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ color: "var(--text-faint)" }}>{fmtClock(l.ts * 1000)}</span>
+                  <span style={{ color: "var(--amber-rest)" }}>{l.tool}</span>
+                  <span style={{ color: "var(--text-dim)" }}>{l.sig}</span>
+                </div>
+              ))}
+            </div>
+            {lines.length > RAW_PREVIEW_CAP && (
+              <div className="mono" style={{ color: "var(--text-faint)", fontSize: 11, marginTop: 6 }}>
+                showing first {RAW_PREVIEW_CAP} of {lines.length} lines — the full session is merged into the trace
+                forensics explorer above (searchable, filterable by event type)
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )
       )}
     </section>

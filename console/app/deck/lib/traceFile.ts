@@ -3,9 +3,11 @@
 // browser input (a session id) reaches the filesystem. Session ids are whitelisted to
 // the exact shape trace-log.py mints (.claude/skills/eval-gate/trace-log.py: hook
 // session_id, filename-safe) BEFORE they ever touch path.join, and the resolved REAL
-// path must land exactly inside the traces dir — a symlink (the file or an ancestor
-// dir) pointing elsewhere is rejected, same hardening as web/lib/sandbox/worktree.ts's
-// relocateTrace. Never trust a session id past the regex. Node-only (fs).
+// path must land exactly inside the traces dir, AND the traces dir's own real path
+// must stay inside the repo root — a symlink at either hop (the file, the `.claude/
+// traces` dir itself, or an ancestor of either) pointing elsewhere is rejected, same
+// hardening as web/lib/sandbox/worktree.ts's relocateTrace. Never trust a session id
+// past the regex. Node-only (fs).
 
 import fs from "fs";
 import path from "path";
@@ -16,8 +18,19 @@ import path from "path";
 export const SESSION_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 // A trace is one JSONL line per tool call; refuse to parse a runaway file rather than
-// hold GBs in memory (mirrors the size cap in web/lib/sandbox/worktree.ts).
-const MAX_TRACE_BYTES = 10 * 1024 * 1024;
+// hold GBs in memory (mirrors the size cap in web/lib/sandbox/worktree.ts). Exported
+// for tests (deliberately not tunable at runtime).
+export const MAX_TRACE_BYTES = 10 * 1024 * 1024;
+
+// True iff `child`'s realpath is `root` itself or nested under it. Used to contain
+// BOTH hops of the symlink chain: the traces dir under the repo root, and the trace
+// file under the traces dir. Checking only the leaf (file-under-dir) is not enough —
+// if the *directory* itself (`.claude/traces`) is a symlink pointing outside the repo,
+// a file living inside that outside target would still satisfy "file resolves inside
+// dir" while the dir itself escaped the repo entirely.
+function isRealAncestorOrSelf(root: string, child: string): boolean {
+  return child === root || child.startsWith(root + path.sep);
+}
 
 export function isValidSessionId(id: string): boolean {
   return SESSION_RE.test(id);
@@ -67,6 +80,16 @@ export function readTraceFile(repoRoot: string, sessionId: string): RawTraceLine
   const expected = path.join(realDir, `${sessionId}.jsonl`);
   if (realFile !== expected) {
     throw new Error("trace file resolves outside the traces directory (symlink?)");
+  }
+
+  // Second hop: the traces DIRECTORY itself (or an ancestor of it) may be a symlink
+  // that resolves outside the repo — e.g. `.claude/traces -> /somewhere/else`. In that
+  // case realDir/expected/realFile all agree with each other (they're all computed
+  // from the same escaped location) and the check above passes anyway. Require the
+  // realpathed traces dir to stay under the realpathed repo root.
+  const realRepoRoot = fs.existsSync(repoRoot) ? fs.realpathSync(repoRoot) : path.resolve(repoRoot);
+  if (!isRealAncestorOrSelf(realRepoRoot, realDir)) {
+    throw new Error("traces directory resolves outside the repo root (symlink?)");
   }
 
   const st = fs.statSync(realFile);

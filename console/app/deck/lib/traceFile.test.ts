@@ -2,7 +2,26 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { isValidSessionId, listSessions, readTraceFile, parseTraceLines } from "./traceFile";
+import { isValidSessionId, listSessions, readTraceFile, parseTraceLines, MAX_TRACE_BYTES } from "./traceFile";
+
+// Probed once, synchronously, at collection time (not inside a hook — it.skipIf reads
+// this before beforeAll ever runs). Some sandboxes disallow symlink creation entirely;
+// when that's the case we skip the symlink-dependent tests VISIBLY (named + skipped in
+// the report) rather than have the test silently `return` a fake pass.
+const symlinkSupported = (() => {
+  const probe = fs.mkdtempSync(path.join(os.tmpdir(), "deck-symlink-probe-"));
+  try {
+    const target = path.join(probe, "t");
+    const link = path.join(probe, "l");
+    fs.writeFileSync(target, "x");
+    fs.symlinkSync(target, link);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(probe, { recursive: true, force: true });
+  }
+})();
 
 describe("isValidSessionId — the whitelist gate", () => {
   it("accepts the shape trace-log.py mints (alnum/underscore/hyphen)", () => {
@@ -91,20 +110,61 @@ describe("readTraceFile / listSessions — filesystem trust boundary", () => {
     expect(() => readTraceFile(root, "a/b")).toThrow(/invalid session id/);
   });
 
-  it("rejects a symlink escape even with a whitelisted id", () => {
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "deck-outside-"));
-    fs.writeFileSync(path.join(outside, "secret.jsonl"), '{"ts":1,"tool":"Read","sig":"leak"}\n');
-    const dir = path.join(root, ".claude", "traces");
-    const linkPath = path.join(dir, "escape.jsonl");
-    try {
+  it.skipIf(!symlinkSupported)(
+    "rejects a symlink escape even with a whitelisted id [skipped: sandbox disallows symlink creation]",
+    () => {
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "deck-outside-"));
+      fs.writeFileSync(path.join(outside, "secret.jsonl"), '{"ts":1,"tool":"Read","sig":"leak"}\n');
+      const dir = path.join(root, ".claude", "traces");
+      const linkPath = path.join(dir, "escape.jsonl");
       fs.symlinkSync(path.join(outside, "secret.jsonl"), linkPath);
-    } catch {
-      // symlink creation can be unsupported/unprivileged in some sandboxes — skip
-      fs.rmSync(outside, { recursive: true, force: true });
-      return;
+      try {
+        expect(() => readTraceFile(root, "escape")).toThrow(/outside the traces directory/);
+      } finally {
+        fs.rmSync(linkPath, { force: true });
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
     }
-    expect(() => readTraceFile(root, "escape")).toThrow(/outside the traces directory/);
-    fs.rmSync(linkPath, { force: true });
-    fs.rmSync(outside, { recursive: true, force: true });
+  );
+
+  it.skipIf(!symlinkSupported)(
+    "rejects a symlinked `.claude/traces` DIRECTORY resolving outside the repo, even though the file-under-dir check alone would pass [skipped: sandbox disallows symlink creation]",
+    () => {
+      // A second, independent repo root whose `.claude/traces` is a real directory
+      // holding a real file — nothing here looks malicious in isolation.
+      const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-outside-root-"));
+      const outsideDir = path.join(outsideRoot, ".claude", "traces");
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(path.join(outsideDir, "sess-esc.jsonl"), '{"ts":1,"tool":"Read","sig":"leak"}\n');
+
+      // A second victim repo root whose `.claude/traces` is REPLACED by a symlink
+      // pointing at the outside root's traces dir. `realpath(file)` and
+      // `realpath(dir)/<id>.jsonl` still agree (both resolve into outsideDir), so the
+      // file-vs-dir equality check alone can't catch this — only ancestry-under-
+      // repo-root containment can.
+      const victimRoot = fs.mkdtempSync(path.join(os.tmpdir(), "deck-victim-root-"));
+      fs.mkdirSync(path.join(victimRoot, ".claude"), { recursive: true });
+      fs.symlinkSync(outsideDir, path.join(victimRoot, ".claude", "traces"));
+
+      try {
+        expect(() => readTraceFile(victimRoot, "sess-esc")).toThrow(/traces directory resolves outside the repo root/);
+      } finally {
+        fs.rmSync(victimRoot, { recursive: true, force: true });
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("refuses to parse a trace file over the size cap", () => {
+    const dir = path.join(root, ".claude", "traces");
+    const big = path.join(dir, "huge.jsonl");
+    // Sparse file: correct reported size via statSync without allocating real content.
+    fs.writeFileSync(big, "");
+    fs.truncateSync(big, MAX_TRACE_BYTES + 1);
+    try {
+      expect(() => readTraceFile(root, "huge")).toThrow(/too large.*refusing to parse/);
+    } finally {
+      fs.rmSync(big, { force: true });
+    }
   });
 });

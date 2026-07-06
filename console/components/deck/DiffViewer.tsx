@@ -1,8 +1,10 @@
 // console/components/deck/DiffViewer.tsx
 // Per-worktree-commit diff viewer — read-only `git show` via the server route
-// (§5/§6). Project is picked from the discovered registry (never free-typed — the
-// server independently re-validates it against the same list, see api/diff/route.ts);
-// the commit-ish is free text but the server rejects anything flag-shaped.
+// (§5/§6). Project is picked from the discovered registry (never free-typed); the
+// `id` sent to the server is an OPAQUE key, not a filesystem path — the server
+// resolves it against its own fresh discovery scan (see api/diff/route.ts +
+// lib/gitDiff.ts's resolveProjectPath/gitShow). The commit-ish is free text but the
+// server rejects anything flag- or pathspec-shaped.
 "use client";
 
 import { useCallback, useState } from "react";
@@ -77,7 +79,10 @@ export function DiffViewer({ projects }: { projects: Project[] }) {
           }}
         >
           {diff.split("\n").map((line, i) => (
-            <div key={i} style={{ color: line.startsWith("+") ? "var(--live)" : line.startsWith("-") ? "var(--fail)" : "var(--text-dim)" }}>
+            // Green (`--live`) is reserved for the live/healthy signal, not diff
+            // semantics — additions use a neutral, brighter-than-context tone instead
+            // (still distinguishable from unchanged/context lines below).
+            <div key={i} style={{ color: line.startsWith("+") ? "var(--text)" : line.startsWith("-") ? "var(--fail)" : "var(--text-dim)" }}>
               {line || " "}
             </div>
           ))}

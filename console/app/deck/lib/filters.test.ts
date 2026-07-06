@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveStoreEvents, filterEvents, facetValues, sortByTs } from "./filters";
+import { deriveStoreEvents, deriveFileEvents, filterEvents, facetValues, sortByTs } from "./filters";
 import { foldFleet } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { initialFleetState } from "@/lib/contract/types";
@@ -26,6 +26,33 @@ describe("deriveStoreEvents", () => {
     const events = deriveStoreEvents(state);
     const ids = new Set(events.map((e) => e.id));
     expect(ids.size).toBe(events.length);
+  });
+});
+
+describe("deriveFileEvents — the origin:'file'/sessionId variant, constructed from a loaded raw session", () => {
+  it("folds raw trace lines into searchable/filterable ToolCallEvents tagged with the session id", () => {
+    const lines = [
+      { ts: 1, tool: "Read", sig: "aaaa1111" },
+      { ts: 2, tool: "Bash", sig: "bbbb2222" },
+    ];
+    const events = deriveFileEvents("sess-abc", lines);
+    expect(events).toHaveLength(2);
+    for (const ev of events) {
+      expect(ev.origin).toBe("file");
+      expect(ev.sessionId).toBe("sess-abc");
+      expect(ev.runId).toBeUndefined();
+    }
+    // it's a real ToolCallEvent, not a dead shape — filterEvents/haystack search it
+    expect(filterEvents(events, { q: "aaaa1111" })).toHaveLength(1);
+    expect(facetValues(events, "tool")).toEqual(["Bash", "Read"]);
+  });
+
+  it("mixes cleanly with store events in one flat, filterable list", () => {
+    const storeEvents = deriveStoreEvents(state);
+    const fileEvents = deriveFileEvents("sess-xyz", [{ ts: 1, tool: "Grep", sig: "zzzz9999" }]);
+    const combined = [...storeEvents, ...fileEvents];
+    const out = filterEvents(combined, { q: "zzzz9999" });
+    expect(out).toEqual([expect.objectContaining({ origin: "file", sessionId: "sess-xyz" })]);
   });
 });
 

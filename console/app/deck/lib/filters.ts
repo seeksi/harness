@@ -5,6 +5,7 @@
 
 import type { ToolCallEvent, DeckFilters } from "./types";
 import type { FleetState } from "@/lib/contract/types";
+import type { RawTraceLine } from "./traceFile";
 
 // Fold the live/SSR fleet store into the flat forensics list. Every "trace" envelope
 // already folded into RunState.trace becomes one ToolCallEvent (origin "store").
@@ -28,6 +29,21 @@ export function deriveStoreEvents(state: FleetState): ToolCallEvent[] {
     });
   }
   return out;
+}
+
+// Fold a loaded raw session file (.claude/traces/<sessionId>.jsonl) into the same flat
+// forensics list as deriveStoreEvents, so its lines are searchable/filterable in the
+// main trace explorer — the origin:"file" ToolCallEvent variant this constructs is the
+// real hook data with no run/lane/agent linkage (see types.ts).
+export function deriveFileEvents(sessionId: string, lines: RawTraceLine[]): ToolCallEvent[] {
+  return lines.map((l, i) => ({
+    id: `file:${sessionId}:${i}`,
+    ts: l.ts,
+    tool: l.tool,
+    sig: l.sig,
+    origin: "file",
+    sessionId,
+  }));
 }
 
 function haystack(ev: ToolCallEvent): string {
