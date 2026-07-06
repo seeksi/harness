@@ -6,12 +6,14 @@ import {
   parseHarnessLine,
   spawnHarness,
   containedPlanFile,
+  minimalChildEnv,
   HarnessArgError,
   HarnessTimeoutError,
   type ParsedHarnessEvent,
 } from "./harness-bridge";
 import { mintLane, mintPlanFile, mintSession, _resetRegistry } from "./registry";
 import { resetDb, listAudit } from "@/lib/server/persist";
+import * as persistModule from "@/lib/server/persist";
 
 beforeEach(() => {
   _resetRegistry();
@@ -112,6 +114,14 @@ describe("parseHarnessLine — per-event-type schema whitelist (T4)", () => {
     expect(parseHarnessLine("{not json")).toBeNull();
   });
 
+  it("drops an event whose string field exceeds the per-field size cap (T6)", () => {
+    const bigSummary = "z".repeat(8 * 1024 + 1); // > MAX_FIELD_LEN
+    const line = JSON.stringify({ type: "gate", id: "B", status: "raised", severity: "high", summary: bigSummary });
+    expect(parseHarnessLine(line)).toBeNull();
+    // a normal-length summary still passes
+    expect(parseHarnessLine(JSON.stringify({ type: "gate", id: "B", status: "raised", severity: "high", summary: "ok" }))).toBeTruthy();
+  });
+
   it("reduces nested objects (approval/evals/evidence) to known fields", () => {
     const phase = parseHarnessLine(
       JSON.stringify({ type: "phase", phase: 6, status: "active", approval: { kind: "promote-to-main", state: "awaiting", extra: "x" } })
@@ -159,6 +169,87 @@ describe("spawnHarness — shell:false + audit row per spawn (T7)", () => {
     expect(audit[0].argv).toEqual([]);
     // the audit error is the CLASS name only — never the rejected value
     expect(audit[0].error).toBe("HarnessArgError");
+  });
+
+  it("passes a MINIMAL allowlisted env — a canary secret in process.env never reaches the child (T4b)", async () => {
+    mintLane("lane-env");
+    process.env.SUPER_SECRET_CANARY = "canary-shhh-0xDEADBEEF";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-should-not-pass-through";
+    process.env.HARNESS_FLAG_X = "keep-me";
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawnFn = vi.fn((_cmd: string, _args: string[], opts: Record<string, unknown>) => {
+      capturedEnv = opts.env as NodeJS.ProcessEnv;
+      return fakeChild([], 0) as never;
+    });
+    try {
+      await spawnHarness({ cmd: "wt-verify", slug: "lane-env" }, () => {}, { spawnFn });
+      expect(capturedEnv).toBeDefined();
+      // The canary secret is absent — by name AND by value.
+      expect(capturedEnv!.SUPER_SECRET_CANARY).toBeUndefined();
+      expect(capturedEnv!.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(Object.values(capturedEnv!)).not.toContain("canary-shhh-0xDEADBEEF");
+      // The child still gets what it needs.
+      expect(capturedEnv!.PATH).toBeDefined();
+      expect(capturedEnv!.HARNESS_FLAG_X).toBe("keep-me");
+    } finally {
+      delete process.env.SUPER_SECRET_CANARY;
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.HARNESS_FLAG_X;
+    }
+  });
+
+  it("minimalChildEnv keeps only PATH/HOME/... + HARNESS_* + the promote flag", () => {
+    const env = minimalChildEnv({
+      PATH: "/bin",
+      HOME: "/home/x",
+      ANTHROPIC_API_KEY: "sk-ant-xxxx",
+      NTFY_TOKEN: "tk_leak",
+      HARNESS_LIVE: "1",
+      ENABLE_PROMOTE_TO_MAIN: "1",
+      RANDOM_OTHER: "nope",
+    });
+    expect(env).toEqual({ PATH: "/bin", HOME: "/home/x", HARNESS_LIVE: "1", ENABLE_PROMOTE_TO_MAIN: "1" });
+  });
+
+  it("FAILS CLOSED: if the mandatory pre-spawn audit throws, it never spawns (T7)", async () => {
+    mintLane("lane-noaudit");
+    const spy = vi.spyOn(persistModule, "appendAudit").mockImplementation(() => {
+      throw new Error("db down");
+    });
+    const spawnFn = vi.fn();
+    await expect(
+      spawnHarness({ cmd: "wt-verify", slug: "lane-noaudit" }, () => {}, { spawnFn: spawnFn as never })
+    ).rejects.toThrow(/db down/);
+    expect(spawnFn).not.toHaveBeenCalled(); // no unaudited spawn
+    spy.mockRestore();
+  });
+
+  it("drops oversize stdout lines and kills+rejects on an egregious flood (T6)", async () => {
+    mintLane("lane-flood");
+    const big = "x".repeat(64 * 1024 + 1); // > MAX_LINE_LEN
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: Readable;
+      stderr: Readable;
+      pid: number;
+      kill: (s?: NodeJS.Signals) => boolean;
+    };
+    child.stdout = Readable.from(Array.from({ length: 60 }, () => big + "\n")); // > MAX_OVERSIZE_LINES
+    child.stderr = Readable.from([]);
+    child.pid = undefined as unknown as number; // no pid → child.kill fallback (no real group kill)
+    const killed: NodeJS.Signals[] = [];
+    child.kill = ((s: NodeJS.Signals) => {
+      killed.push(s);
+      return true;
+    }) as never;
+    child.stdout.on("end", () => setImmediate(() => child.emit("close", 0)));
+    const spawnFn = vi.fn(() => child as never);
+    const events: ParsedHarnessEvent[] = [];
+    await expect(
+      spawnHarness({ cmd: "wt-verify", slug: "lane-flood" }, (e) => events.push(e), { spawnFn })
+    ).rejects.toThrow(/flood/);
+    expect(events).toHaveLength(0); // oversize lines never parsed/forwarded
+    expect(killed).toContain("SIGKILL");
+    expect(listAudit()[0]).toMatchObject({ cmd: "wt-verify", outcome: "error", error: "stdout-flood" });
   });
 
   it("times out a hung child (SIGTERM→SIGKILL) and rejects HarnessTimeoutError", async () => {

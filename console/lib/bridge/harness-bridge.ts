@@ -25,7 +25,7 @@ import { appendAudit } from "@/lib/server/persist";
 
 export type HarnessSubcommand =
   | { cmd: "budget"; planFile: string }
-  | { cmd: "wt-new"; slug: string; user?: string }
+  | { cmd: "wt-new"; slug: string }
   | { cmd: "wt-commit"; slug: string }
   | { cmd: "wt-verify"; slug: string }
   | { cmd: "integ-start" }
@@ -60,15 +60,10 @@ function requirePlanFile(name: string): string {
   return name;
 }
 
-// The per-lane OS user passed to `wt-new <slug> <user>` (the chown target). SERVER-derived
-// (never a client string), but it lands in harness.sh argv so charset-check it like the slug.
-const LANE_USER_RE = /^[a-zA-Z0-9_-]+$/;
-function requireLaneUser(user: string): string {
-  if (typeof user !== "string" || !LANE_USER_RE.test(user)) {
-    throw new HarnessArgError(`invalid lane user (must be [a-zA-Z0-9_-]): ${JSON.stringify(user)}`);
-  }
-  return user;
-}
+// NOTE (threat model T1): `wt-new` intentionally takes NO `<user>` argument. A per-lane
+// OS user reaching harness.sh argv on regex-only validation would bypass minted provenance
+// (a client-influenced string laundered past the registry). The chown target, if ever
+// needed, must be a server-minted enum in registry.ts — never a free argv slot here.
 
 // Fixed allow-dir for plan files, resolved ONCE at module load so the containment
 // boundary can't shift with a later process.chdir / env mutation. Set via
@@ -83,6 +78,11 @@ const PLAN_DIR_ABS = path.resolve(
  * cannot escape (threat model T5). Independent second layer beneath provenance + the
  * bare-filename regex. Pure path math — no filesystem access.
  */
+/** The fixed plan-file allow-dir (absolute), for callers that materialize plan files. */
+export function planAllowDir(): string {
+  return PLAN_DIR_ABS;
+}
+
 export function containedPlanFile(name: string): string {
   const fullAbs = path.resolve(PLAN_DIR_ABS, name);
   if (fullAbs !== PLAN_DIR_ABS && !fullAbs.startsWith(PLAN_DIR_ABS + path.sep)) {
@@ -101,9 +101,7 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
     case "budget":
       return ["budget", containedPlanFile(requirePlanFile(sub.planFile))];
     case "wt-new":
-      return sub.user !== undefined
-        ? ["wt-new", requireLane(sub.slug), requireLaneUser(sub.user)]
-        : ["wt-new", requireLane(sub.slug)];
+      return ["wt-new", requireLane(sub.slug)];
     case "wt-commit":
       return ["wt-commit", requireLane(sub.slug)];
     case "wt-verify":
@@ -140,7 +138,12 @@ interface FieldSpec {
   project?: (v: unknown) => unknown;
 }
 
-const isStr: Check = (v) => typeof v === "string";
+// Per-field size cap (threat model T6/T4): a string field longer than this is treated as
+// oversize — the check fails, so the whole event is dropped rather than forwarding an
+// unbounded blob to the client feed / persistence. 8 KiB is far above any legitimate
+// summary/note/sig the contract carries.
+const MAX_FIELD_LEN = 8 * 1024;
+const isStr: Check = (v) => typeof v === "string" && v.length <= MAX_FIELD_LEN;
 const isNum: Check = (v) => typeof v === "number" && Number.isFinite(v);
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const oneOf =
@@ -291,7 +294,9 @@ export interface HarnessAuditRecord {
   ts: number; // epoch seconds
   cmd: HarnessSubcommand["cmd"];
   argv: string[]; // exact argv passed to harness.sh ([] if never built)
-  outcome: "exit" | "timeout" | "error" | "refused" | "invalid-args";
+  // "spawn" is the mandatory pre-spawn record (written BEFORE the child starts; a failure
+  // to persist it fails the run closed — see spawnHarness); the rest are settle outcomes.
+  outcome: "spawn" | "exit" | "timeout" | "error" | "refused" | "invalid-args";
   code?: number | null; // exit code when outcome === "exit"
   /** error CLASS name only (+ safe errno) — never the message, which can embed the rejected value. */
   error?: string;
@@ -302,6 +307,36 @@ const DEFAULT_SCRIPT = process.env.HARNESS_SCRIPT_PATH ?? "../.claude/skills/har
 // which must not hold the single slot forever (threat model T6).
 const DEFAULT_TIMEOUT_MS = Number(process.env.HARNESS_TIMEOUT_MS) || 600_000; // 10 min
 const DEFAULT_KILL_GRACE_MS = 5_000;
+
+// stdout stream caps (threat model T6 — a hostile/buggy child must not flood the feed or
+// exhaust memory). A single line over MAX_LINE_LEN is dropped (never parsed/forwarded);
+// once MAX_OVERSIZE_LINES such lines arrive, the child is SIGKILLed and the run fails —
+// that is an egregious flood, not a stray long line.
+// ponytail: readline still buffers a pending line up to its own limits BEFORE emitting it,
+// so a single newline-less multi-GB line is bounded by node's readline, not this cap.
+// add when: a raw byte-capped reader replaces readline (only if a real flood is observed).
+const MAX_LINE_LEN = 64 * 1024;
+const MAX_OVERSIZE_LINES = 50;
+
+/**
+ * Minimal allowlisted env for the harness child (threat model T4b). The child inherits
+ * NOTHING from the server process except PATH/HOME/LANG/TZ + the HARNESS_* flags harness.sh
+ * reads + the promote gate flag. Credentials are already stripped at boot (instrumentation),
+ * but this is the second wall: even a secret that survives boot — or a secret sitting in a
+ * non-credential-NAMED var — never reaches a spawned git/python child.
+ */
+export function minimalChildEnv(parent: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of ["PATH", "HOME", "LANG", "TZ"]) {
+    const v = parent[key];
+    if (v !== undefined) out[key] = v;
+  }
+  for (const [k, v] of Object.entries(parent)) {
+    if (v === undefined) continue;
+    if (k.startsWith("HARNESS_") || k === "ENABLE_PROMOTE_TO_MAIN") out[k] = v;
+  }
+  return out;
+}
 
 /**
  * Spawn a harness.sh subcommand and stream its structured stdout to onEvent. shell:false
@@ -318,18 +353,23 @@ export function spawnHarness(
   return new Promise((resolve, reject) => {
     // Audit (T7): the persisted append-only log is ALWAYS written (mandatory, best-effort
     // so a logging failure never changes control flow); onAudit is an observer only.
-    const audit = (r: Omit<HarnessAuditRecord, "ts">) => {
+    const audit = (r: Omit<HarnessAuditRecord, "ts">, fatal = false): void => {
       const record: HarnessAuditRecord = { ts: Math.floor(Date.now() / 1000), ...r };
+      let persistErr: unknown;
       try {
         appendAudit(record);
-      } catch {
-        // mandatory audit is best-effort; never break the run on a logging failure
+      } catch (e) {
+        persistErr = e;
       }
       try {
         opts.onAudit?.(record);
       } catch {
-        // observer is best-effort too
+        // observer is best-effort
       }
+      // Fail CLOSED on the mandatory pre-spawn record (fatal=true): if we cannot durably
+      // record that a spawn is about to happen, we must NOT spawn (threat model T7 — no
+      // unaudited run). Settle-time audits stay best-effort (the child already ran).
+      if (fatal && persistErr) throw persistErr;
     };
     // CRITICAL: log the error CLASS only — never the message. HarnessArgError embeds the
     // rejected value in its message; the audit must never carry it. A safe errno is allowed.
@@ -354,6 +394,14 @@ export function spawnHarness(
       reject(e);
       return;
     }
+    // Mandatory pre-spawn audit (FAIL CLOSED): a durable row MUST exist before the child
+    // runs — a spawn can never proceed without its audit trail (threat model T7).
+    try {
+      audit({ cmd: sub.cmd, argv: args, outcome: "spawn" }, true);
+    } catch (e) {
+      reject(e);
+      return;
+    }
     const script = opts.scriptPath ?? DEFAULT_SCRIPT;
     const spawnFn = opts.spawnFn ?? nodeSpawn;
     let child: ChildProcess;
@@ -361,6 +409,9 @@ export function spawnHarness(
       child = spawnFn(script, args, {
         cwd: opts.cwd ?? process.env.HARNESS_REPO ?? process.cwd(),
         shell: false, // CRITICAL: never let a shell re-parse the argv
+        // Explicit minimal env (threat model T4b): the child inherits only PATH/HOME + the
+        // HARNESS_* flags it needs — NEVER the full process.env, so no credential leaks in.
+        env: minimalChildEnv() as NodeJS.ProcessEnv,
         // Own process group so a timeout can kill the whole tree (harness.sh spawns
         // git/python children); without this only the shell PID dies and children leak.
         detached: true,
@@ -378,8 +429,20 @@ export function spawnHarness(
     // Drain stderr so a verbose child can't fill the pipe buffer and deadlock. Not
     // forwarded to the client (may contain noise); bounded by discarding.
     child.stderr?.resume();
+    // stdout flood defense (T6): drop any single line over the cap, count it, and if the
+    // child keeps spewing oversize lines, SIGKILL the tree and fail the run.
+    let flooded = false;
+    let oversizeLines = 0;
     const rl = createInterface({ input: child.stdout });
     rl.on("line", (line) => {
+      if (line.length > MAX_LINE_LEN) {
+        oversizeLines += 1;
+        if (oversizeLines > MAX_OVERSIZE_LINES && !flooded) {
+          flooded = true;
+          killTree("SIGKILL"); // egregious flood → kill now; `close` settles the reject
+        }
+        return; // drop the oversize line: never parse or forward it
+      }
       const event = parseHarnessLine(line);
       if (event) onEvent(event);
     });
@@ -428,7 +491,10 @@ export function spawnHarness(
     );
     child.on("close", (code) =>
       finish(() => {
-        if (timedOut) {
+        if (flooded) {
+          audit({ cmd: sub.cmd, argv: args, outcome: "error", error: "stdout-flood" });
+          reject(new Error(`harness '${sub.cmd}' killed: stdout flood (>${MAX_OVERSIZE_LINES} oversize lines)`));
+        } else if (timedOut) {
           audit({ cmd: sub.cmd, argv: args, outcome: "timeout" });
           reject(new HarnessTimeoutError(`harness '${sub.cmd}' timed out after ${timeoutMs}ms`));
         } else {

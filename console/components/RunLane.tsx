@@ -14,9 +14,11 @@ import { BurnMeter, HealthBadge } from "./meters";
 interface Props {
   run: RunState;
   feedStale: boolean;
+  // LIVE mode active (server probe). Gates which clock the staleness/stuck rule reads —
+  // see laneNowSec. Defaults to false so fixture behavior is the default.
+  live?: boolean;
   // Wall-clock now (epoch seconds), ticked by the parent so the staleness/stuck rule in
-  // deriveHealth actually advances while a run goes silent. Falls back to a fresh read so
-  // the lane is correct even if a caller forgets to thread it.
+  // deriveHealth advances while a LIVE run goes silent. Ignored in fixture mode.
   nowSec?: number;
   selected?: boolean;
   onSelect: (runId: string) => void;
@@ -25,10 +27,19 @@ interface Props {
   onApprovePromote?: (runId: string) => void;
 }
 
-export function RunLane({ run, feedStale, nowSec, selected, onSelect, onApprove, onReject, onApprovePromote }: Props) {
-  // §6 staleness/stuck is measured against WALL-CLOCK now, NOT run.lastEventTs (which
-  // would make silenceSec always 0 and the stuck rule dead). A silent run must age.
-  const now = nowSec ?? Math.floor(Date.now() / 1000);
+/**
+ * The `now` (epoch seconds) the §6 staleness/stuck rule is measured against.
+ * - LIVE: WALL-CLOCK (prefer the parent's ticked `nowSec`; fall back to a fresh read) so a
+ *   silent live run actually ages into "stuck".
+ * - FIXTURE: the run's OWN lastEventTs (silenceSec ≈ 0) so the deterministic fixture stays
+ *   byte-identical — its historical epoch must NOT read as a ~370-day "stuck" badge.
+ */
+export function laneNowSec(live: boolean, run: RunState, nowSec?: number): number {
+  return live ? nowSec ?? Math.floor(Date.now() / 1000) : run.lastEventTs;
+}
+
+export function RunLane({ run, feedStale, live, nowSec, selected, onSelect, onApprove, onReject, onApprovePromote }: Props) {
+  const now = laneNowSec(!!live, run, nowSec);
   const verdict = deriveHealth({ run, nowSec: now, feedStale });
   const counts = subtaskCounts(run);
   const gates = raisedGates(run);

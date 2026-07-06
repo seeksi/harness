@@ -49,6 +49,67 @@ export function currentSeq(): number {
   return seq;
 }
 
+/** The oldest seq still retained in the ring (the replay floor); 0 when empty. */
+export function oldestSeq(): number {
+  return ring.length > 0 ? ring[0].seq : 0;
+}
+
+/**
+ * True when a reconnect at `cursor` can NOT be replayed gaplessly: the next event the
+ * client expects (cursor+1) has already been evicted from the ring (cursor+1 < floor).
+ * cursor 0 (fresh connect) is never a gap. floor 0 (empty ring) is never a gap.
+ */
+export function hasGap(cursor: number, floor = oldestSeq()): boolean {
+  return cursor > 0 && floor > 0 && cursor + 1 < floor;
+}
+
+/**
+ * Attach a live consumer with a GAPLESS, atomic replay (threat model — SSE gapless
+ * contract). Ordering is the whole point:
+ *   1. subscribe FIRST, buffering live events (so an event published mid-replay is never
+ *      lost in the window between "compute replay" and "subscribe");
+ *   2. if the client's cursor is older than the ring floor, invoke onGap() (the caller
+ *      re-seeds a fresh snapshot) and replay the WHOLE retained ring — never a silent gap;
+ *   3. replay the retained tail, then flush the buffered live events, all deduped by seq
+ *      so the mid-replay overlap yields no duplicate frame.
+ * Returns the unsubscribe fn.
+ */
+export function attachReplay(
+  cursor: number,
+  emit: (item: SeqEnvelope) => void,
+  opts: { onGap?: () => void } = {}
+): () => void {
+  const seen = new Set<number>();
+  const send = (item: SeqEnvelope) => {
+    if (seen.has(item.seq)) return; // dedupe the replay/live overlap
+    seen.add(item.seq);
+    emit(item);
+  };
+
+  // 1. Subscribe first; buffer until the replay has drained.
+  let buffering = true;
+  const buffered: SeqEnvelope[] = [];
+  const unsub = subscribe((item) => {
+    if (buffering) buffered.push(item);
+    else send(item);
+  });
+
+  // 2. Gap detection + re-seed hook.
+  const floor = oldestSeq();
+  const gap = hasGap(cursor, floor);
+  if (gap) opts.onGap?.();
+  const replayFrom = gap ? floor - 1 : cursor; // gap → replay the whole retained ring
+
+  // 3. Replay retained tail, then flush the mid-replay buffer in seq order (deduped).
+  for (const item of since(replayFrom)) send(item);
+  buffering = false;
+  buffered.sort((a, b) => a.seq - b.seq);
+  for (const item of buffered) send(item);
+  buffered.length = 0;
+
+  return unsub;
+}
+
 /** Test-only: drop the ring + listeners + seq counter. */
 export function _resetBroker(): void {
   seq = 0;

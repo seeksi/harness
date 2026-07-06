@@ -218,6 +218,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
               key={run.runId}
               run={run}
               feedStale={feedStale}
+              live={live}
               nowSec={now}
               selected={selected === run.runId}
               onSelect={setSelected}

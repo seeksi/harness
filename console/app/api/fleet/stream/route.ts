@@ -13,7 +13,8 @@ import type { Envelope } from "@/lib/contract/events";
 import { fixtureEnvelopes } from "@/lib/contract/fixture";
 import { STREAM_END } from "@/lib/sse/client";
 import { resumeStartIndex } from "@/lib/sse/resume";
-import { subscribe, since } from "@/lib/server/broker";
+import { attachReplay, since } from "@/lib/server/broker";
+import { getSnapshot } from "@/lib/server/persist";
 
 const FRAME_MS = 220; // pacing for the streaming heartbeat (fixture)
 const SSE_HEADERS = {
@@ -87,23 +88,25 @@ function liveStream(req: Request): Response {
       let closed = false;
       let unsub: (() => void) | undefined;
       let ping: ReturnType<typeof setInterval> | undefined;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        unsub?.(); // release the broker listener
+        if (ping) clearInterval(ping); // release the keep-alive interval
+        try {
+          controller.close();
+        } catch {
+          /* already closed */
+        }
+      };
       const enqueue = (chunk: string) => {
         if (closed) return;
         try {
           controller.enqueue(encoder.encode(chunk));
         } catch {
-          closed = true;
-        }
-      };
-      const close = () => {
-        if (closed) return;
-        closed = true;
-        unsub?.();
-        if (ping) clearInterval(ping);
-        try {
-          controller.close();
-        } catch {
-          /* already closed */
+          // The stream is gone: tear DOWN fully (listener + ping), not just flip a flag —
+          // otherwise the broker subscription + ping interval leak for the process lifetime.
+          close();
         }
       };
       req.signal.addEventListener("abort", close);
@@ -112,12 +115,35 @@ function liveStream(req: Request): Response {
       // connection opens right away instead of hanging until the first event/ping.
       enqueue(`: open\n\n`);
 
-      // Replay the buffered tail from the client's cursor (gapless reconnect), THEN attach
-      // for live events. Subscribing first + draining the buffer would risk a duplicate for
-      // an event that lands between; draining-then-subscribing can miss one in that window —
-      // acceptable at single-slot cadence, and the next reconnect's cursor closes any gap.
-      for (const item of since(cursor)) enqueue(frame(item.env, item.seq));
-      unsub = subscribe((item) => enqueue(frame(item.env, item.seq)));
+      // Gapless attach: subscribe-first + buffered replay, deduped by seq (no lost/duplicate
+      // frame across the replay↔live window). On a stale cursor (older than the ring floor)
+      // re-seed a fresh snapshot per run instead of silently skipping the evicted events.
+      unsub = attachReplay(
+        cursor,
+        (item) => enqueue(frame(item.env, item.seq)),
+        {
+          onGap: () => {
+            // Emit an authoritative full-run snapshot (a `sync` frame, wholesale-applied by
+            // the reducer) for every run still referenced in the retained ring. No `id:` line
+            // so the client's resume cursor is only advanced by the numeric replay frames.
+            const runIds = new Set(since(0).map((i) => i.env.runId));
+            for (const runId of runIds) {
+              const snap = getSnapshot(runId);
+              if (snap) {
+                const sync: Envelope = {
+                  runId: snap.runId,
+                  projectId: snap.projectId,
+                  agentId: "resync",
+                  ts: Math.floor(Date.now() / 1000),
+                  type: "sync",
+                  payload: { run: snap },
+                };
+                enqueue(`data: ${JSON.stringify(sync)}\n\n`);
+              }
+            }
+          },
+        }
+      );
 
       // Keep-alive comment so idle intermediaries don't drop the connection.
       ping = setInterval(() => enqueue(`: ping\n\n`), 15_000);

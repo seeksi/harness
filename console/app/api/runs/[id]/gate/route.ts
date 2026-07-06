@@ -28,6 +28,13 @@ export async function POST(
     return NextResponse.json({ error: "forbidden" }, { status: 403 });
   }
 
+  // Fixture mode is READ-ONLY: with HARNESS_LIVE unset the console replays the deterministic
+  // fixture and must never mutate server state (regression-critical — the client stays
+  // optimistic in-browser). 503, not 403, mirrors POST /api/runs.
+  if (process.env.HARNESS_LIVE !== "1") {
+    return NextResponse.json({ error: "live mode disabled (HARNESS_LIVE unset)", live: false }, { status: 503 });
+  }
+
   const { id } = await params;
   const snapshot = getSnapshot(id);
   if (!snapshot) {
@@ -48,6 +55,16 @@ export async function POST(
     status = raw.status as GateStatus;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
+  }
+
+  // Double-gate the promote path (threat model T2): a Gate D approval IS the promote-to-main
+  // go signal. Refuse it unless the default-off flag is explicitly set — the SAME invariant
+  // spawnHarness enforces, so a single missed check can never enable a main mutation.
+  if (gateId === "D" && status === "approved" && process.env.ENABLE_PROMOTE_TO_MAIN !== "1") {
+    return NextResponse.json(
+      { error: "promote to main is disabled (ENABLE_PROMOTE_TO_MAIN not set)" },
+      { status: 403 }
+    );
   }
 
   // Reuse the raised gate's severity/summary/subtask so the decision keeps its context.

@@ -210,13 +210,20 @@ export function listRecentRunsForProjects(
   const cap = Math.min(Math.max(1, Math.floor(perProject) || 1), RUNS_PER_PROJECT);
   const db = getDb();
   const placeholders = ids.map(() => "?").join(", ");
+  // Per-project windowing in SQL: ROW_NUMBER() partitions by project and the outer WHERE
+  // keeps only the newest `cap` per project — so the DB returns at most cap*|ids| rows, not
+  // every row for every project (the old "fetch all, cap in JS" was the N+1's cousin: an
+  // unbounded scan). better-sqlite3 ships SQLite with window-function support.
   const rows = db
     .prepare(
-      `SELECT id, project_id, brief, started_at, ended_at, outcome
-         FROM runs WHERE project_id IN (${placeholders})
-         ORDER BY project_id ASC, started_at DESC`
+      `SELECT id, project_id, brief, started_at, ended_at, outcome FROM (
+         SELECT id, project_id, brief, started_at, ended_at, outcome,
+                ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY started_at DESC, id DESC) AS rn
+           FROM runs WHERE project_id IN (${placeholders})
+       ) WHERE rn <= ?
+       ORDER BY project_id ASC, started_at DESC`
     )
-    .all(...ids) as Array<{
+    .all(...ids, cap) as Array<{
     id: string;
     project_id: string;
     brief: string;
@@ -230,7 +237,6 @@ export function listRecentRunsForProjects(
       bucket = [];
       out.set(r.project_id, bucket);
     }
-    if (bucket.length >= cap) continue; // rows are already newest-first per project
     bucket.push({
       id: r.id,
       projectId: r.project_id,

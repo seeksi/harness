@@ -11,7 +11,7 @@
 // so minting them is trustworthy (threat model T1). No mem_*/MCP wiring anywhere.
 
 import { createHash } from "crypto";
-import { writeFileSync, mkdirSync } from "fs";
+import { writeFileSync, mkdirSync, realpathSync } from "fs";
 import { dirname } from "path";
 import { fleetReducer } from "@/lib/contract/events";
 import type { Envelope } from "@/lib/contract/events";
@@ -23,6 +23,7 @@ import { notify, notificationsFor } from "./notifier";
 import {
   spawnHarness,
   containedPlanFile,
+  planAllowDir,
   type HarnessSubcommand,
   type ParsedHarnessEvent,
   type SpawnHarnessOptions,
@@ -102,7 +103,14 @@ export function planRun(runId: string, routing: Routing): RunPlan {
 // contained allow-dir path the bridge passes to budget. Conservative fixed estimate.
 function writePlanFile(plan: RunPlan): void {
   const abs = containedPlanFile(plan.planFile);
-  mkdirSync(dirname(abs), { recursive: true });
+  const dir = dirname(abs);
+  mkdirSync(dir, { recursive: true });
+  // Symlink guard (threat model T5, depth): containedPlanFile's containment is LEXICAL; a
+  // symlink planted inside the allow-dir could still redirect the write. realpath the
+  // materialized dir and re-verify it is exactly the allow-dir before writing.
+  if (realpathSync(dir) !== realpathSync(planAllowDir())) {
+    throw new Error("plan dir escapes allow-dir after realpath resolution");
+  }
   const line = JSON.stringify({
     task: plan.slug,
     tier: MODEL_TIER[plan.model],
@@ -111,7 +119,10 @@ function writePlanFile(plan: RunPlan): void {
     cached_ktok: 30,
     rate_usd_per_mtok: TIER_RATE_USD_PER_MTOK[plan.model],
   });
-  writeFileSync(abs, line + "\n");
+  // O_CREAT|O_EXCL ("wx"): never overwrite or follow a pre-existing file/symlink at the plan
+  // path. The runId is server-random so a fresh run never legitimately collides — an EEXIST
+  // here is a signal (a planted file), not a normal condition.
+  writeFileSync(abs, line + "\n", { flag: "wx" });
 }
 
 export interface StartRunInput {
