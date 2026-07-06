@@ -1,7 +1,10 @@
 // console/components/RunLane.tsx
 // One fleet lane: project name (display face) · phase rail · health verdict ·
 // gate/alert strip (inline gate card w/ approve/reject) · mini burn meter.
-// Click/Enter selects the run (focus route is Batch B+ — here it calls onSelect).
+// Click/Enter on the header NAVIGATES to the run-focus route (§5): `onSelect` is
+// wired by the parent to a router.push(runRoute(runId)), not local state — the
+// `selected` prop only drives the amber "just launched" border, independent of
+// navigation.
 "use client";
 
 import type { RunState, GateId } from "@/lib/contract/types";

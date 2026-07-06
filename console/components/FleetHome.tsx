@@ -6,6 +6,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
 import type { FleetState, GateId, GateStatus, RunState } from "@/lib/contract/types";
 import type { Envelope } from "@/lib/contract/events";
 import { newRun } from "@/lib/contract/types";
@@ -13,6 +14,7 @@ import { activeLanes, laneOrder, totalTokens } from "@/lib/contract/selectors";
 import { createFleetStore, type FleetStore } from "@/lib/store/fleetStore";
 import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
 import { fmtTokens, fmtClock } from "@/lib/format";
+import { runRoute } from "@/lib/routes";
 import { RunLane } from "./RunLane";
 import { OpsBoard } from "./OpsBoard";
 import { LaunchConsole, type LaunchPayload, type LaunchProject } from "./LaunchConsole";
@@ -21,6 +23,7 @@ import { CommandPalette } from "./CommandPalette";
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 export function FleetHome({ initial, projects }: { initial: FleetState; projects: LaunchProject[] }) {
+  const router = useRouter();
   const storeRef = useRef<FleetStore | null>(null);
   if (!storeRef.current) storeRef.current = createFleetStore(initial);
   const store = storeRef.current;
@@ -101,6 +104,11 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
     [store]
   );
   const runById = useCallback((id: string) => store.getSnapshot().runs[id], [store]);
+
+  // §5 run lane / ⌘K "jump to run" action: NAVIGATE to the run-focus route rather
+  // than only flip local `selected` state — a real route so `/run/[id]` is
+  // deep-linkable/back-buttonable, not a component-local highlight.
+  const goToRun = useCallback((runId: string) => router.push(runRoute(runId)), [router]);
 
   // CSRF-headed POST to a mutating API route (matches lib/server/csrf.ts). Best-effort:
   // the SSE stream is what actually reflects the result, so a network error is swallowed.
@@ -221,7 +229,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
               live={live}
               nowSec={now}
               selected={selected === run.runId}
-              onSelect={setSelected}
+              onSelect={goToRun}
               onApprove={onApprove}
               onReject={onReject}
               onApprovePromote={onApprovePromote}
@@ -257,7 +265,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
         open={paletteOpen}
         runs={allRuns}
         onClose={() => setPaletteOpen(false)}
-        onSelect={setSelected}
+        onSelect={goToRun}
         onApprove={onApprove}
         onAbort={onAbort}
         onLaunch={() => setLaunchOpen(true)}

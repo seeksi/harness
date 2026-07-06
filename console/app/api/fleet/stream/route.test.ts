@@ -79,3 +79,42 @@ describe("fleet SSE stream — stale-cursor reseed (gapless contract, evicted ru
     expect(runIds.has("active-run")).toBe(true);
   });
 });
+
+describe("fleet SSE stream — live-path credential guard (T4b third wall)", () => {
+  it("never serializes a credential-shaped envelope to the browser, and errors the stream instead of a clean close", async () => {
+    upsertRun(newRun("r1", "p1", "Proj", "brief", 100));
+
+    const ctrl = new AbortController();
+    const req = new Request("http://localhost/api/fleet/stream", { signal: ctrl.signal });
+    const res = await GET(req);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let streamErrored = false;
+
+    // attachReplay's subscription is registered synchronously inside GET() (the
+    // ReadableStream's `start` runs during construction), so publishing here is
+    // already observed by the live path.
+    publish(ev("r1", 0)); // clean — fine to enqueue
+    publish({ ...ev("r1", 1), payload: { tool: "T", sig: "leaked ANTHROPIC_API_KEY here" } }); // credential-shaped → must be dropped + stream errored
+    publish(ev("r1", 2)); // published after the guard fires — must never reach the client
+
+    try {
+      for (let i = 0; i < 200; i++) {
+        const { value, done } = await reader.read();
+        if (value) buf += decoder.decode(value, { stream: true });
+        if (done) break;
+      }
+    } catch {
+      streamErrored = true; // controller.error() rejects the pending/future read()
+    } finally {
+      ctrl.abort();
+    }
+
+    expect(buf.includes("ANTHROPIC_API_KEY")).toBe(false);
+    // Fail-closed: the connection must not end in the ordinary graceful path (no
+    // frame referencing seq 2 — the event published after the leak was dropped too).
+    expect(buf.includes('"sig":"2"')).toBe(false);
+    expect(streamErrored).toBe(true);
+  });
+});

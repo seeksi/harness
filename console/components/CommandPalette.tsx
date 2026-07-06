@@ -1,6 +1,9 @@
 // console/components/CommandPalette.tsx
-// ⌘K command palette — jump / approve / abort, wired to store actions. Mid-run
-// everything is fast here (§5). Abort requires a typed confirmation (destructive).
+// ⌘K command palette — jump / approve / abort. Mid-run everything is fast here
+// (§5). "Jump to <run>" entries call `onSelect`, which the parent wires to
+// router.push(runRoute(runId)) — a real navigation to /run/[id], not local
+// state. Approve/abort stay wired to store actions, unchanged. Abort requires a
+// typed confirmation (destructive).
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";

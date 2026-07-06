@@ -15,6 +15,7 @@ import { STREAM_END } from "@/lib/sse/client";
 import { resumeStartIndex } from "@/lib/sse/resume";
 import { attachReplay, since } from "@/lib/server/broker";
 import { getSnapshot, listRunIds } from "@/lib/server/persist";
+import { assertNoCredential } from "@/lib/server/credentials";
 
 const FRAME_MS = 220; // pacing for the streaming heartbeat (fixture)
 const SSE_HEADERS = {
@@ -88,15 +89,31 @@ function liveStream(req: Request): Response {
       let closed = false;
       let unsub: (() => void) | undefined;
       let ping: ReturnType<typeof setInterval> | undefined;
-      const close = () => {
-        if (closed) return;
+      const teardown = () => {
         closed = true;
         unsub?.(); // release the broker listener
         if (ping) clearInterval(ping); // release the keep-alive interval
+      };
+      const close = () => {
+        if (closed) return;
+        teardown();
         try {
           controller.close();
         } catch {
           /* already closed */
+        }
+      };
+      // Fail-closed guard (T4b, third wall): a credential-shaped payload on the LIVE
+      // path errors the stream instead of closing it cleanly — this is a defect, not a
+      // normal disconnect, so the client sees a broken connection rather than a quiet
+      // STREAM_END that could be mistaken for a finished run.
+      const closeWithError = (reason: unknown) => {
+        if (closed) return;
+        teardown();
+        try {
+          controller.error(reason instanceof Error ? reason : new Error(String(reason)));
+        } catch {
+          /* already closed/errored */
         }
       };
       const enqueue = (chunk: string) => {
@@ -109,6 +126,22 @@ function liveStream(req: Request): Response {
           close();
         }
       };
+      // Assert-then-enqueue for every envelope bound for the browser on the live path
+      // (replay + onGap resync alike) — the fixture path never calls this and stays
+      // byte-identical. `id` is omitted for sync/resync frames (no resume cursor line).
+      const emitEnvelope = (env: Envelope, id?: number | string) => {
+        try {
+          assertNoCredential(env);
+        } catch (err) {
+          console.error(
+            "[fleet/stream] dropped a live frame: credential-shaped payload detected",
+            err instanceof Error ? err.message : err
+          );
+          closeWithError(err);
+          return;
+        }
+        enqueue(id !== undefined ? frame(env, id) : `data: ${JSON.stringify(env)}\n\n`);
+      };
       req.signal.addEventListener("abort", close);
 
       // Flush headers immediately (an idle fleet emits nothing for a while) so the client's
@@ -120,7 +153,7 @@ function liveStream(req: Request): Response {
       // re-seed a fresh snapshot per run instead of silently skipping the evicted events.
       unsub = attachReplay(
         cursor,
-        (item) => enqueue(frame(item.env, item.seq)),
+        (item) => emitEnvelope(item.env, item.seq),
         {
           onGap: () => {
             // Emit an authoritative full-run snapshot (a `sync` frame, wholesale-applied by
@@ -141,7 +174,7 @@ function liveStream(req: Request): Response {
                   type: "sync",
                   payload: { run: snap },
                 };
-                enqueue(`data: ${JSON.stringify(sync)}\n\n`);
+                emitEnvelope(sync);
               }
             }
           },
