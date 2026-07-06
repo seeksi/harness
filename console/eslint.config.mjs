@@ -26,6 +26,11 @@ const DAEMON = {
   message:
     "The live run orchestrator is allowlisted (T9): only app/api/runs/route.ts may import lib/server/daemon. Everyone else observes runs via persistence / the SSE stream.",
 };
+const SANDBOX = {
+  group: ["**/lib/sandbox", "**/lib/sandbox/*"],
+  message:
+    "The agent sandbox is allowlisted (T9): only lib/server/daemon.ts may import lib/sandbox/*. It is the sole owner of the headless-agent isolation primitives; routes/UI never spawn agents directly.",
+};
 
 export default [
   { ignores: [".next/**", "node_modules/**", "next-env.d.ts", "eslint.config.mjs"] },
@@ -36,22 +41,22 @@ export default [
     // type-aware `project` wiring needed, keeping the lint fast and dependency-light.
     languageOptions: { parser: tsParser, parserOptions: { ecmaVersion: "latest", sourceType: "module" } },
     rules: {
-      // Default-deny BOTH sinks; sanctioned files re-enable only their assigned sink below.
-      "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN, DAEMON] }],
+      // Default-deny ALL THREE sinks; sanctioned files re-enable only their assigned sink below.
+      "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN, DAEMON, SANDBOX] }],
     },
   },
-  // lib/server/daemon.ts — the single producer: may import the harness spawn; still can't
-  // be imported by anyone but the run route (the DAEMON pattern above still bans importing
-  // daemon FROM here, which daemon never does).
+  // lib/server/daemon.ts — the single producer: may import the harness spawn AND the agent
+  // sandbox (both omitted below); still can't be imported by anyone but the run route (the
+  // DAEMON pattern below still bans importing daemon FROM here, which daemon never does).
   {
     files: ["lib/server/daemon.ts"],
     rules: { "no-restricted-imports": ["error", { patterns: [DAEMON] }] },
   },
   // app/api/runs/route.ts — the composition caller: may import the daemon; the harness spawn
-  // stays banned (routes never spawn harness.sh directly).
+  // AND the agent sandbox stay banned (routes never spawn harness.sh or agents directly).
   {
     files: ["app/api/runs/route.ts"],
-    rules: { "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN] }] },
+    rules: { "no-restricted-imports": ["error", { patterns: [HARNESS_SPAWN, SANDBOX] }] },
   },
   // Tests legitimately wire across boundaries to construct scenarios; production stays checked.
   {
