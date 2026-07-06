@@ -1,0 +1,173 @@
+// console/components/run/RunFocus.tsx
+// Run focus — the steering view (§4/§5): one run expanded, deep-linkable at
+// /run/[id]. Same rAF-batched fleetStore + fleet SSE stream as fleet home (the
+// daemon is the sole event source); this view just selects and renders one run.
+// SSR renders the folded-fixture run (so a deep link/curl sees real content);
+// hydration wires the live SSE stream for kinetic updates, same as FleetHome.
+"use client";
+
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { FleetState, GateId } from "@/lib/contract/types";
+import type { Envelope } from "@/lib/contract/events";
+import { raisedGates, currentPhase } from "@/lib/contract/selectors";
+import { deriveHealth, silenceSeconds } from "@/lib/contract/health";
+import { PHASE_LABELS, STALENESS_WINDOW_SEC } from "@/lib/contract/types";
+import { createFleetStore, type FleetStore } from "@/lib/store/fleetStore";
+import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
+import { fmtClock } from "@/lib/format";
+import { HealthBadge } from "@/components/meters";
+import { lookupRun } from "./selectRun";
+import { PositionPanel } from "./PositionPanel";
+import { GateCard } from "./GateCard";
+import { LiveFeed } from "./LiveFeed";
+import { BudgetPanel } from "./BudgetPanel";
+import styles from "./RunFocus.module.css";
+
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+export function RunFocus({ initial, runId }: { initial: FleetState; runId: string }) {
+  const storeRef = useRef<FleetStore | null>(null);
+  if (!storeRef.current) storeRef.current = createFleetStore(initial);
+  const store = storeRef.current;
+
+  const getServer = useCallback(() => initial, [initial]);
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot, getServer);
+
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+
+  // rAF flush loop — one commit + one notify per frame (same discipline as fleet home).
+  useEffect(() => {
+    let raf = 0;
+    const loop = () => {
+      store.flush();
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [store]);
+
+  // The fleet SSE stream is the sole event source; this view filters to one run.
+  useEffect(() => {
+    const client = createSseClient({
+      url: "/api/fleet/stream",
+      store,
+      onStatusChange: setStatus,
+    });
+    return () => client.destroy();
+  }, [store]);
+
+  const { run, notFound } = lookupRun(state, runId);
+
+  const emit = useCallback(
+    (type: Envelope["type"], payload: unknown, agentId = "operator") => {
+      if (!run) return;
+      store.apply({ runId: run.runId, projectId: run.projectId, agentId, ts: nowSec(), type, payload } as Envelope);
+    },
+    [store, run]
+  );
+  const onApprove = useCallback(
+    (gate: GateId) => {
+      if (!run) return;
+      const g = run.gates.find((x) => x.id === gate);
+      if (g) emit("gate", { id: gate, status: "approved", severity: g.severity, summary: `${g.summary} — approved` });
+      emit("phase", { phase: 4, status: "done" });
+      const promote = run.phases.find((p) => p.approval?.state === "awaiting");
+      if (promote) emit("phase", { phase: promote.id, status: "done", approval: { kind: "promote-to-main", state: "approved" } });
+    },
+    [emit, run]
+  );
+  const onReject = useCallback(
+    (gate: GateId) => {
+      if (!run) return;
+      const g = run.gates.find((x) => x.id === gate);
+      if (g) emit("gate", { id: gate, status: "rejected", severity: g.severity, summary: `${g.summary} — rejected` });
+      emit("health", { verdict: "degraded", note: `Gate ${gate} rejected` });
+    },
+    [emit, run]
+  );
+
+  const feedStale = status === "reconnecting" || status === "closed";
+
+  if (notFound || !run) {
+    return (
+      <main className={styles.shell}>
+        <div className={styles.panel}>
+          <div className="mono" style={{ fontSize: 13, color: "var(--fail)" }}>run not found</div>
+          <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 6 }}>
+            No run with id <code>{runId}</code> in the fleet. <a href="/" style={{ color: "var(--info)" }}>Back to fleet home</a>.
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  const now = nowSec();
+  const verdict = deriveHealth({ run, nowSec: now, feedStale });
+  // Freeze+badge (§5): stale from either an SSE drop OR the run itself going quiet
+  // past the staleness window — never silently pretend liveness either way.
+  const runSilent = run.status === "running" && silenceSeconds(run, now) > STALENESS_WINDOW_SEC;
+  const showStaleBadge = feedStale || runSilent;
+  const gates = raisedGates(run);
+  const promote = run.phases.find((p) => p.approval?.state === "awaiting");
+  const cur = currentPhase(run);
+
+  return (
+    <main className={styles.shell}>
+      <header className={styles.topbar}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, minWidth: 0 }}>
+          <a href="/" className="mono" style={{ fontSize: 11, color: "var(--text-faint)", textDecoration: "none" }}>← fleet</a>
+          <span className="display" style={{ fontSize: 22, fontWeight: 700, color: "var(--text)" }}>{run.projectName}</span>
+          <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>{run.projectId} · {run.brief}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <HealthBadge verdict={verdict} />
+          {showStaleBadge && (
+            <span className="mono pulse" role="status" style={{ fontSize: 11, color: "var(--amber)" }}>
+              ◐ {feedStale ? "reconnecting" : "no events"} · data as of {fmtClock(run.lastEventTs * 1000)}
+            </span>
+          )}
+        </div>
+      </header>
+
+      <div className={styles.grid}>
+        <div className={`${styles.position} ${styles.panel}`}>
+          <PositionPanel run={run} />
+        </div>
+
+        <div className={styles.gates}>
+          {gates.length === 0 && !promote && (
+            <div className={styles.panel} style={{ fontSize: 12, color: "var(--text-faint)" }}>
+              no gates raised · {cur}/6 {PHASE_LABELS[cur]}
+            </div>
+          )}
+          {gates.map((g) => (
+            <GateCard key={g.id} gate={g} onApprove={onApprove} onReject={onReject} />
+          ))}
+          {promote && (
+            <div className={styles.panel} style={{ background: "var(--live-fill)", border: "1px solid var(--live)" }}>
+              <div className="mono" style={{ fontSize: 11, color: "var(--live)" }}>PROMOTE · awaiting</div>
+              <div style={{ fontSize: 12, color: "var(--text)", margin: "4px 0 8px" }}>
+                eval+promote ready — approve to fast-forward main
+              </div>
+              <button
+                type="button"
+                onClick={() => onApprove("A")}
+                style={{ padding: "5px 11px", borderRadius: 5, fontSize: 11, fontWeight: 600, cursor: "pointer", color: "var(--amber)", background: "transparent", border: "1px solid var(--amber)" }}
+              >
+                Approve promote
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className={`${styles.feed} ${styles.panel}`}>
+          <LiveFeed run={run} />
+        </div>
+
+        <div className={`${styles.budget} ${styles.panel}`}>
+          <BudgetPanel run={run} />
+        </div>
+      </div>
+    </main>
+  );
+}
