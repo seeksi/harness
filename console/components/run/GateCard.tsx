@@ -48,14 +48,12 @@ export function GateCard({ gate, onApprove, onReject }: Props) {
       {evidenceLinks.length > 0 && (
         <div style={{ display: "flex", gap: 10, marginBottom: 9 }}>
           {evidenceLinks.map((k) => (
-            <a
-              key={k}
-              href={`#${evidence[k]}`}
-              className="mono"
-              style={{ fontSize: 11, color: "var(--info)", textDecoration: "underline" }}
-            >
+            // Plain label, not a link: these have no real target yet (the deck view
+            // that provides one lands in a later lane) — a dead `#` anchor would be
+            // a false affordance.
+            <span key={k} className="mono" style={{ fontSize: 11, color: "var(--info)" }}>
               {k}: {evidence[k]}
-            </a>
+            </span>
           ))}
         </div>
       )}

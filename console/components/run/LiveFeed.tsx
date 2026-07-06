@@ -3,13 +3,19 @@
 // touch, virtualized (§5). Per-line: timestamp (mono), agent, event, cost tick.
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { RunState, TraceTick } from "@/lib/contract/types";
 import { fmtClock, fmtUsd } from "@/lib/format";
 import { computeWindow, isNearBottom } from "./virtualize";
 
 const ITEM_H = 22;
 const VIEWPORT_H = 320;
+
+// fmtClock renders in the LOCAL timezone; the server's tz rarely matches the
+// browser's, so formatting it during SSR produces a hydration mismatch. Render a
+// stable placeholder on the server/first paint and swap in the real clock only
+// once mounted client-side.
+const CLOCK_PLACEHOLDER = "--:--:--";
 
 // Best-effort per-line cost tick: the lane's cumulative cost as currently known.
 // ponytail: trace events don't carry a cost themselves (contract has no per-tick
@@ -30,6 +36,8 @@ export function LiveFeed({ run }: { run: RunState }) {
   // tail of the feed (the freshest lines) without waiting for a scroll measurement.
   const [scrollTop, setScrollTop] = useState(() => Math.max(0, total * ITEM_H - VIEWPORT_H));
   const [autoFollow, setAutoFollow] = useState(true);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // New lines arrived: if the operator was following the tail, keep following it.
   useLayoutEffect(() => {
@@ -79,7 +87,7 @@ export function LiveFeed({ run }: { run: RunState }) {
         ) : (
           <div style={{ paddingTop: win.topPad, paddingBottom: win.bottomPad }}>
             {visible.map((t, i) => (
-              <FeedLine key={win.start + i} tick={t} cost={costTickFor(run, t)} />
+              <FeedLine key={win.start + i} tick={t} cost={costTickFor(run, t)} mounted={mounted} />
             ))}
           </div>
         )}
@@ -88,7 +96,7 @@ export function LiveFeed({ run }: { run: RunState }) {
   );
 }
 
-function FeedLine({ tick, cost }: { tick: TraceTick; cost: string | null }) {
+function FeedLine({ tick, cost, mounted }: { tick: TraceTick; cost: string | null; mounted: boolean }) {
   return (
     <div
       className="feed-line"
@@ -104,7 +112,7 @@ function FeedLine({ tick, cost }: { tick: TraceTick; cost: string | null }) {
         overflow: "hidden",
       }}
     >
-      <span style={{ color: "var(--text-faint)" }}>{fmtClock(tick.ts * 1000)}</span>
+      <span style={{ color: "var(--text-faint)" }}>{mounted ? fmtClock(tick.ts * 1000) : CLOCK_PLACEHOLDER}</span>
       <span style={{ color: "var(--amber)" }}>{tick.agentId}</span>
       <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>
         {tick.tool} <span style={{ color: "var(--text-faint)" }}>{tick.sig}</span>
