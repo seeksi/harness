@@ -35,8 +35,7 @@ NOTE (2026-07-07): do NOT set `AGENT_HOME` anymore — unset, each lane's agent 
 ISOLATED minimal HOME at `~/.gantry/agent-homes/<lane-slug>` (AGENT_ISOLATED_HOME overrides
 the BASE dir) provisioned per spawn with only the Max-plan credential + a git identity, and
 reclaimed at end of run. `AGENT_HOME=<path>` remains the explicit legacy override (agent
-uses exactly that home, no provisioning). A stale SINGULAR `~/.gantry/agent-home` from the
-pre-multi-lane build is not auto-removed — delete it once by hand. Multi-lane: pass
+uses exactly that home, no provisioning). Multi-lane: pass
 `lanes:["brief1","brief2"]` (1..4) to POST /api/runs and set `LANE_CONCURRENCY=2..4` for
 overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts first).
 

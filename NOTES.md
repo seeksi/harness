@@ -241,3 +241,6 @@ untestable without reimport; ensureAgentHome sync execFileSync git-config per sp
 (cache identity someday); openat-anchored writes if posture tightens; stale singular
 ~/.gantry/agent-home — operator deletes once; decompose agent / handoff-respawn loop /
 per-lane model remain out-of-scope follow-ups.
+smoke: 2-lane live smoke PASSED 2026-07-07 (LANE_CONCURRENCY=2, run 0b0ddc6b, done in 9s;
+both lane homes overlapped then reclaimed; gates A/B×2/D×2/C×2 clear; main untouched;
+artifacts + stale singular ~/.gantry/agent-home cleaned).
