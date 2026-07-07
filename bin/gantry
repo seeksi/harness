@@ -6,7 +6,7 @@
 // /api/fleet/stream (run), spawn `next start` with the proven live env (up),
 // GET /api/runs + /api/projects (status).
 //
-//   gantry run "<brief>" [--lane <brief>]... [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
+//   gantry run "<brief>" [--lane <brief>... | --decompose] [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
 //   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
 //   gantry status [--url <base>]
 //
@@ -74,7 +74,7 @@ function parseArgs({ args, options, allowPositionals = false }) {
 
 function usage() {
   console.log(`usage:
-  gantry run "<brief>" [--lane <brief>]... [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
+  gantry run "<brief>" [--lane <brief>... | --decompose] [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
   gantry status [--url <base>]`);
   process.exit(2);
@@ -228,6 +228,7 @@ async function cmdRun(base, brief, opts) {
   const project = await resolveProject(base, opts.project);
   const body = { projectId: project.id, brief, routing: opts.model };
   if (opts.lane.length > 0) body.lanes = opts.lane;
+  if (opts.decompose) body.decompose = true;
   const { id } = await api(base, "/api/runs", { method: "POST", headers: csrfHeaders(base), body: JSON.stringify(body) });
   console.log(`run ${bold(id)} started on ${project.name}${opts.lane.length ? ` (${opts.lane.length} lanes)` : ""}`);
   if (!opts.follow) return;
@@ -321,6 +322,7 @@ async function main() {
       allowPositionals: true,
       options: {
         lane: { type: "string", multiple: true, default: [] },
+        decompose: { type: "boolean", default: false },
         project: { type: "string" },
         model: { type: "string", default: "auto" },
         url: { type: "string", default: DEFAULT_URL },
@@ -330,6 +332,7 @@ async function main() {
     if (positionals.length > 1) die(`one brief only — quote it: gantry run "${positionals.join(" ")}"`);
     if (!["auto", "haiku", "sonnet", "opus"].includes(values.model)) die("--model must be auto|haiku|sonnet|opus");
     if (values.lane.length > 4) die("at most 4 --lane briefs");
+    if (values.decompose && values.lane.length > 0) die("--decompose and --lane are mutually exclusive");
     await cmdRun(baseUrl(values.url), positionals[0], { ...values, follow: !values["no-follow"] });
   } else if (cmd === "up") {
     const { values } = parseArgs({
