@@ -20,6 +20,8 @@ DONE + verified:
   `ENABLE_AGENT_EXEC=1` + `AGENT_ALLOW_DIRECT=1`.
 
 ## To run GANTRY live (proven working)
+Easiest (2026-07-07): `gantry up` (live env owned by the CLI), `gantry run "<brief>"`,
+`gantry status`. Manual equivalent:
 ```
 cd /home/alter/HARNESS/console && npm run build
 ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 HARNESS_LIVE=1 \
@@ -62,17 +64,24 @@ overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts
    keeps per-lane uids. Follow-ups (non-gating): decompose agent (brief → N disjoint
    lanes), handoff-respawn loop for console, per-lane model.
 
-3. **`gantry` CLI command** (new). A CLI that invokes the harness. Decide scope with the user:
-   - Minimal: `gantry run "<brief>" [--project <path>] [--model ...] [--live]` that drives the
-     same daemon/harness.sh path the dashboard POST /api/runs uses (start a run, stream events to
-     the terminal). Could shell the console server's API, or call the daemon/harness.sh directly.
-   - Consider: `gantry up` (start the dashboard server with the right env), `gantry status`.
-   - The daemon (`console/lib/server/daemon.ts`) + harness.sh are the engine; the CLI is a thin
-     front-end. Reuse, don't reimplement. Cross-review before merge.
+3. **`gantry` CLI command** — DONE 2026-07-07 (branch feat/gantry-cli, cross-review PASS
+   Codex r3 + Claude r2). `bin/gantry`: single-file zero-dep Node (>=18.0, CJS, hand-rolled
+   long-option parser) over the console HTTP API. `gantry run "<brief>" [--lane ...]...
+   [--project id|name] [--model auto|haiku|sonnet|opus] [--url] [--no-follow]` POSTs
+   /api/runs w/ CSRF headers then tails /api/fleet/stream, exits on health lifecycle
+   done(0)/failed(1). `gantry up [--host --port --lanes 1..4 --fixture]` spawns
+   `npx next start` in console/ owning the FULL live-env set (force-cleared first so an
+   inherited HARNESS_LIVE/ENABLE_PROMOTE_TO_MAIN can't leak; AGENT_CLI_PATH resolved from
+   PATH, validated absolute+executable file). `gantry status` = live flag, slot, recent
+   runs. ponytail: no SSE auto-reconnect (drop → resume hint, run continues server-side).
+   Follow-up (Medium, accepted at merge): no automated tests — thin client, verified live
+   twice end-to-end.
 
-4. **Install script** — add `gantry` to `install.sh` (currently symlinks `.claude/skills/*` into
-   `~/.claude/skills`). Add: symlink/install the `gantry` CLI onto PATH (e.g. `~/.local/bin/gantry`),
-   and document the live-mode env vars. Keep it idempotent.
+4. **Install script** — DONE 2026-07-07 (same branch). install.sh symlinks bin/gantry →
+   ~/.local/bin/gantry; refuses to clobber anything that isn't already a gantry symlink
+   into this repo (canonical readlink -f comparison on install AND uninstall, symlinked-
+   repo safe); prints quickstart + env docs. Idempotent, verified: double-install,
+   uninstall, reinstall, foreign-file/symlink refusal.
 
 5. **Name rollout**: `/brand` page currently proposes PHOSPHOR/GANTRY/RUNBOARD — GANTRY is chosen;
    update the app wordmark/header ("HARNESS · mission control" → GANTRY) and `/brand` to reflect
@@ -95,3 +104,8 @@ overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts
 - The dashboard binds tailnet IP for real use (100.72.193.64); localhost for local smoke.
 - Model alias quirk: `--model haiku` resolved to sonnet-5 in one run; sonnet/opus map fine.
   Low priority; revisit if haiku routing matters.
+- RUN-RECIPE GOTCHA: a run against THIS repo flips the operator checkout to `integration`
+  mid-run; harness.sh reset-base switches back to base only from a CLEAN tree (by design —
+  never migrates junk). Dirty tree ⇒ stranded on integration: recover with
+  `git switch <branch>` (changes carry) + delete `integration`. Smoke leftovers to clean
+  after a local run: lane worktree + branch, integration branch, data/plans/plan-<id>.jsonl.

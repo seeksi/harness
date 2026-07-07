@@ -281,3 +281,13 @@ checkpoint: 2026-07-07 (context-guard soft limit; implementation done, verificat
 2. cross-review skill on the diff (mandatory before merge) → fix rounds until PASS.
 3. Merge feat/gantry-cli → main, push. Update HANDOFF.md agenda #3+#4 DONE + NOTES
    status line + memory (agent-exec-gate or new gantry-cli note if durable).
+
+status: COMPLETE 2026-07-07 — cross-review r1 BLOCK (Codex+Claude, 13 dispositions:
+CJS rewrite, LIVE_ENV fixture scrub, AGENT_CLI_PATH validation, install.sh clobber/
+readlink guards, ...) → r2 Codex BLOCK (parseArgs needs 18.3 → hand-rolled parser;
+stream-connect wrap) / Claude PASS (5 Lows all fixed: findClaude isFile, running-not-
+red, LIVE_ENV full set, URL validation) → Codex r3 PASS. Verified live twice end-to-
+end (up → status → 1-lane run to done exit 0, artifacts cleaned, reset-base returned
+to main from clean tree). install.sh verified: idempotent×2, uninstall, refusals,
+symlinked-repo. Merged → main 5168d7c (push pending operator approval). Follow-up (Medium, accepted): no
+automated CLI tests. Won't-fix Low: client brief pre-check. ponytail: no SSE reconnect.
