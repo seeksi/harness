@@ -15,9 +15,8 @@
 // get long enough for it to matter.
 "use strict";
 
-const { parseArgs } = require("node:util");
 const { spawn } = require("node:child_process");
-const { realpathSync, existsSync, accessSync, constants } = require("node:fs");
+const { realpathSync, existsSync, accessSync, statSync, constants } = require("node:fs");
 const path = require("node:path");
 
 const DEFAULT_URL = process.env.GANTRY_URL ?? "http://127.0.0.1:3000";
@@ -35,12 +34,60 @@ function die(msg) {
   process.exit(1);
 }
 
+// util.parseArgs needs Node >= 18.3 (and its `default` >= 18.11); the floor here is
+// plain 18, so parse by hand. Long options only, --flag=value or --flag value.
+function parseArgs({ args, options, allowPositionals = false }) {
+  const values = {};
+  const positionals = [];
+  for (const [name, spec] of Object.entries(options)) {
+    if (spec.default !== undefined) values[name] = spec.multiple ? [...spec.default] : spec.default;
+  }
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") {
+      positionals.push(...args.slice(i + 1));
+      break;
+    }
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      const spec = options[name];
+      if (!spec) die(`unknown option '--${name}'`);
+      if (spec.type === "boolean") {
+        if (eq !== -1) die(`option '--${name}' does not take a value`);
+        values[name] = true;
+      } else {
+        const val = eq !== -1 ? arg.slice(eq + 1) : args[++i];
+        if (val === undefined) die(`option '--${name}' needs a value`);
+        if (spec.multiple) (values[name] ??= []).push(val);
+        else values[name] = val;
+      }
+    } else if (arg.startsWith("-") && arg !== "-") {
+      die(`unknown option '${arg}' (long options only)`);
+    } else {
+      positionals.push(arg);
+    }
+  }
+  if (!allowPositionals && positionals.length > 0) die(`unexpected argument '${positionals[0]}'`);
+  return { values, positionals };
+}
+
 function usage() {
   console.log(`usage:
   gantry run "<brief>" [--lane <brief>]... [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
   gantry status [--url <base>]`);
   process.exit(2);
+}
+
+// A bad GANTRY_URL/--url would otherwise surface as a raw ERR_INVALID_URL stack.
+function baseUrl(raw) {
+  try {
+    new URL(raw);
+  } catch {
+    die(`invalid console URL: ${raw}`);
+  }
+  return raw;
 }
 
 // CSRF headers the console requires on mutating routes (mirrors lib/server/csrf.ts).
@@ -115,8 +162,11 @@ function renderEvent(env) {
       const tok = p.inputTokens + p.outputTokens + p.cacheReadTokens + p.cacheCreationTokens;
       return `${dim(t)} usage ${p.laneId ?? "run"} ${tok} tok $${p.costUsd.toFixed(4)}`;
     }
-    case "health":
-      return `${dim(t)} health ${env.payload.verdict}${env.payload.lifecycle ? ` → ${env.payload.lifecycle === "done" ? green("done") : red(env.payload.lifecycle)}` : ""}`;
+    case "health": {
+      const lc = env.payload.lifecycle;
+      const mark = lc === "done" ? green(lc) : lc === "failed" ? red(lc) : amber(lc);
+      return `${dim(t)} health ${env.payload.verdict}${lc ? ` → ${mark}` : ""}`;
+    }
     case "trace":
       return null; // per-tool-call ticks — too chatty for a terminal tail
     case "sync":
@@ -129,7 +179,13 @@ function renderEvent(env) {
 // Follow /api/fleet/stream, print this run's events, resolve on the daemon's TERMINAL
 // health lifecycle ("done"/"failed" only — the bridge also emits lifecycle:"running").
 async function followRun(base, runId) {
-  const res = await fetch(new URL("/api/fleet/stream", base), { headers: { accept: "text/event-stream" } });
+  let res;
+  try {
+    res = await fetch(new URL("/api/fleet/stream", base), { headers: { accept: "text/event-stream" } });
+  } catch {
+    console.error(amber(`stream connect failed — run ${runId} continues server-side (check: gantry status)`));
+    return "unknown";
+  }
   if (!res.ok || !res.body) die(`stream failed: ${res.status}`);
   const decoder = new TextDecoder();
   let buf = "";
@@ -183,11 +239,16 @@ async function cmdRun(base, brief, opts) {
 // The daemon requires an ABSOLUTE claude binary (minimal agent PATH can't resolve one) —
 // enforce that on the env override too, not just the PATH fallback.
 function findClaude() {
+  // accessSync(X_OK) passes for directories too — require a regular file.
+  const isExecutableFile = (p) => {
+    accessSync(p, constants.X_OK);
+    return statSync(p).isFile();
+  };
   const fromEnv = process.env.AGENT_CLI_PATH;
   if (fromEnv) {
     if (!path.isAbsolute(fromEnv)) die(`AGENT_CLI_PATH must be absolute: ${fromEnv}`);
     try {
-      accessSync(fromEnv, constants.X_OK);
+      if (!isExecutableFile(fromEnv)) throw new Error("not a file");
     } catch {
       die(`AGENT_CLI_PATH is not an executable file: ${fromEnv}`);
     }
@@ -197,8 +258,7 @@ function findClaude() {
     if (!dir) continue;
     const cand = path.join(dir, "claude");
     try {
-      accessSync(cand, constants.X_OK);
-      return realpathSync(cand);
+      if (isExecutableFile(cand)) return realpathSync(cand);
     } catch {
       /* keep looking */
     }
@@ -206,10 +266,15 @@ function findClaude() {
   die("claude CLI not found on PATH — set AGENT_CLI_PATH to the absolute binary");
 }
 
-// Env vars that flip the console into live/agent-exec mode. `up` owns ALL of them:
-// set in live mode, force-removed in fixture mode (an inherited HARNESS_LIVE=1 in the
-// operator's shell must not turn a fixture demo into live agent execution).
-const LIVE_ENV = ["HARNESS_LIVE", "ENABLE_AGENT_EXEC", "AGENT_ALLOW_DIRECT", "AGENT_CLI_PATH", "LANE_CONCURRENCY", "AGENT_HOME"];
+// Every env var that alters live/agent-exec behavior in the console. `up` owns ALL of
+// them: force-removed first, the core five re-set in live mode only (an inherited
+// HARNESS_LIVE=1 or ENABLE_PROMOTE_TO_MAIN=1 in the operator's shell must not ride
+// into a fixture demo or a live session silently).
+const LIVE_ENV = [
+  "HARNESS_LIVE", "ENABLE_AGENT_EXEC", "AGENT_ALLOW_DIRECT", "AGENT_CLI_PATH", "LANE_CONCURRENCY",
+  "AGENT_HOME", "ENABLE_PROMOTE_TO_MAIN", "AGENT_ISOLATED_HOME", "AGENT_USER", "AGENT_SUDO_PATH",
+  "AGENT_PATH", "AGENT_TIMEOUT_MS",
+];
 
 function cmdUp(opts) {
   // bin/gantry lives in the repo; a ~/.local/bin symlink realpaths back here.
@@ -249,7 +314,7 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === "status") {
     const { values } = parseArgs({ args: rest, options: { url: { type: "string", default: DEFAULT_URL } } });
-    await cmdStatus(values.url);
+    await cmdStatus(baseUrl(values.url));
   } else if (cmd === "run") {
     const { values, positionals } = parseArgs({
       args: rest,
@@ -265,7 +330,7 @@ async function main() {
     if (positionals.length > 1) die(`one brief only — quote it: gantry run "${positionals.join(" ")}"`);
     if (!["auto", "haiku", "sonnet", "opus"].includes(values.model)) die("--model must be auto|haiku|sonnet|opus");
     if (values.lane.length > 4) die("at most 4 --lane briefs");
-    await cmdRun(values.url, positionals[0], { ...values, follow: !values["no-follow"] });
+    await cmdRun(baseUrl(values.url), positionals[0], { ...values, follow: !values["no-follow"] });
   } else if (cmd === "up") {
     const { values } = parseArgs({
       args: rest,
@@ -283,6 +348,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  if (err?.code?.startsWith?.("ERR_PARSE_ARGS")) die(err.message);
-  throw err;
+  console.error(err);
+  process.exit(1);
 });
