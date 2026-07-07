@@ -83,9 +83,13 @@ overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts
    repo safe); prints quickstart + env docs. Idempotent, verified: double-install,
    uninstall, reinstall, foreign-file/symlink refusal.
 
-5. **Name rollout**: `/brand` page currently proposes PHOSPHOR/GANTRY/RUNBOARD — GANTRY is chosen;
-   update the app wordmark/header ("HARNESS · mission control" → GANTRY) and `/brand` to reflect
-   the pick, OR leave `/brand` as a design artifact. Confirm with user how far to rebrand the UI.
+5. **Name rollout** — DONE 2026-07-07 (user-confirmed scope: wordmark+title → GANTRY, keep
+   "mission control" subtitle, keep /brand as a design artifact with GANTRY marked chosen).
+   layout.tsx metadata title "GANTRY · mission control"; FleetHome wordmark GANTRY; /brand
+   renders the GANTRY card full-strength w/ "✓ chosen", runners-up dimmed. Env vars/protocol
+   names (HARNESS_LIVE, HARNESS_REPO, x-harness-request, harness.sh) deliberately untouched —
+   the harness is the engine, GANTRY is the product. Verified visually in fixture mode;
+   351/351 tests, eslint + build clean.
 
 ## Decisions already made (don't relitigate)
 - Direct mode + Bash for the local build agent — intentional, gated, live-verified. Not a

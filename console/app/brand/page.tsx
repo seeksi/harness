@@ -1,23 +1,24 @@
-// console/app/brand/page.tsx — /brand: three product-name proposals (§3), each set
-// as an Oxanium wordmark on the CRT tokens, with a one-line rationale. Pure display
-// — the operator picks later; this build does NOT rename anything ("Umbrella"/
-// "HARNESS" stay wherever they already appear). Static server component, no data
-// dependencies.
+// console/app/brand/page.tsx — /brand: the name decision, kept as a design artifact.
+// GANTRY was operator-picked 2026-07-06 from three proposals (§3); the winning card
+// renders full-strength, the runners-up stay dimmed for the record. Static server
+// component, no data dependencies.
 import Link from "next/link";
 
 interface NameProposal {
   name: string;
   rationale: string;
+  chosen?: boolean;
 }
 
 const PROPOSALS: NameProposal[] = [
   {
-    name: "PHOSPHOR",
-    rationale: "Names the console's own visual identity — amber phosphor is the interface voice everywhere else on screen.",
-  },
-  {
     name: "GANTRY",
     rationale: "An industrial structure built to carry and steer heavy work across lanes — the mission-control energy in one word.",
+    chosen: true,
+  },
+  {
+    name: "PHOSPHOR",
+    rationale: "Names the console's own visual identity — amber phosphor is the interface voice everywhere else on screen.",
   },
   {
     name: "RUNBOARD",
@@ -38,7 +39,7 @@ export default function Page() {
           </span>
         </div>
         <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>
-          operator picks later — nothing renamed by this page
+          GANTRY chosen 2026-07-06 — page kept as a design artifact
         </span>
       </header>
 
@@ -46,29 +47,37 @@ export default function Page() {
         {PROPOSALS.map((p) => (
           <section
             key={p.name}
-            aria-label={`name proposal: ${p.name}`}
+            aria-label={`name proposal: ${p.name}${p.chosen ? " (chosen)" : ""}`}
             style={{
               padding: 24,
               borderRadius: "var(--radius)",
               background: "var(--surface-1)",
-              border: "1px solid var(--amber-line)",
+              border: p.chosen ? "1px solid var(--amber)" : "1px solid var(--amber-line)",
               display: "flex",
               flexDirection: "column",
               gap: 12,
+              opacity: p.chosen ? 1 : 0.55,
             }}
           >
-            <div
-              className="display"
-              style={{
-                fontSize: "clamp(28px, 6vw, 40px)",
-                fontWeight: 700,
-                color: "var(--amber)",
-                letterSpacing: "0.03em",
-                lineHeight: 1.1,
-                wordBreak: "break-word",
-              }}
-            >
-              {p.name}
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <div
+                className="display"
+                style={{
+                  fontSize: "clamp(28px, 6vw, 40px)",
+                  fontWeight: 700,
+                  color: p.chosen ? "var(--amber)" : "var(--text-dim)",
+                  letterSpacing: "0.03em",
+                  lineHeight: 1.1,
+                  wordBreak: "break-word",
+                }}
+              >
+                {p.name}
+              </div>
+              {p.chosen && (
+                <span className="mono" style={{ fontSize: 11, color: "var(--amber)" }}>
+                  ✓ chosen
+                </span>
+              )}
             </div>
             <p style={{ margin: 0, fontSize: 13, color: "var(--text-dim)", lineHeight: 1.5 }}>{p.rationale}</p>
           </section>

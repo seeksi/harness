@@ -218,7 +218,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
     <main className="console-shell">
       <header className="topbar">
         <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          <span className="display" style={{ fontSize: 24, fontWeight: 700, color: "var(--amber)", letterSpacing: "0.04em" }}>HARNESS</span>
+          <span className="display" style={{ fontSize: 24, fontWeight: 700, color: "var(--amber)", letterSpacing: "0.04em" }}>GANTRY</span>
           <span className="mono" style={{ fontSize: 11, color: "var(--text-faint)" }}>mission control</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>

@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono"
 const oxanium = Oxanium({ subsets: ["latin"], variable: "--font-oxanium", weight: ["500", "600", "700"], display: "swap" });
 
 export const metadata: Metadata = {
-  title: "HARNESS · mission control",
+  title: "GANTRY · mission control",
   description: "Multi-project agent mission control — launch, watch, and steer harness runs.",
 };
 
