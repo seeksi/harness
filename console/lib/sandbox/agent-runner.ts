@@ -507,7 +507,7 @@ export function spawnAgent(
           );
         }
         if (process.env.AGENT_HOME === undefined) {
-          isolatedHome = ensureAgentHome();
+          isolatedHome = ensureAgentHome(spec.slug); // per-lane home — concurrent-lane safe
         }
       }
     } catch (e) {

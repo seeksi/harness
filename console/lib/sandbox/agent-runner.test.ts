@@ -676,8 +676,9 @@ describe("spawnAgent — isolated agent HOME (direct-mode default)", () => {
       return child as unknown as ChildProcess;
     });
     await spawnAgent(spec(), { spawnFn: spawnFn as never });
-    expect(capturedEnv!.HOME).toBe(isolated);
-    expect(fs.existsSync(path.join(isolated, ".claude", ".credentials.json"))).toBe(true);
+    // Per-lane home: <base>/<slug> (AGENT_ISOLATED_HOME is the base dir).
+    expect(capturedEnv!.HOME).toBe(path.join(isolated, "lane-x"));
+    expect(fs.existsSync(path.join(isolated, "lane-x", ".claude", ".credentials.json"))).toBe(true);
   });
 
   it("FAILS CLOSED (no spawn, error audited) when provisioning fails — never falls back to the operator HOME", async () => {

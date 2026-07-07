@@ -4,8 +4,10 @@
 // CLAUDE.md instructions, settings, agents, and MCP/deferred-tool wiring all leak into
 // the agent's context and trace (noisy, and couples the agent to personal config).
 //
-// The isolated HOME is REBUILT FROM SCRATCH on every spawn (wipe + recreate, guarded by
-// a marker file so a misconfigured path is never destroyed). That is the whole guarantee:
+// Homes are PER LANE (<base>/<slug>, default base ~/.gantry/agent-homes) so concurrent
+// lanes never share or wipe each other's HOME. Each is REBUILT FROM SCRATCH on every
+// spawn (wipe + recreate, guarded by a marker file so a misconfigured path is never
+// destroyed). That is the whole guarantee:
 // a Bash-capable agent could plant persistent config in its own HOME during a run
 // (~/.claude/CLAUDE.md, settings, .npmrc, even its .gitconfig) to contaminate LATER runs
 // — a full rebuild makes every spawn start from exactly two provisioned artifacts:
@@ -40,19 +42,27 @@ const MARKER_CONTENT = "gantry-agent-home v1\n";
 // The operator credential is a small JSON; anything bigger is not the file we think it is.
 const MAX_CRED_BYTES = 64 * 1024;
 
-/** Resolve the isolated-home target: AGENT_ISOLATED_HOME (must be a non-empty absolute
- * path — a set-but-empty value is refused loudly rather than silently falling back, so a
- * typo'd `AGENT_ISOLATED_HOME= cmd` can never resolve anywhere surprising) or the
- * default ~/.gantry/agent-home. */
-function resolveHome(): string {
+// Same shape the registry mints (registry.ts SLUG) — the slug becomes a path component
+// of the lane home, so it is re-validated here (defense in depth, fail closed).
+const SLUG_RE = /^[a-z][a-z0-9-]{0,30}$/;
+
+/** Resolve the PER-LANE isolated-home target: <base>/<slug>, where base is
+ * AGENT_ISOLATED_HOME (must be a non-empty absolute path — a set-but-empty value is
+ * refused loudly rather than silently falling back, so a typo'd `AGENT_ISOLATED_HOME= cmd`
+ * can never resolve anywhere surprising) or the default ~/.gantry/agent-homes. Per-lane
+ * homes are what make CONCURRENT lanes safe: each lane wipes+rebuilds only its own dir. */
+function resolveHome(slug: string): string {
+  if (typeof slug !== "string" || !SLUG_RE.test(slug)) {
+    throw new AgentExecError(`invalid lane slug for agent home (must match ${SLUG_RE}): ${JSON.stringify(slug)}`);
+  }
   const raw = process.env.AGENT_ISOLATED_HOME;
-  if (raw === undefined) return path.join(os.homedir(), ".gantry", "agent-home");
+  if (raw === undefined) return path.join(os.homedir(), ".gantry", "agent-homes", slug);
   if (raw === "" || !path.isAbsolute(raw)) {
     throw new AgentExecError(
       `AGENT_ISOLATED_HOME must be a non-empty absolute path (or unset for the default): ${JSON.stringify(raw)}`
     );
   }
-  return path.resolve(raw);
+  return path.join(path.resolve(raw), slug);
 }
 
 /** Realpath of `p` resolved through its DEEPEST EXISTING ancestor — i.e. where the path
@@ -147,15 +157,73 @@ function readOperatorCredential(): Buffer {
   }
 }
 
+/** The only thing this module ever deletes is a real directory carrying an authentic
+ * marker (regular non-symlink file, exact content) — i.e. one IT created. Anything else
+ * fails closed, so a misconfigured path can never rm -rf an operator directory. */
+function assertDeletableAgentHome(home: string, st: fs.Stats): void {
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new AgentExecError(`agent home path is not a real directory (symlink?): ${JSON.stringify(home)}`);
+  }
+  const markerPath = path.join(home, MARKER);
+  let mst: fs.Stats | undefined;
+  try {
+    mst = fs.lstatSync(markerPath);
+  } catch {
+    /* no marker */
+  }
+  if (
+    !mst ||
+    mst.isSymbolicLink() ||
+    !mst.isFile() ||
+    mst.size !== Buffer.byteLength(MARKER_CONTENT) || // size precheck: never slurp an oversized plant
+    fs.readFileSync(markerPath, "utf8") !== MARKER_CONTENT
+  ) {
+    throw new AgentExecError(
+      `refusing to wipe a directory this provisioner did not create (missing/invalid ${MARKER}): ` +
+        `${JSON.stringify(home)} — delete it manually if it is a stale agent home`
+    );
+  }
+}
+
 /**
- * Provision the isolated agent HOME (full rebuild) and return its absolute path.
- * Called before every direct-mode spawn. Throws AgentExecError (fail closed) if the
- * operator credential is missing/irregular, the target's real destination is inside the
- * repo/worktrees, the path resolves through a symlink, or the target exists without an
- * authentic marker. On refusal nothing has been created, modified, or deleted.
+ * Remove a lane's isolated HOME after its run. Lane slugs are RUN-UNIQUE
+ * (lane-<sha16(runId)>-<i>), so without cleanup every run would strand one
+ * credential-bearing home per lane forever — the daemon calls this best-effort in its
+ * run finalizer. Same fail-closed bar as provisioning: only an authentic marked
+ * directory (reached without symlinks) is ever deleted; an absent dir is a no-op;
+ * any suspicious target throws and leaves the world untouched.
  */
-export function ensureAgentHome(): string {
-  const home = resolveHome();
+export function removeAgentHome(slug: string): void {
+  const home = resolveHome(slug);
+  const realHome = realDestination(home);
+  if (realHome !== expectedRealFor(home)) {
+    throw new AgentExecError(`agent home resolves through a symlink (use the canonical path): ${JSON.stringify(home)}`);
+  }
+  // Same ban as provisioning, BEFORE even the existence probe: a misconfigured base
+  // inside the repo/worktrees must never let a marker (spoofed or planted) authorize an
+  // rmSync of project data. Symmetric with ensureAgentHome — remover and provisioner
+  // refuse the exact same targets.
+  assertOutsideRepoAndWorktrees(home, realHome);
+  let st: fs.Stats | undefined;
+  try {
+    st = fs.lstatSync(home);
+  } catch {
+    return; // never provisioned (drop mode / legacy AGENT_HOME / agent never spawned)
+  }
+  assertDeletableAgentHome(home, st);
+  fs.rmSync(home, { recursive: true, force: true });
+}
+
+/**
+ * Provision the lane's isolated agent HOME (full rebuild of <base>/<slug>) and return its
+ * absolute path. Called before every direct-mode spawn. Throws AgentExecError (fail
+ * closed) if the slug is malformed, the operator credential is missing/irregular, the
+ * target's real destination is inside the repo/worktrees, the path resolves through a
+ * symlink, or the target exists without an authentic marker. On refusal nothing has been
+ * created, modified, or deleted. Concurrent lanes are safe: each wipes only its own dir.
+ */
+export function ensureAgentHome(slug: string): string {
+  const home = resolveHome(slug);
 
   // ALL validation before ANY mutation, in order: symlink canonicality (would this path
   // land where it lexically claims?), repo/worktrees ban on lexical + real destination,
@@ -176,28 +244,7 @@ export function ensureAgentHome(): string {
     /* fresh path */
   }
   if (st) {
-    if (st.isSymbolicLink() || !st.isDirectory()) {
-      throw new AgentExecError(`agent home path is not a real directory (symlink?): ${JSON.stringify(home)}`);
-    }
-    const markerPath = path.join(home, MARKER);
-    let mst: fs.Stats | undefined;
-    try {
-      mst = fs.lstatSync(markerPath);
-    } catch {
-      /* no marker */
-    }
-    if (
-      !mst ||
-      mst.isSymbolicLink() ||
-      !mst.isFile() ||
-      mst.size !== Buffer.byteLength(MARKER_CONTENT) || // size precheck: never slurp an oversized plant
-      fs.readFileSync(markerPath, "utf8") !== MARKER_CONTENT
-    ) {
-      throw new AgentExecError(
-        `refusing to wipe a directory this provisioner did not create (missing/invalid ${MARKER}): ` +
-          `${JSON.stringify(home)} — delete it manually if it is a stale agent home`
-      );
-    }
+    assertDeletableAgentHome(home, st);
     fs.rmSync(home, { recursive: true, force: true });
   }
   fs.mkdirSync(home, { recursive: true, mode: 0o700 });
@@ -241,6 +288,6 @@ export function ensureAgentHome(): string {
 // the next spawn re-copies; if Anthropic's refresh tokens are single-use-rotating, that
 // refresh could invalidate the operator's session (rare: runs are timeout-capped well
 // under token lifetime). skipped: shared-credential locking / refresh reconciliation;
-// add if operator logouts ever correlate with long agent runs. Also skipped: per-lane
-// homes — the full-wipe rebuild assumes ONE agent at a time (the daemon's single-slot
-// invariant); multi-lane concurrency needs per-lane home dirs before it can ship.
+// add if operator logouts ever correlate with long agent runs. (Per-lane homes shipped:
+// <base>/<slug> per lane, so N concurrent lanes never wipe each other. N lanes hold the
+// one operator credential as N independent copies — same rotation caveat, N× likelier.)

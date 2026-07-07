@@ -167,3 +167,77 @@ checkpoint: 2026-07-06 (context-guard soft limit; implementation done, tests gre
 - r6: **PASS.** Final gates: sandbox 72/72, full console 324/324, eslint clean, next build clean.
 - Merged to main; HANDOFF.fix-round.md deleted. Open (unchanged): haiku alias quirk; copy-at-spawn refresh-rotation ceiling
   (ponytail note in agent-home.ts); per-lane homes required before multi-lane.
+
+## Multi-lane concurrency — design checkpoint (2026-07-06 session 3, feat/multi-lane)
+DECISIONS (made inline, consistent with approved posture — don't relitigate):
+- Concurrent DIRECT-mode lanes accepted: agent already runs as operator w/ Bash (cwd is soft
+  confinement), so sibling-worktree readability adds no NEW risk vs the approved single-lane
+  posture. Drop mode keeps per-lane uids (laneUser(i) already in console agent-runner).
+- Per-lane isolated homes (prereq from agent-home.ts ponytail): ensureAgentHome(slug) →
+  <base>/<slug>, base = ~/.gantry/agent-homes (NEW plural path) or AGENT_ISOLATED_HOME
+  (reinterpreted as BASE dir). Each lane home has own marker, wiped+rebuilt per spawn.
+  Slug validated as path component. Old ~/.gantry/agent-home (singular) goes stale —
+  operator deletes once.
+- Daemon: RunPlan{runId, planFile, model, lanes:[{slug, brief}]}; slugs lane-<sha16>-<i>.
+  planRun takes laneBriefs[]. writePlanFile: one plan.jsonl line per lane (budget.py reads
+  batch). POST /api/runs accepts optional lanes:[briefs] (1..4, each ≤ cap); absent ⇒ [brief].
+- Execution shape (ported from web/lib/daemon/daemon.ts): budget → integ-start → wt-new
+  SERIAL per lane → builds CONCURRENT via asyncPool(LANE_CONCURRENCY, allSettled semantics)
+  → if ANY lane rejected/nonzero: fail whole run BEFORE any merge → finalize SERIAL in lane
+  order per lane {wt-commit → wt-verify(B) → mintSession+relocate+trace(D) → integ-merge(C)}.
+  All harness.sh git ops stay serial; only agent builds run concurrently.
+- LANE_CONCURRENCY env, default 1 (safe, mirrors web/ cross-review ruling), clamp 1..4.
+  Operator raises locally; VPS drop mode needs agent-N accounts to exist first.
+- OUT OF SCOPE this pass (follow-ups): decompose agent (brief → N disjoint lanes via LLM),
+  handoff-respawn loop (console runAgentInSandbox lacks handoffFs seam), per-lane model.
+FILES: sandbox/agent-home.ts(+test) slug param; sandbox/agent-runner.ts(+test) pass
+spec.slug; server/daemon.ts(+test) lanes machinery; app/api/runs/route.ts(+test) lanes[].
+Then gates → cross-review (fresh Codex thread, new diff) → merge.
+
+## Multi-lane — implementation checkpoint (2026-07-06 session 4, feat/multi-lane)
+DONE (uncommitted, tests green 339/339 from `cd console && npx vitest run`):
+- daemon.ts reworked per checkpoint: RunPlan{runId,planFile,model,lanes:[{slug,brief}]};
+  planRun(runId,routing,laneBriefs) slugs `lane-<sha16>-<i>`; writePlanFile one line/lane;
+  laneConcurrency() env read at RUN START (deliberate deviation from web's module-load
+  const — testable without reimport; clamp 1..4); asyncPool ported verbatim (allSettled
+  drain). Live block: wt-new SERIAL → builds CONCURRENT (nonzero-exit throws INSIDE worker
+  so pool check only inspects rejections; usage emitted per lane w/ laneId; user:laneUser(i)
+  for drop mode) → any-rejection ⇒ HarnessExitError BEFORE any commit/merge → finalize+merge
+  SERIAL per lane {wt-commit → wt-verify(B) → GateD fail-closed(session+relocate+trace) →
+  integ-merge(C)}. ENABLE_AGENT_EXEC unset ⇒ agentRan=false, GateD skipped, flow unchanged.
+- StartRunInput.laneBriefs?: string[] (absent ⇒ [brief]; brief stays display summary).
+- route.ts: lanes[] optional 1..4, trimmed, non-empty, ≤BRIEF_MAX each; ALLOWED_FIELDS+=lanes.
+- daemon.test.ts: planRun rewritten (2 cases incl. slug-never-from-brief), sessionId regex
+  → lane-<hash>-0, + 4 multi-lane cases (happy-path event order per lane; one-lane-fails
+  blocks ALL commits/merges; default sequential equivalence; CONCURRENCY=2 overlap via
+  deadlock-if-sequential barrier). NEW app/api/runs/route.test.ts (8 cases, mocks daemon+
+  discovery).
+NEXT: eslint + next build → cross-review (FRESH Codex thread, diff = git diff main --
+console/ + this checkpoint as spec) → one commit → merge main → push → update HANDOFF.md
+agenda + agent-exec-gate memory (per-lane homes ~/.gantry/agent-homes/<slug>, stale
+singular dir, LANE_CONCURRENCY env) → delete HANDOFF.multi-lane.md → offer 2-lane smoke.
+
+## Multi-lane — cross-review r2 checkpoint (2026-07-07 session 5)
+r1 fix round DONE (all 7 dispositions from HANDOFF.multi-lane.md applied): daemon phase
+split (finalize-ALL then merge-ALL), planRun re-asserts 1..4 non-empty briefs, undefined-
+only laneBriefs fallback, cross-lane session-id distinctness (fail closed pre-commit),
+cleanupHome seam (default removeAgentHome) best-effort per planned lane in finally (plan
+hoisted; TS note: plan narrowing doesn't cross the asyncPool closure — model captured),
+route.ts validates TRIMMED lane length. Tests +11: planRun throws, phase-split zero-merge,
+dupe sessions, clamp abc/99, cleanup-per-lane-even-throwing, removeAgentHome×4, route trim.
+Codex r2 (thread 019f3b5d-405d-7362-bf02-abd120f52686): r1 findings RESOLVED; BLOCK w/ 1
+NEW High — removeAgentHome lacked the repo/worktrees ban ensureAgentHome has → FIXED
+(assertOutsideRepoAndWorktrees before existence probe, symmetric; + fixture-repo test w/
+authentic marker surviving). Gates: 350/350. Claude r2 subagent review in flight.
+NEXT: Claude r2 verdict → reconcile → eslint+build → Codex r3 (same thread, regenerated
+diff at scratchpad multi-lane-r2.diff path pattern) until PASS → then HANDOFF step 6
+(commit/merge/push/docs/memory/delete HANDOFF.multi-lane.md) + step 7 (offer smoke).
+
+status: COMPLETE 2026-07-07 — Claude r2 PASS (3 Lows: [] end-to-end test ADDED; stale
+singular home = operator note; laneConcurrency comment wording FIXED). Codex r3 PASS.
+Final gates 351/351 + eslint + next build clean. Merged feat/multi-lane → main.
+Follow-ups logged (non-gating, decision 7): laneUser/BASE_AGENT_USER module-load const
+untestable without reimport; ensureAgentHome sync execFileSync git-config per spawn
+(cache identity someday); openat-anchored writes if posture tightens; stale singular
+~/.gantry/agent-home — operator deletes once; decompose agent / handoff-respawn loop /
+per-lane model remain out-of-scope follow-ups.

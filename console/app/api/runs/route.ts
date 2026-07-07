@@ -4,7 +4,9 @@
 //   - projectId MUST match a discovered project (an arbitrary path is rejected — it never
 //     becomes a cwd or a provenance value);
 //   - brief is a non-empty, length-capped string (opaque task text — not provenance);
-//   - routing is an OPTIONAL enum whitelist (auto|haiku|sonnet|opus).
+//   - routing is an OPTIONAL enum whitelist (auto|haiku|sonnet|opus);
+//   - lanes is an OPTIONAL array of 1..4 per-lane briefs (same caps as brief); absent ⇒
+//     a single lane built from brief.
 // CSRF-guarded. LIVE-gated: with HARNESS_LIVE unset this returns 503 and the client keeps
 // its fixture-mode optimistic launch (regression-critical — the fixture path is untouched).
 export const runtime = "nodejs";
@@ -16,8 +18,9 @@ import { discoverProjects } from "@/lib/server/discovery";
 import { startRun, currentSlot, SlotTakenError, type Routing } from "@/lib/server/daemon";
 
 const BRIEF_MAX = 4000; // length cap (§5 brief is required, non-empty)
+const LANES_MAX = 4; // multi-lane cap (matches the daemon's LANE_CONCURRENCY clamp)
 const VALID_ROUTING: readonly Routing[] = ["auto", "haiku", "sonnet", "opus"];
-const ALLOWED_FIELDS = new Set(["projectId", "brief", "routing"]);
+const ALLOWED_FIELDS = new Set(["projectId", "brief", "routing", "lanes"]);
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!csrfOk(req)) {
@@ -33,6 +36,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let projectId: string;
   let brief: string;
   let routing: Routing = "auto";
+  let laneBriefs: string[] | undefined;
   try {
     const raw = (await req.json()) as Record<string, unknown>;
     for (const key of Object.keys(raw)) {
@@ -58,6 +62,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       routing = raw.routing as Routing;
     }
+    if (raw.lanes !== undefined) {
+      if (!Array.isArray(raw.lanes) || raw.lanes.length < 1 || raw.lanes.length > LANES_MAX) {
+        return NextResponse.json({ error: `lanes must be an array of 1..${LANES_MAX} briefs` }, { status: 422 });
+      }
+      const trimmed: string[] = [];
+      for (const lane of raw.lanes) {
+        if (typeof lane !== "string") {
+          return NextResponse.json({ error: "each lane brief must be a non-empty string" }, { status: 422 });
+        }
+        const t = lane.trim();
+        if (t === "") {
+          return NextResponse.json({ error: "each lane brief must be a non-empty string" }, { status: 422 });
+        }
+        if (t.length > BRIEF_MAX) {
+          return NextResponse.json({ error: `lane brief exceeds ${BRIEF_MAX} chars` }, { status: 422 });
+        }
+        trimmed.push(t);
+      }
+      laneBriefs = trimmed;
+    }
     projectId = raw.projectId;
     brief = raw.brief.trim();
   } catch {
@@ -75,7 +99,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const runId = crypto.randomBytes(12).toString("hex");
 
   try {
-    startRun({ runId, projectId: project.id, projectName: project.name, brief, routing });
+    startRun({ runId, projectId: project.id, projectName: project.name, brief, routing, laneBriefs });
     return NextResponse.json({ id: runId, live: true }, { status: 201 });
   } catch (e) {
     if (e instanceof SlotTakenError) {
