@@ -1,0 +1,255 @@
+#!/usr/bin/env node
+// gantry — thin CLI front-end for the GANTRY console (console/ Next.js app).
+// Zero deps, Node >= 18 (global fetch). The console API is the engine; this only
+// drives it: POST /api/runs + stream /api/fleet/stream (run), spawn `next start`
+// with the proven live env (up), GET /api/runs + /api/projects (status).
+//
+//   gantry run "<brief>" [--lane <brief>]... [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
+//   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
+//   gantry status [--url <base>]
+//
+// ponytail: no SSE auto-reconnect — a dropped stream exits with a resume hint
+// (the run keeps going server-side); add reconnect-with-Last-Event-ID if runs
+// get long enough for it to matter.
+
+import { parseArgs } from "node:util";
+import { spawn } from "node:child_process";
+import { realpathSync, existsSync, accessSync, constants } from "node:fs";
+import path from "node:path";
+
+const DEFAULT_URL = process.env.GANTRY_URL ?? "http://127.0.0.1:3000";
+const PHASE_LABELS = { 1: "decompose", 2: "build", 3: "route-cost", 4: "cross-review", 5: "merge", 6: "eval+promote" };
+const tty = process.stdout.isTTY;
+const c = (code, s) => (tty ? `\x1b[${code}m${s}\x1b[0m` : s);
+const dim = (s) => c("2", s);
+const red = (s) => c("31", s);
+const green = (s) => c("32", s);
+const amber = (s) => c("33", s);
+const bold = (s) => c("1", s);
+
+function die(msg) {
+  console.error(red(`gantry: ${msg}`));
+  process.exit(1);
+}
+
+function usage() {
+  console.log(`usage:
+  gantry run "<brief>" [--lane <brief>]... [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
+  gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
+  gantry status [--url <base>]`);
+  process.exit(2);
+}
+
+// CSRF headers the console requires on mutating routes (mirrors lib/server/csrf.ts).
+function csrfHeaders(base) {
+  return {
+    "content-type": "application/json",
+    "x-harness-request": "1",
+    "sec-fetch-site": "same-origin",
+    origin: new URL(base).origin,
+  };
+}
+
+async function api(base, route, init) {
+  let res;
+  try {
+    res = await fetch(new URL(route, base), init);
+  } catch {
+    die(`cannot reach console at ${base} — is the server up? (try: gantry up)`);
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) die(`${route} ${res.status}: ${body.error ?? "request failed"}`);
+  return body;
+}
+
+// --- status -------------------------------------------------------------------------
+async function cmdStatus(base) {
+  const [mode, { projects }] = await Promise.all([api(base, "/api/runs"), api(base, "/api/projects")]);
+  console.log(`console ${base}  live=${mode.live ? green("yes") : dim("no")}  slot=${mode.slot ? amber(mode.slot) : dim("free")}`);
+  for (const p of projects) {
+    console.log(`\n${bold(p.name)} (${p.id})`);
+    for (const r of p.recentRuns.slice(0, 5)) {
+      const mark = r.outcome === "done" ? green("done") : r.outcome === "failed" ? red("failed") : amber(r.outcome);
+      console.log(`  ${mark}  ${new Date(r.startedAt * 1000).toLocaleString()}  ${dim(r.brief.slice(0, 80))}`);
+    }
+    if (p.recentRuns.length === 0) console.log(dim("  no runs yet"));
+  }
+}
+
+// --- run ----------------------------------------------------------------------------
+async function resolveProject(base, wanted) {
+  const { projects } = await api(base, "/api/projects");
+  if (projects.length === 0) die("no projects discovered by the console");
+  if (wanted) {
+    const hit = projects.find((p) => p.id === wanted || p.name === wanted);
+    if (!hit) die(`unknown project '${wanted}' — known: ${projects.map((p) => p.name).join(", ")}`);
+    return hit;
+  }
+  if (projects.length === 1) return projects[0];
+  const cwdName = path.basename(process.cwd());
+  const hit = projects.find((p) => p.name === cwdName);
+  if (hit) return hit;
+  die(`multiple projects — pick one with --project: ${projects.map((p) => p.name).join(", ")}`);
+}
+
+function renderEvent(env) {
+  const t = new Date(env.ts * 1000).toTimeString().slice(0, 8);
+  switch (env.type) {
+    case "phase": {
+      const label = PHASE_LABELS[env.payload.phase] ?? env.payload.phase;
+      return `${dim(t)} phase ${label} ${env.payload.status === "done" ? green("done") : amber(env.payload.status)}`;
+    }
+    case "gate": {
+      const { id, status, summary } = env.payload;
+      const mark = status === "clear" || status === "approved" ? green(status) : status === "raised" || status === "rejected" ? red(status) : amber(status);
+      return `${dim(t)} gate ${bold(id)} ${mark} ${dim(summary)}`;
+    }
+    case "subtask":
+      return `${dim(t)} lane ${env.payload.id} ${amber(env.payload.status)}`;
+    case "usage": {
+      const p = env.payload;
+      const tok = p.inputTokens + p.outputTokens + p.cacheReadTokens + p.cacheCreationTokens;
+      return `${dim(t)} usage ${p.laneId ?? "run"} ${tok} tok $${p.costUsd.toFixed(4)}`;
+    }
+    case "health":
+      return `${dim(t)} health ${env.payload.verdict}${env.payload.lifecycle ? ` → ${env.payload.lifecycle === "done" ? green("done") : red(env.payload.lifecycle)}` : ""}`;
+    case "trace":
+      return null; // per-tool-call ticks — too chatty for a terminal tail
+    case "sync":
+      return null; // full-snapshot control frame
+    default:
+      return null;
+  }
+}
+
+// Follow /api/fleet/stream, print this run's events, resolve "done"/"failed" on the
+// terminal health lifecycle envelope the daemon emits.
+async function followRun(base, runId) {
+  const res = await fetch(new URL("/api/fleet/stream", base), { headers: { accept: "text/event-stream" } });
+  if (!res.ok || !res.body) die(`stream failed: ${res.status}`);
+  const decoder = new TextDecoder();
+  let buf = "";
+  for await (const chunk of res.body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let sep;
+    while ((sep = buf.indexOf("\n\n")) !== -1) {
+      const rawFrame = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      const data = rawFrame
+        .split("\n")
+        .filter((l) => l.startsWith("data: "))
+        .map((l) => l.slice(6))
+        .join("\n");
+      if (!data) continue; // ": ping" / ": open" comments
+      let env;
+      try {
+        env = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (env.runId !== runId) continue;
+      const line = renderEvent(env);
+      if (line) console.log(line);
+      if (env.type === "health" && env.payload.lifecycle) return env.payload.lifecycle;
+    }
+  }
+  console.error(amber(`stream dropped — run ${runId} continues server-side (check: gantry status)`));
+  return "unknown";
+}
+
+async function cmdRun(base, brief, opts) {
+  if (!brief) die('run needs a brief: gantry run "<brief>"');
+  const project = await resolveProject(base, opts.project);
+  const body = { projectId: project.id, brief, routing: opts.model };
+  if (opts.lane.length > 0) body.lanes = opts.lane;
+  const { id } = await api(base, "/api/runs", { method: "POST", headers: csrfHeaders(base), body: JSON.stringify(body) });
+  console.log(`run ${bold(id)} started on ${project.name}${opts.lane.length ? ` (${opts.lane.length} lanes)` : ""}`);
+  if (!opts.follow) return;
+  const outcome = await followRun(base, id);
+  if (outcome !== "done") process.exit(1);
+}
+
+// --- up -----------------------------------------------------------------------------
+function findClaude() {
+  if (process.env.AGENT_CLI_PATH) return process.env.AGENT_CLI_PATH;
+  for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    const cand = path.join(dir, "claude");
+    try {
+      accessSync(cand, constants.X_OK);
+      return realpathSync(cand);
+    } catch {
+      /* keep looking */
+    }
+  }
+  die("claude CLI not found on PATH — set AGENT_CLI_PATH to the absolute binary");
+}
+
+function cmdUp(opts) {
+  // bin/gantry lives in the repo; a ~/.local/bin symlink realpaths back here.
+  const repo = path.dirname(path.dirname(realpathSync(process.argv[1])));
+  const consoleDir = path.join(repo, "console");
+  if (!existsSync(path.join(consoleDir, ".next"))) {
+    die(`no production build — run: cd ${consoleDir} && npm run build`);
+  }
+  const env = { ...process.env, HARNESS_REPO: repo, CONSOLE_BASE_URL: `http://${opts.host}:${opts.port}` };
+  if (!opts.fixture) {
+    const lanes = Number(opts.lanes);
+    if (!Number.isInteger(lanes) || lanes < 1 || lanes > 4) die("--lanes must be 1..4");
+    Object.assign(env, {
+      HARNESS_LIVE: "1",
+      ENABLE_AGENT_EXEC: "1",
+      AGENT_ALLOW_DIRECT: "1",
+      AGENT_CLI_PATH: findClaude(),
+      LANE_CONCURRENCY: String(lanes),
+    });
+    delete env.AGENT_HOME; // isolated per-lane homes are the default; AGENT_HOME is a legacy override
+  }
+  console.log(`${bold("gantry up")} ${opts.fixture ? dim("(fixture mode)") : green("(live)")} → http://${opts.host}:${opts.port}`);
+  const child = spawn("npx", ["next", "start", "-H", opts.host, "-p", String(opts.port)], {
+    cwd: consoleDir,
+    env,
+    stdio: "inherit",
+  });
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
+// --- main ---------------------------------------------------------------------------
+const [cmd, ...rest] = process.argv.slice(2);
+try {
+  if (cmd === "status") {
+    const { values } = parseArgs({ args: rest, options: { url: { type: "string", default: DEFAULT_URL } } });
+    await cmdStatus(values.url);
+  } else if (cmd === "run") {
+    const { values, positionals } = parseArgs({
+      args: rest,
+      allowPositionals: true,
+      options: {
+        lane: { type: "string", multiple: true, default: [] },
+        project: { type: "string" },
+        model: { type: "string", default: "auto" },
+        url: { type: "string", default: DEFAULT_URL },
+        follow: { type: "boolean", default: true },
+        "no-follow": { type: "boolean", default: false },
+      },
+    });
+    if (!["auto", "haiku", "sonnet", "opus"].includes(values.model)) die("--model must be auto|haiku|sonnet|opus");
+    if (values.lane.length > 4) die("at most 4 --lane briefs");
+    await cmdRun(values.url, positionals[0], { ...values, follow: !values["no-follow"] });
+  } else if (cmd === "up") {
+    const { values } = parseArgs({
+      args: rest,
+      options: {
+        host: { type: "string", default: "127.0.0.1" },
+        port: { type: "string", default: "3000" },
+        lanes: { type: "string", default: "1" },
+        fixture: { type: "boolean", default: false },
+      },
+    });
+    cmdUp(values);
+  } else {
+    usage();
+  }
+} catch (err) {
+  if (err?.code?.startsWith?.("ERR_PARSE_ARGS")) die(err.message);
+  throw err;
+}
