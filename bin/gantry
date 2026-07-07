@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // gantry — thin CLI front-end for the GANTRY console (console/ Next.js app).
-// Zero deps, Node >= 18 (global fetch). The console API is the engine; this only
-// drives it: POST /api/runs + stream /api/fleet/stream (run), spawn `next start`
-// with the proven live env (up), GET /api/runs + /api/projects (status).
+// Zero deps, Node >= 18 (global fetch). CJS on purpose: this file has no extension,
+// and extensionless ESM only runs on Node >= 22.7 (module-syntax detection).
+// The console API is the engine; this only drives it: POST /api/runs + stream
+// /api/fleet/stream (run), spawn `next start` with the proven live env (up),
+// GET /api/runs + /api/projects (status).
 //
 //   gantry run "<brief>" [--lane <brief>]... [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
 //   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
@@ -11,11 +13,12 @@
 // ponytail: no SSE auto-reconnect — a dropped stream exits with a resume hint
 // (the run keeps going server-side); add reconnect-with-Last-Event-ID if runs
 // get long enough for it to matter.
+"use strict";
 
-import { parseArgs } from "node:util";
-import { spawn } from "node:child_process";
-import { realpathSync, existsSync, accessSync, constants } from "node:fs";
-import path from "node:path";
+const { parseArgs } = require("node:util");
+const { spawn } = require("node:child_process");
+const { realpathSync, existsSync, accessSync, constants } = require("node:fs");
+const path = require("node:path");
 
 const DEFAULT_URL = process.env.GANTRY_URL ?? "http://127.0.0.1:3000";
 const PHASE_LABELS = { 1: "decompose", 2: "build", 3: "route-cost", 4: "cross-review", 5: "merge", 6: "eval+promote" };
@@ -69,7 +72,8 @@ async function cmdStatus(base) {
   for (const p of projects) {
     console.log(`\n${bold(p.name)} (${p.id})`);
     for (const r of p.recentRuns.slice(0, 5)) {
-      const mark = r.outcome === "done" ? green("done") : r.outcome === "failed" ? red("failed") : amber(r.outcome);
+      const outcome = r.outcome ?? "running"; // in-flight rows persist outcome:null
+      const mark = outcome === "done" ? green(outcome) : outcome === "failed" ? red(outcome) : amber(outcome);
       console.log(`  ${mark}  ${new Date(r.startedAt * 1000).toLocaleString()}  ${dim(r.brief.slice(0, 80))}`);
     }
     if (p.recentRuns.length === 0) console.log(dim("  no runs yet"));
@@ -122,36 +126,42 @@ function renderEvent(env) {
   }
 }
 
-// Follow /api/fleet/stream, print this run's events, resolve "done"/"failed" on the
-// terminal health lifecycle envelope the daemon emits.
+// Follow /api/fleet/stream, print this run's events, resolve on the daemon's TERMINAL
+// health lifecycle ("done"/"failed" only — the bridge also emits lifecycle:"running").
 async function followRun(base, runId) {
   const res = await fetch(new URL("/api/fleet/stream", base), { headers: { accept: "text/event-stream" } });
   if (!res.ok || !res.body) die(`stream failed: ${res.status}`);
   const decoder = new TextDecoder();
   let buf = "";
-  for await (const chunk of res.body) {
-    buf += decoder.decode(chunk, { stream: true });
-    let sep;
-    while ((sep = buf.indexOf("\n\n")) !== -1) {
-      const rawFrame = buf.slice(0, sep);
-      buf = buf.slice(sep + 2);
-      const data = rawFrame
-        .split("\n")
-        .filter((l) => l.startsWith("data: "))
-        .map((l) => l.slice(6))
-        .join("\n");
-      if (!data) continue; // ": ping" / ": open" comments
-      let env;
-      try {
-        env = JSON.parse(data);
-      } catch {
-        continue;
+  try {
+    for await (const chunk of res.body) {
+      buf += decoder.decode(chunk, { stream: true });
+      let sep;
+      while ((sep = buf.indexOf("\n\n")) !== -1) {
+        const rawFrame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const data = rawFrame
+          .split("\n")
+          .filter((l) => l.startsWith("data: "))
+          .map((l) => l.slice(6))
+          .join("\n");
+        if (!data) continue; // ": ping" / ": open" comments
+        let env;
+        try {
+          env = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (env.runId !== runId) continue;
+        const line = renderEvent(env);
+        if (line) console.log(line);
+        if (env.type === "health" && (env.payload.lifecycle === "done" || env.payload.lifecycle === "failed")) {
+          return env.payload.lifecycle;
+        }
       }
-      if (env.runId !== runId) continue;
-      const line = renderEvent(env);
-      if (line) console.log(line);
-      if (env.type === "health" && env.payload.lifecycle) return env.payload.lifecycle;
     }
+  } catch {
+    /* mid-stream network error → same resume hint as a graceful drop */
   }
   console.error(amber(`stream dropped — run ${runId} continues server-side (check: gantry status)`));
   return "unknown";
@@ -170,9 +180,21 @@ async function cmdRun(base, brief, opts) {
 }
 
 // --- up -----------------------------------------------------------------------------
+// The daemon requires an ABSOLUTE claude binary (minimal agent PATH can't resolve one) —
+// enforce that on the env override too, not just the PATH fallback.
 function findClaude() {
-  if (process.env.AGENT_CLI_PATH) return process.env.AGENT_CLI_PATH;
+  const fromEnv = process.env.AGENT_CLI_PATH;
+  if (fromEnv) {
+    if (!path.isAbsolute(fromEnv)) die(`AGENT_CLI_PATH must be absolute: ${fromEnv}`);
+    try {
+      accessSync(fromEnv, constants.X_OK);
+    } catch {
+      die(`AGENT_CLI_PATH is not an executable file: ${fromEnv}`);
+    }
+    return fromEnv;
+  }
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!dir) continue;
     const cand = path.join(dir, "claude");
     try {
       accessSync(cand, constants.X_OK);
@@ -184,6 +206,11 @@ function findClaude() {
   die("claude CLI not found on PATH — set AGENT_CLI_PATH to the absolute binary");
 }
 
+// Env vars that flip the console into live/agent-exec mode. `up` owns ALL of them:
+// set in live mode, force-removed in fixture mode (an inherited HARNESS_LIVE=1 in the
+// operator's shell must not turn a fixture demo into live agent execution).
+const LIVE_ENV = ["HARNESS_LIVE", "ENABLE_AGENT_EXEC", "AGENT_ALLOW_DIRECT", "AGENT_CLI_PATH", "LANE_CONCURRENCY", "AGENT_HOME"];
+
 function cmdUp(opts) {
   // bin/gantry lives in the repo; a ~/.local/bin symlink realpaths back here.
   const repo = path.dirname(path.dirname(realpathSync(process.argv[1])));
@@ -191,7 +218,10 @@ function cmdUp(opts) {
   if (!existsSync(path.join(consoleDir, ".next"))) {
     die(`no production build — run: cd ${consoleDir} && npm run build`);
   }
-  const env = { ...process.env, HARNESS_REPO: repo, CONSOLE_BASE_URL: `http://${opts.host}:${opts.port}` };
+  const port = Number(opts.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) die("--port must be 1..65535");
+  const env = { ...process.env, HARNESS_REPO: repo, CONSOLE_BASE_URL: `http://${opts.host}:${port}` };
+  for (const k of LIVE_ENV) delete env[k];
   if (!opts.fixture) {
     const lanes = Number(opts.lanes);
     if (!Number.isInteger(lanes) || lanes < 1 || lanes > 4) die("--lanes must be 1..4");
@@ -201,21 +231,22 @@ function cmdUp(opts) {
       AGENT_ALLOW_DIRECT: "1",
       AGENT_CLI_PATH: findClaude(),
       LANE_CONCURRENCY: String(lanes),
+      // AGENT_HOME stays removed: isolated per-lane homes are the default.
     });
-    delete env.AGENT_HOME; // isolated per-lane homes are the default; AGENT_HOME is a legacy override
   }
-  console.log(`${bold("gantry up")} ${opts.fixture ? dim("(fixture mode)") : green("(live)")} → http://${opts.host}:${opts.port}`);
-  const child = spawn("npx", ["next", "start", "-H", opts.host, "-p", String(opts.port)], {
+  console.log(`${bold("gantry up")} ${opts.fixture ? dim("(fixture mode)") : green("(live)")} → http://${opts.host}:${port}`);
+  const child = spawn("npx", ["next", "start", "-H", opts.host, "-p", String(port)], {
     cwd: consoleDir,
     env,
     stdio: "inherit",
   });
+  child.on("error", (e) => die(`failed to start server (npx missing?): ${e.message}`));
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
 // --- main ---------------------------------------------------------------------------
-const [cmd, ...rest] = process.argv.slice(2);
-try {
+async function main() {
+  const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === "status") {
     const { values } = parseArgs({ args: rest, options: { url: { type: "string", default: DEFAULT_URL } } });
     await cmdStatus(values.url);
@@ -228,10 +259,10 @@ try {
         project: { type: "string" },
         model: { type: "string", default: "auto" },
         url: { type: "string", default: DEFAULT_URL },
-        follow: { type: "boolean", default: true },
         "no-follow": { type: "boolean", default: false },
       },
     });
+    if (positionals.length > 1) die(`one brief only — quote it: gantry run "${positionals.join(" ")}"`);
     if (!["auto", "haiku", "sonnet", "opus"].includes(values.model)) die("--model must be auto|haiku|sonnet|opus");
     if (values.lane.length > 4) die("at most 4 --lane briefs");
     await cmdRun(values.url, positionals[0], { ...values, follow: !values["no-follow"] });
@@ -249,7 +280,9 @@ try {
   } else {
     usage();
   }
-} catch (err) {
+}
+
+main().catch((err) => {
   if (err?.code?.startsWith?.("ERR_PARSE_ARGS")) die(err.message);
   throw err;
-}
+});

@@ -16,7 +16,7 @@ if [ "${1:-}" = "--uninstall" ]; then
     [ -L "$link" ] || continue
     case "$(readlink -f "$link")" in "$SRC"/*) rm -f "$link"; echo "removed $(basename "$link")";; esac
   done
-  if [ -L "$BIN_DEST" ] && [ "$(readlink -f "$BIN_DEST")" = "$BIN_SRC" ]; then
+  if [ -L "$BIN_DEST" ] && [ "$(readlink -f "$BIN_DEST")" = "$(readlink -f "$BIN_SRC")" ]; then
     rm -f "$BIN_DEST"; echo "removed gantry"
   fi
   exit 0
@@ -32,6 +32,12 @@ for dir in "$SRC"/*/; do
 done
 
 mkdir -p "$(dirname "$BIN_DEST")"
+if [ -e "$BIN_DEST" ] || [ -L "$BIN_DEST" ]; then
+  if [ ! -L "$BIN_DEST" ] || [ "$(readlink -f "$BIN_DEST")" != "$(readlink -f "$BIN_SRC")" ]; then
+    echo "refusing to overwrite $BIN_DEST (exists and is not a gantry symlink into this repo)" >&2
+    exit 1
+  fi
+fi
 ln -sfn "$BIN_SRC" "$BIN_DEST"
 echo "✓ gantry -> $BIN_SRC"
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: $HOME/.local/bin is not on PATH";; esac
