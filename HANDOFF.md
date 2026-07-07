@@ -1,19 +1,26 @@
-# HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-06
+# HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-07
 
-> Resume context. The product/dashboard is now named **GANTRY** (operator-picked
-> 2026-07-06). Open this + NOTES.md + memory (agent-exec-gate, umbrella-vps-deploy)
-> to continue. Repo: /home/alter/HARNESS, branch `main`.
+> Resume context. The product/dashboard is named **GANTRY** (operator-picked
+> 2026-07-06; UI rebranded 2026-07-07). Open this + NOTES.md + memory
+> (agent-exec-gate, umbrella-vps-deploy) to continue. Repo: /home/alter/HARNESS,
+> branch `main`.
 
-## Where things stand (all on `main`, pushed to origin 2026-07-06)
+## Where things stand (all on `main`, pushed to origin through ea03823, 2026-07-07)
 
 DONE + verified:
 - **Dashboard rebuild** (`console/` Next.js 16 app) shipped: fleet home, `/run/[id]`,
   `/deck`, `/graph/[projectId]`, launch console, ⌘K palette, ntfy, chime, `/brand`.
-  Industrial-CRT identity (graphite + amber phosphor, green=live only). 306 tests green.
-- **Live build-agent executor** wired + cross-reviewed + **live-verified end-to-end**
-  (commit fe7486a). A real run built a file agent→wt-commit→Gate B→Gate D(trace)→Gate C
-  (merge to integration), `main` untouched (promote gated). See memory [[agent-exec-gate]].
-- Sandbox: `console/lib/sandbox/{agent-runner,worktree}.ts`. Wired in
+  Industrial-CRT identity (graphite + amber phosphor, green=live only). 351 tests green.
+- **Live build-agent executor** wired + cross-reviewed + **live-verified end-to-end**:
+  agent→wt-commit→Gate B→Gate D(trace)→Gate C (merge to integration), `main` untouched
+  (promote gated). See memory [[agent-exec-gate]].
+- **Isolated per-lane agent HOMEs** (`~/.gantry/agent-homes/<slug>`, provisioned per
+  spawn, reclaimed per run) + **multi-lane concurrency** (1..4 lanes per run,
+  `LANE_CONCURRENCY` clamp, finalize-ALL→merge-ALL, 2-lane live smoke PASS).
+- **`gantry` CLI** (`bin/gantry` run/up/status, zero-dep Node ≥18 over the console API)
+  + **install.sh** symlink install — cross-review PASS, live-verified twice.
+- **GANTRY rebrand** in the UI (wordmark, tab title, /brand marks the pick).
+- Sandbox: `console/lib/sandbox/{agent-runner,worktree,agent-home}.ts`. Wired in
   `console/lib/server/daemon.ts` (agent between wt-new and wt-commit + trace/Gate-D step).
 - Posture (operator-approved): DIRECT mode (agent runs as operator), FULL toolset incl.
   Bash, zero-MCP, credential-free env, worktree-cwd, timeout, audit. Gates:
@@ -43,53 +50,22 @@ overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts
 
 ## NEXT-PASS AGENDA (what to build after /clear)
 
-1. **Isolated agent HOME/config** — DONE 2026-07-06 (branch feat/agent-home-isolation).
-   `console/lib/sandbox/agent-home.ts` `ensureAgentHome()`: direct-mode agents now get a
-   minimal HOME at `~/.gantry/agent-home` (AGENT_ISOLATED_HOME to relocate) with ONLY
-   `.claude/.credentials.json` (re-copied fresh each spawn, 0600/0700, symlink-refusing,
-   fail-closed) + a one-time `.gitconfig` (fresh HOME has no git identity → commits died).
-   Verified live: headless CLI auths from a cred-only HOME; project-level PostToolUse trace
-   hook still fires (Gate D intact). Drop mode (sudo -H) untouched.
+1. **Decompose agent** — single brief → N disjoint lane briefs (LLM decompose step
+   before planRun; disjoint owns/file sets per lane; feeds multi-lane 1..4). Today the
+   operator hand-writes lanes[]. Biggest lever on multi-lane value.
+2. **Console handoff-respawn loop** — port web/ daemon's context-guard respawn
+   (HANDOFF.md existence + exit 0 ⇒ respawn, cap 2, archive HANDOFF.<n>.md) into
+   console runAgentInSandbox; needs the handoffFs seam web/lib/daemon/daemon.ts has.
+3. **Per-lane model routing** — route-cost tier per lane instead of run-global model.
+4. **CLI tests** (accepted Medium at gantry-cli merge) — bin/gantry parser + API client
+   against a mock server; install.sh shell asserts (fake-HOME cases from 2026-07-07).
+5. **Operator DoD leftovers** (dashboard rebuild) — phone approve over tailnet, ntfy
+   tap deep-link, /graph showpiece capture. (Live run e2e: done repeatedly.)
+6. **VPS drop-mode track** (when wanted) — agent Max-plan login, egress firewall,
+   resource limits, agent-N accounts for multi-lane, threat-model §7 sign-off.
 
-2. **Multi-lane concurrency** — DONE 2026-07-07 (branch feat/multi-lane, cross-review PASS
-   Codex r3 + Claude r2). Console daemon runs 1..4 lanes per run: POST /api/runs takes
-   optional `lanes:[briefs]` (each trimmed, ≤4000); planRun mints `lane-<sha16(runId)>-<i>`
-   slugs (provenance from runId, never briefs). Execution: wt-new SERIAL → agent builds
-   CONCURRENT (`LANE_CONCURRENCY` env, clamp 1..4, default 1 = sequential) → cross-lane
-   session-id distinctness check → finalize-ALL lanes (wt-commit → Gate B → Gate D, lane
-   order) → merge-ALL (Gate C, lane order); any lane failure fails the whole run before any
-   merge. Per-lane isolated HOMEs `~/.gantry/agent-homes/<slug>` are reclaimed per run
-   (removeAgentHome, same fail-closed bar as provisioning). Concurrent direct-mode lanes
-   are an ACCEPTED posture (shared operator uid adds no new risk vs single-lane); drop mode
-   keeps per-lane uids. Follow-ups (non-gating): decompose agent (brief → N disjoint
-   lanes), handoff-respawn loop for console, per-lane model.
-
-3. **`gantry` CLI command** — DONE 2026-07-07 (branch feat/gantry-cli, cross-review PASS
-   Codex r3 + Claude r2). `bin/gantry`: single-file zero-dep Node (>=18.0, CJS, hand-rolled
-   long-option parser) over the console HTTP API. `gantry run "<brief>" [--lane ...]...
-   [--project id|name] [--model auto|haiku|sonnet|opus] [--url] [--no-follow]` POSTs
-   /api/runs w/ CSRF headers then tails /api/fleet/stream, exits on health lifecycle
-   done(0)/failed(1). `gantry up [--host --port --lanes 1..4 --fixture]` spawns
-   `npx next start` in console/ owning the FULL live-env set (force-cleared first so an
-   inherited HARNESS_LIVE/ENABLE_PROMOTE_TO_MAIN can't leak; AGENT_CLI_PATH resolved from
-   PATH, validated absolute+executable file). `gantry status` = live flag, slot, recent
-   runs. ponytail: no SSE auto-reconnect (drop → resume hint, run continues server-side).
-   Follow-up (Medium, accepted at merge): no automated tests — thin client, verified live
-   twice end-to-end.
-
-4. **Install script** — DONE 2026-07-07 (same branch). install.sh symlinks bin/gantry →
-   ~/.local/bin/gantry; refuses to clobber anything that isn't already a gantry symlink
-   into this repo (canonical readlink -f comparison on install AND uninstall, symlinked-
-   repo safe); prints quickstart + env docs. Idempotent, verified: double-install,
-   uninstall, reinstall, foreign-file/symlink refusal.
-
-5. **Name rollout** — DONE 2026-07-07 (user-confirmed scope: wordmark+title → GANTRY, keep
-   "mission control" subtitle, keep /brand as a design artifact with GANTRY marked chosen).
-   layout.tsx metadata title "GANTRY · mission control"; FleetHome wordmark GANTRY; /brand
-   renders the GANTRY card full-strength w/ "✓ chosen", runners-up dimmed. Env vars/protocol
-   names (HARNESS_LIVE, HARNESS_REPO, x-harness-request, harness.sh) deliberately untouched —
-   the harness is the engine, GANTRY is the product. Verified visually in fixture mode;
-   351/351 tests, eslint + build clean.
+Low/background: haiku alias quirk; gantry SSE reconnect if runs get long; agent-home
+hardening notes (git-identity cache, openat-anchored writes).
 
 ## Decisions already made (don't relitigate)
 - Direct mode + Bash for the local build agent — intentional, gated, live-verified. Not a
