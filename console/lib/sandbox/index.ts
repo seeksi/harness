@@ -23,3 +23,4 @@ export {
 } from "./agent-runner";
 export { worktreePathFor, containedWorktree, relocateTrace } from "./worktree";
 export { ensureAgentHome, removeAgentHome } from "./agent-home";
+export { decomposeBrief, parseLaneBriefs, buildDecomposePrompt, DecomposeError, type DecomposeOptions } from "./decompose";

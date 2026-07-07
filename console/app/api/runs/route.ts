@@ -20,7 +20,7 @@ import { startRun, currentSlot, SlotTakenError, type Routing } from "@/lib/serve
 const BRIEF_MAX = 4000; // length cap (§5 brief is required, non-empty)
 const LANES_MAX = 4; // multi-lane cap (matches the daemon's LANE_CONCURRENCY clamp)
 const VALID_ROUTING: readonly Routing[] = ["auto", "haiku", "sonnet", "opus"];
-const ALLOWED_FIELDS = new Set(["projectId", "brief", "routing", "lanes"]);
+const ALLOWED_FIELDS = new Set(["projectId", "brief", "routing", "lanes", "decompose"]);
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!csrfOk(req)) {
@@ -37,6 +37,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let brief: string;
   let routing: Routing = "auto";
   let laneBriefs: string[] | undefined;
+  let decompose = false;
   try {
     const raw = (await req.json()) as Record<string, unknown>;
     for (const key of Object.keys(raw)) {
@@ -82,6 +83,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       laneBriefs = trimmed;
     }
+    if (raw.decompose !== undefined) {
+      if (typeof raw.decompose !== "boolean") {
+        return NextResponse.json({ error: "decompose must be a boolean" }, { status: 422 });
+      }
+      decompose = raw.decompose;
+    }
+    if (decompose && laneBriefs !== undefined) {
+      return NextResponse.json({ error: "decompose and lanes are mutually exclusive" }, { status: 422 });
+    }
     projectId = raw.projectId;
     brief = raw.brief.trim();
   } catch {
@@ -99,7 +109,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const runId = crypto.randomBytes(12).toString("hex");
 
   try {
-    startRun({ runId, projectId: project.id, projectName: project.name, brief, routing, laneBriefs });
+    startRun({ runId, projectId: project.id, projectName: project.name, brief, routing, laneBriefs, decompose });
     return NextResponse.json({ id: runId, live: true }, { status: 201 });
   } catch (e) {
     if (e instanceof SlotTakenError) {
