@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "events";
 import { Readable } from "stream";
-import { startRun, planRun, buildAgentPrompt, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn } from "./daemon";
+import { startRun, planRun, buildAgentPrompt, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn } from "./daemon";
 import { resetDb, eventsSince, listAudit, getSnapshot } from "./persist";
 import { subscribe, _resetBroker } from "./broker";
 import { _resetRegistry } from "@/lib/bridge/registry";
@@ -666,5 +666,155 @@ describe("startRun — multi-lane (laneBriefs)", () => {
     expect(cleaned[0]).toMatch(/^lane-[0-9a-f]{16}-0$/);
     expect(cleaned[1]).toMatch(/^lane-[0-9a-f]{16}-1$/);
     expect(getSnapshot("run-mlclean")?.status).toBe("failed");
+  });
+
+  describe("startRun — decompose step", () => {
+    it("happy path: decompose runs BEFORE any worktree, splits into per-lane briefs, emits phase 1 active→done", async () => {
+      process.env.ENABLE_AGENT_EXEC = "1";
+      const broadcast: Envelope[] = [];
+      subscribe((item) => broadcast.push(item.env));
+
+      const order: string[] = [];
+      const spawnFn = laneRecordingSpawn(order, {
+        "wt-verify": [JSON.stringify({ type: "gate", id: "B", status: "clear", severity: "info", summary: "ok" })],
+      });
+      const prompts: Record<string, string> = {};
+      const runAgent: RunAgentFn = async (o) => {
+        prompts[o.sessionId!] = o.prompt;
+        return okAgent(order)(o);
+      };
+      let decompArg: { brief: string; slug: string; model: string } | undefined;
+      const decomposeFn: DecomposeFn = async (o) => {
+        decompArg = o;
+        order.push("decompose");
+        return { laneBriefs: ["SPLIT ALPHA task", "SPLIT BRAVO task"] };
+      };
+
+      startRun(
+        { runId: "run-dc1", projectId: "proj", projectName: "v", brief: "one big brief", routing: "sonnet", decompose: true },
+        { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, decomposeFn }
+      );
+      await waitForSlotFree();
+
+      // The decompose seam got the run brief, a server-derived decomp slug, and the routed model.
+      expect(decompArg).toBeDefined();
+      expect(decompArg!.brief).toBe("one big brief");
+      expect(decompArg!.slug).toMatch(/^decomp-[0-9a-f]{16}$/);
+      expect(decompArg!.model).toBe("sonnet");
+
+      // Ordering: decompose happens BEFORE any worktree is created.
+      expect(order.indexOf("decompose")).toBeGreaterThanOrEqual(0);
+      expect(order.indexOf("decompose")).toBeLessThan(order.findIndex((k) => k.startsWith("wt-new:")));
+
+      // Each lane's agent got ITS split brief (not the run summary, not the sibling's).
+      const slugs = Object.keys(prompts).sort();
+      expect(slugs).toHaveLength(2);
+      expect(prompts[slugs[0]]).toContain("SPLIT ALPHA task");
+      expect(prompts[slugs[0]]).not.toContain("SPLIT BRAVO task");
+      expect(prompts[slugs[1]]).toContain("SPLIT BRAVO task");
+
+      // Phase 1 active + done envelopes were broadcast.
+      const phaseStatuses = broadcast
+        .filter((e) => e.type === "phase")
+        .map((e) => (e as Extract<Envelope, { type: "phase" }>).payload.status);
+      expect(phaseStatuses).toContain("active");
+      expect(phaseStatuses).toContain("done");
+      expect(getSnapshot("run-dc1")?.status).toBe("done");
+    });
+
+    it("mutual exclusion: decompose:true + explicit laneBriefs ⇒ fail closed, seam never called", async () => {
+      process.env.ENABLE_AGENT_EXEC = "1";
+      const order: string[] = [];
+      const decomposeFn = vi.fn();
+
+      startRun(
+        { runId: "run-dcx", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["x"], decompose: true },
+        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn: decomposeFn as never }
+      );
+      await waitForSlotFree();
+
+      expect(decomposeFn).not.toHaveBeenCalled();
+      expect(order).toEqual(["reset-base"]); // threw before any mint/plan/worktree side effect
+      expect(getSnapshot("run-dcx")?.status).toBe("failed");
+      expect(currentSlot()).toBeNull();
+    });
+
+    it("gate: decompose:true with ENABLE_AGENT_EXEC unset ⇒ fail closed, seam never called", async () => {
+      // ENABLE_AGENT_EXEC intentionally not set.
+      const order: string[] = [];
+      const decomposeFn = vi.fn();
+
+      startRun(
+        { runId: "run-dcgate", projectId: "proj", projectName: "v", brief: "s", decompose: true },
+        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn: decomposeFn as never }
+      );
+      await waitForSlotFree();
+
+      expect(decomposeFn).not.toHaveBeenCalled();
+      expect(order).toEqual(["reset-base"]);
+      expect(getSnapshot("run-dcgate")?.status).toBe("failed");
+      expect(currentSlot()).toBeNull();
+    });
+
+    it("decompose failure ⇒ run fails BEFORE any worktree; the decomp agent-home is still reclaimed", async () => {
+      process.env.ENABLE_AGENT_EXEC = "1";
+      const order: string[] = [];
+      const cleaned: string[] = [];
+      const decomposeFn: DecomposeFn = async () => {
+        throw new Error("decompose blew up");
+      };
+
+      startRun(
+        { runId: "run-dcfail", projectId: "proj", projectName: "v", brief: "s", decompose: true },
+        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn, cleanupHome: (s) => cleaned.push(s) }
+      );
+      await waitForSlotFree();
+
+      expect(order.some((k) => k.startsWith("wt-new:"))).toBe(false);
+      expect(order).toEqual(["reset-base"]);
+      expect(cleaned.some((s) => /^decomp-[0-9a-f]{16}$/.test(s))).toBe(true);
+      expect(getSnapshot("run-dcfail")?.status).toBe("failed");
+      expect(currentSlot()).toBeNull();
+    });
+
+    it("decompose failure emits a TERMINAL phase-1 envelope (active→blocked, never left active/done)", async () => {
+      process.env.ENABLE_AGENT_EXEC = "1";
+      const broadcast: Envelope[] = [];
+      subscribe((item) => broadcast.push(item.env));
+      const decomposeFn: DecomposeFn = async () => {
+        throw new Error("decompose blew up");
+      };
+
+      startRun(
+        { runId: "run-dcphase", projectId: "proj", projectName: "v", brief: "s", decompose: true },
+        { live: true, spawnFn: laneRecordingSpawn([]) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn, cleanupHome: () => {} }
+      );
+      await waitForSlotFree();
+
+      const phase1 = broadcast
+        .filter((e) => e.type === "phase" && (e as Extract<Envelope, { type: "phase" }>).payload.phase === 1)
+        .map((e) => (e as Extract<Envelope, { type: "phase" }>).payload.status);
+      expect(phase1).toEqual(["active", "blocked"]); // active raised, then terminated — never orphaned, never "done"
+      expect(getSnapshot("run-dcphase")?.status).toBe("failed");
+    });
+
+    it("home cleanup: a happy decompose run reclaims BOTH the decomp home and every lane home", async () => {
+      process.env.ENABLE_AGENT_EXEC = "1";
+      const cleaned: string[] = [];
+      const decomposeFn: DecomposeFn = async () => ({ laneBriefs: ["lane a", "lane b"] });
+      const spawnFn = laneRecordingSpawn([], {
+        "wt-verify": [JSON.stringify({ type: "gate", id: "B", status: "clear", severity: "info", summary: "ok" })],
+      });
+
+      startRun(
+        { runId: "run-dcclean", projectId: "proj", projectName: "v", brief: "s", decompose: true },
+        { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn, cleanupHome: (s) => cleaned.push(s) }
+      );
+      await waitForSlotFree();
+
+      expect(cleaned.filter((s) => /^decomp-[0-9a-f]{16}$/.test(s))).toHaveLength(1);
+      expect(cleaned.filter((s) => /^lane-[0-9a-f]{16}-\d$/.test(s))).toHaveLength(2);
+      expect(getSnapshot("run-dcclean")?.status).toBe("done");
+    });
   });
 });

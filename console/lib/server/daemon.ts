@@ -31,6 +31,7 @@ import {
 import { mintLane, mintPlanFile, mintSession } from "@/lib/bridge/registry";
 import {
   runAgentInSandbox,
+  decomposeBrief,
   relocateTrace,
   removeAgentHome,
   worktreePathFor,
@@ -93,6 +94,12 @@ const MODEL_TIER: Record<"haiku" | "sonnet" | "opus", "cheap" | "default" | "top
   opus: "top",
 };
 
+/** SHA1(runId) → 16-hex id. Shared by planRun's lane slugs and the decompose slug so
+ *  `decomp-<sha16>` matches the run's lane hash exactly (single derivation, one source). */
+function sha16(runId: string): string {
+  return createHash("sha1").update(runId).digest("hex").slice(0, 16);
+}
+
 export interface LaneStep {
   /** Server-minted lane slug (planRun) — provenance, never client-derived. */
   slug: string;
@@ -127,7 +134,7 @@ export function planRun(runId: string, routing: Routing, laneBriefs: string[]): 
       throw new Error("every lane brief must be a non-empty string");
     }
   }
-  const id = createHash("sha1").update(runId).digest("hex").slice(0, 16);
+  const id = sha16(runId);
   return {
     runId,
     planFile: `plan-${id}.jsonl`, // bare filename
@@ -223,10 +230,17 @@ export interface StartRunInput {
    * `brief`. `brief` itself stays the run's display summary either way.
    */
   laneBriefs?: string[];
+  /** When true, an LLM decompose step (READ-ONLY headless agent) turns `brief` into the
+   *  1..4 lane briefs BEFORE planRun — mutually exclusive with `laneBriefs`. Requires
+   *  ENABLE_AGENT_EXEC=1. */
+  decompose?: boolean;
 }
 
 /** Agent-runner signature (so tests can stub the sandbox without spawning claude). */
 export type RunAgentFn = (opts: RunAgentInSandboxOptions) => Promise<RunAgentInSandboxResult>;
+
+/** Decompose-step signature (test seam mirrors runAgent). */
+export type DecomposeFn = (opts: { brief: string; slug: string; model: "haiku" | "sonnet" | "opus" }) => Promise<{ laneBriefs: string[] }>;
 
 // Length-cap the brief before it becomes the agent prompt. Well under agent-runner's
 // MAX_PROMPT (100k chars); the composed wrapper below adds only a few hundred chars.
@@ -272,6 +286,8 @@ export interface StartRunOptions {
   relocate?: (slug: string, session: string) => boolean;
   /** TEST-ONLY seam: injectable per-lane agent-home cleanup (default = real removeAgentHome). IGNORED unless test. */
   cleanupHome?: (slug: string) => void;
+  /** TEST-ONLY seam: injectable decompose step (default = real decomposeBrief). IGNORED unless test. */
+  decomposeFn?: DecomposeFn;
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -299,6 +315,7 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
   const runAgent: RunAgentFn = (testSeam && opts.runAgent) || runAgentInSandbox;
   const relocate = (testSeam && opts.relocate) || relocateTrace;
   const cleanupHome = (testSeam && opts.cleanupHome) || removeAgentHome;
+  const decompose: DecomposeFn = (testSeam && opts.decomposeFn) || decomposeBrief;
 
   // ONE ingest path: fold → persist → broadcast → notify (edge-triggered).
   let fleet: FleetState = initialFleetState;
@@ -346,11 +363,39 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
   void (async () => {
     // Hoisted so the `finally` block can reclaim per-lane agent homes for every planned lane.
     let plan: RunPlan | null = null;
+    // Hoisted so the `finally` block can also reclaim the decompose agent's isolated home.
+    let decompSlug: string | null = null;
     try {
       if (live) {
-        // undefined-ONLY fallback: an explicitly-supplied [] (or any bad list) must reach
-        // planRun and fail loudly there, not be silently papered over with [brief].
-        const laneBriefs = input.laneBriefs === undefined ? [brief] : input.laneBriefs;
+        let laneBriefs: string[];
+        if (input.decompose) {
+          // DECOMPOSE (Phase 1): READ-ONLY split BEFORE any provenance/worktree side effect.
+          // Mutually exclusive with explicit laneBriefs; refused unless ENABLE_AGENT_EXEC=1.
+          if (input.laneBriefs !== undefined) {
+            throw new Error("`decompose` and explicit `laneBriefs` are mutually exclusive");
+          }
+          if (process.env.ENABLE_AGENT_EXEC !== "1") {
+            throw new Error("decompose requires ENABLE_AGENT_EXEC=1 (agent execution is disabled)");
+          }
+          decompSlug = `decomp-${sha16(runId)}`;
+          ingest(toEnvelope({ type: "phase", phase: 1, status: "active" }));
+          // Terminate the phase-1 envelope on BOTH paths: "done" on success, "blocked" on
+          // failure. Without this the "active" envelope leaks — a failed decompose would leave
+          // phase 1 forever-active in the HUD ("blocked" is PhaseStatus's terminal failure value).
+          let decomposed: { laneBriefs: string[] };
+          try {
+            decomposed = await decompose({ brief, slug: decompSlug, model: MODEL_BY_ROUTING[routing] ?? "sonnet" });
+          } catch (e) {
+            ingest(toEnvelope({ type: "phase", phase: 1, status: "blocked" }));
+            throw e;
+          }
+          ingest(toEnvelope({ type: "phase", phase: 1, status: "done" }));
+          laneBriefs = decomposed.laneBriefs;
+        } else {
+          // undefined-ONLY fallback: an explicitly-supplied [] (or any bad list) must reach
+          // planRun and fail loudly there, not be silently papered over with [brief].
+          laneBriefs = input.laneBriefs === undefined ? [brief] : input.laneBriefs;
+        }
         plan = planRun(runId, routing, laneBriefs);
         // Pre-mint ALL provenance up front so a malformed plan fails BEFORE any side effect
         // (no half-created worktrees from a bad later lane).
@@ -482,6 +527,16 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
           await runSub({ cmd: "reset-base" });
         } catch (e) {
           console.error(`[daemon] run ${runId} reset-base failed:`, e instanceof Error ? e.message : String(e));
+        }
+        // Reclaim the decompose agent's isolated HOME too (same sprawl concern as the lane
+        // homes — a run-unique decomp-<sha16> slug per run). Best-effort; a no-op when the
+        // home was never provisioned (gate-off / seam-injected runs). Before the lane loop.
+        if (decompSlug) {
+          try {
+            cleanupHome(decompSlug);
+          } catch (e) {
+            console.error(`[daemon] run ${runId} decompose agent-home cleanup failed:`, e instanceof Error ? e.message : String(e));
+          }
         }
         // Reclaim per-lane isolated agent HOMEs (credential copies under the agent-homes
         // base) for EVERY planned lane — run-unique slugs would otherwise sprawl one

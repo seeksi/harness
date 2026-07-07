@@ -72,3 +72,29 @@ describe("POST /api/runs — lanes[] validation", () => {
     expect(vi.mocked(startRun)).not.toHaveBeenCalled();
   });
 });
+
+describe("POST /api/runs — decompose validation", () => {
+  it("accepts decompose:true and passes it through to startRun", async () => {
+    const res = await POST(runsReq({ ...base, decompose: true }));
+    expect(res.status).toBe(201);
+    expect(vi.mocked(startRun)).toHaveBeenCalledWith(expect.objectContaining({ decompose: true }));
+  });
+
+  it("absent decompose ⇒ startRun gets decompose:false", async () => {
+    const res = await POST(runsReq(base));
+    expect(res.status).toBe(201);
+    expect(vi.mocked(startRun)).toHaveBeenCalledWith(expect.objectContaining({ decompose: false }));
+  });
+
+  it("rejects a non-boolean decompose with 422 and never starts the run", async () => {
+    const res = await POST(runsReq({ ...base, decompose: "yes" }));
+    expect(res.status).toBe(422);
+    expect(vi.mocked(startRun)).not.toHaveBeenCalled();
+  });
+
+  it("rejects decompose:true + lanes together (mutually exclusive) with 422 and never starts the run", async () => {
+    const res = await POST(runsReq({ ...base, decompose: true, lanes: ["a"] }));
+    expect(res.status).toBe(422);
+    expect(vi.mocked(startRun)).not.toHaveBeenCalled();
+  });
+});
