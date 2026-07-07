@@ -653,12 +653,13 @@ describe("spawnAgent — isolated agent HOME (direct-mode default)", () => {
   let operatorHome: string;
   let isolated: string;
   beforeEach(() => {
-    operatorHome = fs.mkdtempSync(path.join(os.tmpdir(), "op-home-"));
+    // realpath'd: the provisioner requires canonical paths (macOS /tmp is a symlink).
+    operatorHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "op-home-")));
     fs.mkdirSync(path.join(operatorHome, ".claude"), { recursive: true });
     fs.writeFileSync(path.join(operatorHome, ".claude", ".credentials.json"), "{}", { mode: 0o600 });
     isolated = path.join(operatorHome, "isolated");
     vi.stubEnv("HOME", operatorHome);
-    vi.stubEnv("AGENT_HOME", "");
+    vi.stubEnv("AGENT_HOME", undefined); // deletes the var (vitest 4) — "" would be refused
     vi.stubEnv("AGENT_ISOLATED_HOME", isolated);
     vi.stubEnv("ENABLE_AGENT_EXEC", "1");
   });
@@ -703,6 +704,28 @@ describe("spawnAgent — isolated agent HOME (direct-mode default)", () => {
     await spawnAgent(spec(), { spawnFn: spawnFn as never });
     expect(capturedEnv!.HOME).toBe(override);
     expect(fs.existsSync(isolated)).toBe(false); // provisioning skipped entirely
+  });
+
+  it('AGENT_HOME="" (set-but-empty) is REFUSED — not treated as unset, no provisioning, no spawn', async () => {
+    vi.stubEnv("AGENT_HOME", "");
+    mintLane("lane-x");
+    const spawnFn = vi.fn();
+    await expect(spawnAgent(spec(), { spawnFn: spawnFn as never })).rejects.toThrow(/AGENT_HOME must be a non-empty path/);
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(fs.existsSync(isolated)).toBe(false);
+    expect(listAudit().map((r) => r.outcome)).toEqual(["error"]);
+  });
+
+  it("drop mode (spec.user set) ignores AGENT_HOME entirely — even set-but-empty (sudo -H owns HOME)", async () => {
+    vi.stubEnv("AGENT_HOME", "");
+    vi.stubEnv("AGENT_CLI_PATH", "/abs/claude"); // absolute cli required in drop mode
+    vi.resetModules(); // AGENT_CLI_PATH is bound at module load
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    const spawnFn = fakeSpawn(['{"type":"result","session_id":"sess-drop01"}']);
+    await mod.spawnAgent(spec({ user: "agent" }), { spawnFn: spawnFn as never });
+    expect(spawnFn).toHaveBeenCalled(); // no refusal
+    expect(fs.existsSync(isolated)).toBe(false); // no provisioning either
   });
 });
 

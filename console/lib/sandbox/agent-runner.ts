@@ -491,17 +491,40 @@ export function spawnAgent(
     // ISOLATED HOME (direct mode default): provision the minimal agent home — only the
     // Max-plan credential (re-copied fresh each spawn) + a git identity — so the agent
     // stops inheriting the operator's ~/.claude (global CLAUDE.md/settings/MCP wiring).
-    // AGENT_HOME set ⇒ explicit operator override, skip provisioning (pre-isolation
-    // behavior, greppable escape hatch). Drop mode ⇒ sudo -H owns HOME, never provisioned
-    // here. Provisioning failure FAILS CLOSED: an agent must never fall back silently to
-    // the operator's real HOME.
+    // AGENT_HOME set (non-empty) ⇒ explicit operator override, skip provisioning
+    // (pre-isolation behavior, greppable escape hatch). A set-but-EMPTY value is a typo,
+    // not a choice — refused loudly rather than guessing between "override to nowhere"
+    // and "isolated default" (mirrors AGENT_ISOLATED_HOME's empty-string refusal). Drop
+    // mode ⇒ sudo -H owns HOME, never provisioned here. Provisioning failure FAILS
+    // CLOSED: an agent must never fall back silently to the operator's real HOME.
     let isolatedHome: string | undefined;
     try {
-      if (!(spec.user ?? AGENT_USER) && !process.env.AGENT_HOME) {
-        isolatedHome = ensureAgentHome();
+      if (!(spec.user ?? AGENT_USER)) {
+        // Direct mode only — drop mode ignores AGENT_HOME entirely (sudo -H owns HOME).
+        if (process.env.AGENT_HOME === "") {
+          throw new AgentExecError(
+            'AGENT_HOME must be a non-empty path (or unset for the isolated-home default): ""'
+          );
+        }
+        if (process.env.AGENT_HOME === undefined) {
+          isolatedHome = ensureAgentHome();
+        }
       }
     } catch (e) {
-      audit("error", null, null);
+      // The refusal's audit row is written FATALLY: if it can't persist, reject with an
+      // error carrying the provisioning failure as cause — neither the refusal nor the
+      // audit gap goes unreported.
+      try {
+        audit("error", null, null, true);
+      } catch (auditErr) {
+        const both = new AgentExecError(
+          `agent home provisioning failed (${e instanceof Error ? e.message : String(e)}) ` +
+            `AND its audit row could not be written: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`
+        );
+        both.cause = e;
+        reject(both);
+        return;
+      }
       reject(e);
       return;
     }
