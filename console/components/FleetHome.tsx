@@ -24,6 +24,18 @@ import { ChimeToggle } from "./ChimeToggle";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
 
+// Pure so it's unit-testable without a DOM. `decompose` is only present in the
+// body when the operator toggled it on — omitted (not `false`) when off, so an
+// untoggled launch's request body is unchanged from before this feature existed.
+export function buildRunsPostBody(p: LaunchPayload): Record<string, unknown> {
+  return {
+    projectId: p.projectId,
+    brief: p.brief,
+    routing: p.modelRouting,
+    ...(p.decompose ? { decompose: true } : {}),
+  };
+}
+
 export function FleetHome({ initial, projects }: { initial: FleetState; projects: LaunchProject[] }) {
   const router = useRouter();
   const storeRef = useRef<FleetStore | null>(null);
@@ -192,14 +204,15 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
         void fetch("/api/runs", {
           method: "POST",
           headers: { "content-type": "application/json", "x-harness-request": "1" },
-          body: JSON.stringify({ projectId: p.projectId, brief: p.brief, routing: p.modelRouting }),
+          body: JSON.stringify(buildRunsPostBody(p)),
         })
           .then((r) => (r.ok ? r.json() : null))
           .then((d) => d?.id && setSelected(d.id))
           .catch(() => {});
         return;
       }
-      // Fixture mode: local optimistic launch — a fresh run in decompose (unchanged).
+      // Fixture mode: local optimistic launch — a fresh run starting in the decompose PHASE
+      // (unchanged; the decompose FLAG is live-only and deliberately ignored here).
       const runId = `run-${Date.now()}`;
       const run = newRun(runId, p.projectId, p.projectName, p.brief, nowSec());
       store.apply({ runId, projectId: p.projectId, agentId: "operator", ts: nowSec(), type: "sync", payload: { run } });
