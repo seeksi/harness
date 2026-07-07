@@ -291,3 +291,96 @@ end (up → status → 1-lane run to done exit 0, artifacts cleaned, reset-base 
 to main from clean tree). install.sh verified: idempotent×2, uninstall, refusals,
 symlinked-repo. Merged → main 5168d7c (push pending operator approval). Follow-up (Medium, accepted): no
 automated CLI tests. Won't-fix Low: client brief pre-check. ponytail: no SSE reconnect.
+
+# Decompose agent (HANDOFF agenda #1) — base: main d02e82c
+project: harness
+
+## Subtasks
+- slug: decompose  spec: "LLM decompose step: sandbox decomposeBrief() (read-only headless claude -> validated disjoint lanes JSON) + daemon wiring (StartRunInput.decompose before planRun) + route field"  owns: console/lib/sandbox/decompose.ts, console/lib/sandbox/decompose.test.ts, console/lib/sandbox/index.ts, console/lib/server/daemon.ts, console/lib/server/daemon.test.ts, console/app/api/runs/route.ts, console/app/api/runs/route.test.ts  tier: top
+- slug: cli        spec: "gantry run --decompose flag (POST decompose:true, mutually exclusive with --lane) + usage text"  owns: bin/gantry  tier: cheap
+- slug: ui         spec: "LaunchConsole decompose toggle -> LaunchPayload.decompose -> FleetHome live POST body"  owns: console/components/LaunchConsole.tsx, console/components/LaunchConsole.test.tsx, console/components/FleetHome.tsx, console/components/FleetHome.test.tsx  tier: default
+
+## Design decisions (S0, don't relitigate)
+- TS spine (decompose.ts <- daemon.ts <- route.ts) is ONE lane: worktree lanes off base
+  cannot import an unmerged module (Batch-A/C precedent). cli + ui are HTTP/client-side,
+  truly disjoint.
+- decompose.ts: spawn pattern mirrors agent-runner (buildInvocation/ensureAgentHome
+  reused; NO weakening of containedWorktree — decompose cwd is the repo root, validated
+  against HARNESS_REPO resolution like worktree.ts:30). Read-only toolset Read,Grep,Glob;
+  --strict-mcp-config; --dangerously-skip-permissions; --output-format json; timeout;
+  audit rows (cmd:"agent", lane:decomp-<sha16(runId)>); gate ENABLE_AGENT_EXEC=1 (a
+  decompose request without agent-exec fails the run loudly).
+- Agent output contract: ONLY JSON {"lanes":[{"brief":str,"owns":[paths]}]} parsed from
+  claude result envelope (type:"result", top-level result field; strip ``` fences).
+  Validate: 1..4 lanes; briefs non-empty; owns relative, no "..", no abs, pairwise
+  disjoint INCLUDING prefix containment (a/b vs a/b/c = overlap). Composed lane brief =
+  brief + "\nOWNS — modify ONLY these paths:" + owns list; cap <= 4000 (route BRIEF_MAX).
+  Fail closed on any violation (HarnessExitError path in daemon).
+- Daemon: decompose runs BEFORE planRun (laneBriefs = composed); phase-1 envelope
+  (PHASE_LABELS[1]="decompose": status active -> done; PhasePayload.approval kind
+  "decompose-split" exists but approval flow is OUT OF SCOPE this pass — follow-up);
+  decompose + explicit laneBriefs together = route 422 (mutually exclusive); seam
+  StartRunOptions.decomposeFn (test-only, mirrors runAgent); cleanupHome(decompSlug)
+  in finally alongside lane homes.
+- CLI/UI post {decompose:true}; server ignores absent field (back-compat).
+
+## Decompose-agent batch — checkpoint (2026-07-07, session at context soft limit)
+- Gate A: $1.454 vs 5.0 ceiling, clear. Worktrees decompose/cli/ui off d02e82c.
+- cli lane: built + cross-review r1 — Codex BLOCK 1 High (usage synopsis implied --lane
+  and --decompose combinable) → FIXED in place ([--lane <brief>... | --decompose]),
+  re-verified (node --check, exclusivity exit 1 pre-network). VERDICT PASS.
+  Claude-only Low follow-up (non-gating): run-start message doesn't say decompose mode.
+  wt-commit + wt-verify done → status reviewed.
+- ui lane: build agent DONE, all green (359 tests/34 files, eslint clean, next build ok,
+  tsc: 8 PRE-EXISTING errors identical on main — VERIFY that claim vs main before Gate C;
+  agent's files add zero new). Test convention note: repo uses .test.ts pure-function
+  tests (vitest include **/*.test.ts, no jsdom) — agent exported buildLaunchPayload/
+  buildRunsPostBody helpers and tested those. AWAITING cross-review (S3).
+- decompose lane (opus, TS spine): build agent STILL RUNNING in background.
+- ui cross-review r1: Codex BLOCK 3 High — #1 reopen-reset real (Claude had it Low;
+  stricter won) → FIXED (setDecompose(false) in the open effect); #2/#3 "missing tests"
+  REFUTED with evidence: test files were UNTRACKED so `git diff main` hid them (8 cases
+  exist covering exactly the demanded assertions). Claude Lows: fixture comment reworded;
+  RTL interaction tests + typed POST body = accepted follow-ups (no jsdom in repo).
+  Re-verified 359/359 + eslint; tsc 11 errors = main's 11 exactly (pre-existing, NOT this
+  batch; ui agent's "8" was miscounted). VERDICT PASS → wt-commit + wt-verify clear.
+  LESSON for remaining reviews: diff untracked files too (git add -N or status check).
+- decompose lane: first agent hit its own context guard at 76% — decompose.ts complete,
+  wiring/tests remain; it left step-by-step HANDOFF.decompose.md IN the worktree; respawn
+  1/2 launched with NOTES.decompose.md + that handoff as opening context.
+- decompose lane r1 reviews (Claude subagent + Codex thread 019f3e99-2389-7670-8229-6ca5e96eca90):
+  BLOCK. Reconciled dispositions: (1) High BOTH: unbounded owns → 4000-cap breach +
+  O(n²) DoS → FIX (MAX_OWNS_PER_LANE=32, MAX_OWN_PATH_LEN=256, fail-closed fit check);
+  (2) High Codex-only: AGENT_HOME override reachable → DISPUTED w/ spec amendment
+  (override is the operator escape hatch shipped via agent-home r4–r6 PASS; consistency
+  across all direct-mode spawns incl. Bash-capable build agents; decompose is read-only) —
+  put to Codex r2; (3) Med: raw agent values in error msgs → FIX (redact, 80-char excerpt);
+  (4) Med: win32-absolute/backslash owns paths pass POSIX isAbsolute → FIX; (5) Low:
+  phase-1 stuck active on decompose failure → FIX (terminal envelope); Low dead ??
+  fallback = PRE-EXISTING on main, skip; Low injection-amplification planner→builder =
+  ACCEPTED inherent (containment unchanged). Fix agent running (opus). Next: Codex r2
+  reply on same thread w/ fix diff + amendment → Claude re-check → PASS → wt-commit.
+  Build verify note: worktree node_modules is a symlink to main's (gitignored, keep);
+  next build needs a real copy (Turbopack refuses symlink) — verified green once by
+  fix-1 agent via cp; re-verify build on integration instead.
+- decompose lane r2/r3: Codex r2 accepted 1,2(dispute),4; REFUTED the excerpt redaction
+  (any agent content in logs) → excerpt() deleted, errors carry lane index + rule name
+  only (overlap: entry indices). 394/394 + eslint clean. Codex r3 PASS, no new findings.
+  VERDICT PASS → wt-commit + wt-verify clear. All three lanes reviewed.
+- S4: 3 lanes merged clean, zero conflicts (decompose → ui → cli). Gate C on integration:
+  402/402 (35 files), eslint clean, tsc 11 = main baseline, next build clean, gantry
+  node --check OK. S5: Gate D L2 trace 6becbb2f clean (200 calls, longest identical run 1,
+  no anomalies). Judge (opus, scoped, independent) running. Next: judge verdict → S6 human
+  go/no-go → promote → S7 (cost vs $1.454, clean, HANDOFF.md agenda update, memory,
+  delete batch files incl. HANDOFF.decompose-batch.md).
+- S5 judge (opus, independent): PASS all 5 spec surfaces + both high-risk invariants
+  (agent-content-free errors; blocked+cleanup on decompose failure). 402/402 + lint
+  re-verified. ALL GATES GREEN (A budget, B ×3 cross-review PASS, C merge+suite,
+  D trace clean + judge PASS). Awaiting S6 human go/no-go to promote → main.
+
+status: COMPLETE 2026-07-07 — decompose-agent batch promoted to main 2c900fb (ff).
+Gates: A $1.454/5.0; B cross-review PASS ×3 (cli r1, ui r1 w/ 2 refuted, decompose r3);
+C 402/402 + lint + build, zero-conflict merges; D trace clean + judge PASS. Actual
+subagent spend ~735k tokens across 8 agents (2 builds + 1 resume + 1 fix, 3 reviews,
+1 judge) + 5 Codex calls. Follow-ups: decompose-split approval flow; live decomposed-run
+smoke; ui RTL interaction tests (no jsdom); typed POST body contract.

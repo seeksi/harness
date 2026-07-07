@@ -50,9 +50,14 @@ overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts
 
 ## NEXT-PASS AGENDA (what to build after /clear)
 
-1. **Decompose agent** — single brief → N disjoint lane briefs (LLM decompose step
-   before planRun; disjoint owns/file sets per lane; feeds multi-lane 1..4). Today the
-   operator hand-writes lanes[]. Biggest lever on multi-lane value.
+1. **Decompose agent** — DONE 2026-07-07 (harness batch, 3 lanes, promoted 2c900fb).
+   `console/lib/sandbox/decompose.ts` `decomposeBrief()`: READ-ONLY headless claude
+   (Read/Grep/Glob, zero-MCP, isolated home, audit, timeout) splits one brief into 1..4
+   file-disjoint lane briefs before planRun; fail-closed validation (owns caps 32×256,
+   prefix-disjointness, ≤4000 composed briefs, agent-content-free errors). Surfaces:
+   POST /api/runs `decompose:true` (XOR lanes), `gantry run --decompose`, LaunchConsole
+   toggle. Follow-ups: decompose-split approval flow (PhasePayload kind exists, unused);
+   live smoke of a real decomposed run.
 2. **Console handoff-respawn loop** — port web/ daemon's context-guard respawn
    (HANDOFF.md existence + exit 0 ⇒ respawn, cap 2, archive HANDOFF.<n>.md) into
    console runAgentInSandbox; needs the handoffFs seam web/lib/daemon/daemon.ts has.
