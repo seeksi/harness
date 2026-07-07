@@ -4,7 +4,7 @@
 > 2026-07-06). Open this + NOTES.md + memory (agent-exec-gate, umbrella-vps-deploy)
 > to continue. Repo: /home/alter/HARNESS, branch `main`.
 
-## Where things stand (all on `main`, local-only — N commits ahead of origin, NOT pushed)
+## Where things stand (all on `main`, pushed to origin 2026-07-06)
 
 DONE + verified:
 - **Dashboard rebuild** (`console/` Next.js 16 app) shipped: fleet home, `/run/[id]`,
@@ -78,7 +78,11 @@ explicit legacy override (agent uses exactly that home, no provisioning).
   never carries them. Promote to main stays human-gated + `ENABLE_PROMOTE_TO_MAIN`.
 
 ## Open / notes
-- `main` is local-only; user has not asked to push the agent-exec work yet (offer it).
+- `main` pushed to origin (2026-07-06, through 28ab173: isolated agent HOME). Isolated-home
+  live smoke PASSED same day: clean one-line trace (no global-CLAUDE.md noise), 711-token
+  agent context, gates A/B/D/C clear, artifacts cleaned. Note: the smoke agent didn't
+  commit itself (daemon wt-commit fallback fired), so the .gitconfig identity path in the
+  isolated home is still unexercised live.
 - `data/` (repo-root plan dir) is now gitignored (runtime artifact).
 - The dashboard binds tailnet IP for real use (100.72.193.64); localhost for local smoke.
 - Model alias quirk: `--model haiku` resolved to sonnet-5 in one run; sonnet/opus map fine.
