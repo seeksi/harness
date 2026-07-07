@@ -31,10 +31,14 @@ Two operational must-haves the live smoke exposed (see [[agent-exec-gate]]):
 `AGENT_CLI_PATH` must be the ABSOLUTE claude binary (minimal PATH doesn't find it);
 `buildAgentArgs` passes `--dangerously-skip-permissions` (headless agent has no
 approver → without it, plan mode → no work).
-NOTE (2026-07-06): do NOT set `AGENT_HOME` anymore — unset, the agent gets an ISOLATED
-minimal HOME (`~/.gantry/agent-home`, override with AGENT_ISOLATED_HOME) provisioned per
-spawn with only the Max-plan credential + a git identity. `AGENT_HOME=<path>` remains the
-explicit legacy override (agent uses exactly that home, no provisioning).
+NOTE (2026-07-07): do NOT set `AGENT_HOME` anymore — unset, each lane's agent gets an
+ISOLATED minimal HOME at `~/.gantry/agent-homes/<lane-slug>` (AGENT_ISOLATED_HOME overrides
+the BASE dir) provisioned per spawn with only the Max-plan credential + a git identity, and
+reclaimed at end of run. `AGENT_HOME=<path>` remains the explicit legacy override (agent
+uses exactly that home, no provisioning). A stale SINGULAR `~/.gantry/agent-home` from the
+pre-multi-lane build is not auto-removed — delete it once by hand. Multi-lane: pass
+`lanes:["brief1","brief2"]` (1..4) to POST /api/runs and set `LANE_CONCURRENCY=2..4` for
+overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts first).
 
 ## NEXT-PASS AGENDA (what to build after /clear)
 
@@ -46,13 +50,18 @@ explicit legacy override (agent uses exactly that home, no provisioning).
    Verified live: headless CLI auths from a cred-only HOME; project-level PostToolUse trace
    hook still fires (Gate D intact). Drop mode (sudo -H) untouched.
 
-2. **Multi-lane concurrency** (rough edge #2). Console daemon is single-lane (`RunPlan` = one
-   slug). web/ has the machinery ported (`laneUser`, LANE_CONCURRENCY, asyncPool, handoff-respawn
-   loop) but console runs one lane direct. In DIRECT mode there are no per-lane OS users (all run
-   as operator), so isolation between concurrent lanes is by worktree only — decide if concurrent
-   direct-mode lanes are safe (shared uid, sibling-worktree readability) or keep single-lane and
-   just add the handoff-respawn loop first. Needs a decompose step (one brief → N disjoint lanes)
-   which doesn't exist yet. Likely a harness-worthy multi-subtask build.
+2. **Multi-lane concurrency** — DONE 2026-07-07 (branch feat/multi-lane, cross-review PASS
+   Codex r3 + Claude r2). Console daemon runs 1..4 lanes per run: POST /api/runs takes
+   optional `lanes:[briefs]` (each trimmed, ≤4000); planRun mints `lane-<sha16(runId)>-<i>`
+   slugs (provenance from runId, never briefs). Execution: wt-new SERIAL → agent builds
+   CONCURRENT (`LANE_CONCURRENCY` env, clamp 1..4, default 1 = sequential) → cross-lane
+   session-id distinctness check → finalize-ALL lanes (wt-commit → Gate B → Gate D, lane
+   order) → merge-ALL (Gate C, lane order); any lane failure fails the whole run before any
+   merge. Per-lane isolated HOMEs `~/.gantry/agent-homes/<slug>` are reclaimed per run
+   (removeAgentHome, same fail-closed bar as provisioning). Concurrent direct-mode lanes
+   are an ACCEPTED posture (shared operator uid adds no new risk vs single-lane); drop mode
+   keeps per-lane uids. Follow-ups (non-gating): decompose agent (brief → N disjoint
+   lanes), handoff-respawn loop for console, per-lane model.
 
 3. **`gantry` CLI command** (new). A CLI that invokes the harness. Decide scope with the user:
    - Minimal: `gantry run "<brief>" [--project <path>] [--model ...] [--live]` that drives the

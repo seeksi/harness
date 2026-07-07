@@ -22,4 +22,4 @@ export {
   type RunAgentInSandboxResult,
 } from "./agent-runner";
 export { worktreePathFor, containedWorktree, relocateTrace } from "./worktree";
-export { ensureAgentHome } from "./agent-home";
+export { ensureAgentHome, removeAgentHome } from "./agent-home";
