@@ -244,3 +244,40 @@ per-lane model remain out-of-scope follow-ups.
 smoke: 2-lane live smoke PASSED 2026-07-07 (LANE_CONCURRENCY=2, run 0b0ddc6b, done in 9s;
 both lane homes overlapped then reclaimed; gates A/B×2/D×2/C×2 clear; main untouched;
 artifacts + stale singular ~/.gantry/agent-home cleaned).
+
+# gantry CLI (agenda #3) + install.sh (#4) — base: main b12ada1, branch feat/gantry-cli
+project: harness
+checkpoint: 2026-07-07 (context-guard soft limit; implementation done, verification starting)
+
+## Scope (user-confirmed via AskUserQuestion)
+- Commands: run + up + status. Backend: API client, single-file zero-dep Node script
+  (bin/gantry, node>=18 global fetch) over the console HTTP API — reuse, don't reimplement.
+
+## Done (uncommitted on feat/gantry-cli)
+- NEW bin/gantry (executable): `run "<brief>" [--lane ...]... [--project id|name]
+  [--model auto|haiku|sonnet|opus] [--url] [--no-follow]` → resolves project via
+  /api/projects (id|name match; single project auto; cwd-basename fallback), POSTs
+  /api/runs w/ CSRF headers (x-harness-request:1, sec-fetch-site, origin from base URL),
+  then tails /api/fleet/stream SSE filtered to runId; exits on health lifecycle
+  (done→0, failed→1); renders phase/gate/subtask/usage/health, skips trace+sync.
+  `up [--host --port --lanes 1..4 --fixture]` → realpath(argv[1])/../.. = repo,
+  spawns `npx next start` in console/ w/ live env (HARNESS_LIVE, ENABLE_AGENT_EXEC,
+  AGENT_ALLOW_DIRECT, AGENT_CLI_PATH resolved from PATH via findClaude, LANE_CONCURRENCY,
+  deletes AGENT_HOME); refuses if console/.next missing. `status` → GET /api/runs +
+  /api/projects. ponytail noted in-file: no SSE auto-reconnect (exit w/ hint).
+- install.sh: symlink bin/gantry → ~/.local/bin/gantry (idempotent, uninstall removes
+  only if it points at this repo), PATH warning, quickstart+env-vars doc heredoc.
+
+## Facts learned (for the CLI)
+- currentSlot() returns runId string | null. Terminal signal = health envelope w/
+  payload.lifecycle "done"|"failed" (daemon.ts:464,471). /api/projects exposes only
+  {id,name,agentCount,recentRuns} — path deliberately server-side.
+- Phase labels 1..6: decompose/build/route-cost/cross-review/merge/eval+promote.
+
+## Next steps
+1. Verify: bin/gantry usage/status error paths; `bin/gantry up` (bg) → status → live
+   1-lane run streaming to done → clean smoke artifacts (worktree, lane+integration
+   branches, plan file, SMOKE file) → kill server. Also test install.sh idempotency.
+2. cross-review skill on the diff (mandatory before merge) → fix rounds until PASS.
+3. Merge feat/gantry-cli → main, push. Update HANDOFF.md agenda #3+#4 DONE + NOTES
+   status line + memory (agent-exec-gate or new gantry-cli note if durable).
