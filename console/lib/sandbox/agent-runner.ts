@@ -22,6 +22,7 @@ import os from "os";
 import { AgentExecError, HarnessTimeoutError } from "@/lib/bridge/errors";
 import { appendAudit, type AuditRecord } from "@/lib/server/persist";
 import { containedWorktree, worktreePathFor } from "./worktree";
+import { ensureAgentHome } from "./agent-home";
 
 export { AgentExecError };
 
@@ -338,13 +339,17 @@ function resourceLimitEnv(limits?: ResourceLimits): Record<string, string> {
 /**
  * Minimal env for the agent child — an explicit ALLOWLIST, never the server's full
  * process.env (which could carry tokens/secrets). No ANTHROPIC_API_KEY (Max-plan; the
- * agent authenticates via its own ~/.claude session under HOME). PATH is pinned. Any
+ * agent authenticates via the .claude session under HOME). PATH is pinned. Any
  * SANDBOX_* resource-limit vars (consumed by the wrapper) are merged on top.
+ *
+ * HOME resolution (direct mode): `isolatedHome` (the freshly provisioned minimal agent
+ * home — the DEFAULT, see spawnAgent) → AGENT_HOME (explicit operator override: run with
+ * exactly this home, the pre-isolation behavior) → daemon HOME → /home/agent.
  */
-function agentEnv(limits?: ResourceLimits): NodeJS.ProcessEnv {
+function agentEnv(limits?: ResourceLimits, isolatedHome?: string): NodeJS.ProcessEnv {
   const env: Record<string, string> = {
     PATH: process.env.AGENT_PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    HOME: process.env.AGENT_HOME ?? process.env.HOME ?? "/home/agent",
+    HOME: isolatedHome ?? process.env.AGENT_HOME ?? process.env.HOME ?? "/home/agent",
     LANG: process.env.LANG ?? "C.UTF-8",
     ...resourceLimitEnv(limits),
   };
@@ -381,7 +386,8 @@ export function buildInvocation(
   cli: string,
   claudeArgs: string[],
   limits?: ResourceLimits,
-  user: string | undefined = AGENT_USER
+  user: string | undefined = AGENT_USER,
+  isolatedHome?: string
 ): { cmd: string; argv: string[]; spawnEnv: NodeJS.ProcessEnv } {
   const limitEnv = resourceLimitEnv(limits);
   const limitKeys = Object.keys(limitEnv);
@@ -397,7 +403,7 @@ export function buildInvocation(
           "set AGENT_USER for a privilege drop, or AGENT_ALLOW_DIRECT=1 to allow direct-local mode (threat model §6)"
       );
     }
-    return { cmd: cli, argv: claudeArgs, spawnEnv: agentEnv(limits) };
+    return { cmd: cli, argv: claudeArgs, spawnEnv: agentEnv(limits, isolatedHome) };
   }
   if (!USERNAME_RE.test(user)) {
     throw new AgentExecError(`invalid agent user (must be a plain username): ${JSON.stringify(user)}`);
@@ -482,11 +488,51 @@ export function spawnAgent(
       return;
     }
 
+    // ISOLATED HOME (direct mode default): provision the minimal agent home — only the
+    // Max-plan credential (re-copied fresh each spawn) + a git identity — so the agent
+    // stops inheriting the operator's ~/.claude (global CLAUDE.md/settings/MCP wiring).
+    // AGENT_HOME set (non-empty) ⇒ explicit operator override, skip provisioning
+    // (pre-isolation behavior, greppable escape hatch). A set-but-EMPTY value is a typo,
+    // not a choice — refused loudly rather than guessing between "override to nowhere"
+    // and "isolated default" (mirrors AGENT_ISOLATED_HOME's empty-string refusal). Drop
+    // mode ⇒ sudo -H owns HOME, never provisioned here. Provisioning failure FAILS
+    // CLOSED: an agent must never fall back silently to the operator's real HOME.
+    let isolatedHome: string | undefined;
+    try {
+      if (!(spec.user ?? AGENT_USER)) {
+        // Direct mode only — drop mode ignores AGENT_HOME entirely (sudo -H owns HOME).
+        if (process.env.AGENT_HOME === "") {
+          throw new AgentExecError(
+            'AGENT_HOME must be a non-empty path (or unset for the isolated-home default): ""'
+          );
+        }
+        if (process.env.AGENT_HOME === undefined) {
+          isolatedHome = ensureAgentHome();
+        }
+      }
+    } catch (e) {
+      // The refusal's audit row is written FATALLY: if it can't persist, reject with an
+      // error carrying the provisioning failure as cause — neither the refusal nor the
+      // audit gap goes unreported.
+      try {
+        audit("error", null, null, true);
+      } catch (auditErr) {
+        const both = new AgentExecError(
+          `agent home provisioning failed (${e instanceof Error ? e.message : String(e)}) ` +
+            `AND its audit row could not be written: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`
+        );
+        both.cause = e;
+        reject(both);
+        return;
+      }
+      reject(e);
+      return;
+    }
     let inv: ReturnType<typeof buildInvocation>;
     try {
       // Drop to the lane's user via sudo if set (spec.user, defaulting to AGENT_USER for
       // single-lane). buildInvocation re-validates it with the same not-root/not-daemon checks.
-      inv = buildInvocation(DEFAULT_AGENT_CLI, args, opts.resourceLimits, spec.user);
+      inv = buildInvocation(DEFAULT_AGENT_CLI, args, opts.resourceLimits, spec.user, isolatedHome);
     } catch (e) {
       audit("invalid-args", null, null);
       reject(e);

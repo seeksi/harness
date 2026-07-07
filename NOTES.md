@@ -105,3 +105,65 @@ status: DASHBOARD REBUILD COMPLETE — Batches A+B+C promoted. Remaining: operat
 5. HIGH sandbox: audit swallowed + no mandatory pre-spawn audit. Fail-closed pre-spawn audit (same pattern live-bridge already adopted).
 6. MED/LOW tests: cover nonzero-exit/null-session/relocate=false fail-closed; timeout test needs pid for process-group kill.
 Claude review pending; reconcile then fix.
+
+# Isolated agent HOME (HANDOFF agenda #1) — base: main, branch feat/agent-home-isolation
+project: harness
+checkpoint: 2026-07-06 (context-guard soft limit; implementation done, tests green)
+
+## Investigation results (verified live, scratchpad probes)
+- Headless claude 2.1.202 auths fine from a HOME containing ONLY .claude/.credentials.json (Max plan, no API key).
+- CLI self-provisions .claude.json/projects/sessions in the fresh HOME; credential untouched on a normal run.
+- Project-level PostToolUse hooks ($CLAUDE_PROJECT_DIR-relative) STILL FIRE under fresh HOME -> Gate D trace pipeline intact.
+- Gap found: fresh HOME has no ~/.gitconfig -> agent `git commit` would die; provisioner writes one.
+
+## Done (on feat/agent-home-isolation)
+- NEW console/lib/sandbox/agent-home.ts: ensureAgentHome() -> AGENT_ISOLATED_HOME ?? ~/.gantry/agent-home;
+  0700 dirs, symlink-refusal, credential RE-COPIED each spawn (0600, tmp+wx+rename), one-time .gitconfig
+  (operator identity via `git config --get`, fallback GANTRY Agent <agent@gantry.local>), fail closed if
+  operator cred missing. ponytail note: copy-at-spawn divergence ceiling documented in-file.
+- agent-runner.ts: spawnAgent provisions isolated home in DIRECT mode when AGENT_HOME unset (AGENT_HOME set =
+  explicit legacy override; drop mode untouched — sudo -H owns HOME). Provision failure fails closed (audit "error",
+  no spawn). buildInvocation/agentEnv take optional isolatedHome param. index.ts re-exports ensureAgentHome.
+- Tests: agent-home.test.ts (6 cases) + 3 spawnAgent isolated-home cases; agent-runner.test.ts beforeEach now stubs
+  AGENT_HOME (keeps legacy-path tests off the real fs). Sandbox suite 64/64 green.
+
+## Next steps
+1. Full console suite (npx vitest run) + tsc + eslint + next build.
+2. Update HANDOFF.md: agenda #1 done; run recipe drops AGENT_HOME=/home/alter (isolated is the new default).
+3. Update memory agent-exec-gate (isolated HOME shipped note).
+4. cross-review skill on the diff (spawn boundary rule), then merge branch -> main.
+5. Optional operator live smoke: run a real GANTRY run and confirm trace no longer carries global CLAUDE.md noise.
+
+## Isolated agent HOME — cross-review rounds r2/r3 (2026-07-06 session 2)
+- r2 gates: sandbox 66/66, full 318, lint+build clean. Codex r2 (thread 019f39ce-fb6e-7642-8be7-0bf01fa168ea): BLOCK, 6 findings
+  (validation after wipe/mkdir; marker accepts any dirent; cred lstat→read TOCTOU; symlinked parent bypasses repo ban via realpath;
+  empty AGENT_ISOLATED_HOME silently fell back; test asserted the fallback). All 6 fixed.
+- r3 gates: 69/69 sandbox, 321 full. Codex r3 (thread 019f39d6-2f0d-7860-b1b0-e1063f22f425): BLOCK, 5 High + 1 Med
+  (custom-home symlinked parent still trusted; fresh-home mkdir through symlinked .gantry before pin; cred validated after wipe;
+  worktrees ban misses real sibling when repoRoot behind symlinks + wtDir absent; provisioning-failure audit best-effort; tests lack
+  no-mutation asserts). Fixes applied (r4 working tree):
+  - expectedRealFor(): custom paths must be FULLY canonical (anchor=fs root); default anchored at realpath(homedir). Checked via
+    realDestination() (deepest-existing-ancestor realpath) BEFORE any mutation.
+  - readOperatorCredential(): O_NOFOLLOW+fstat-on-fd, read into memory BEFORE the wipe. Refusals now leave world untouched.
+  - Ban set derived from realpath(repoRoot) too (real sibling wtDir banned even when absent).
+  - Tests: fixtures realpath'd (macOS /tmp), no-mutation asserts, cred-failure-preserves-marked-home case. 70/70, full 322, lint+build green.
+- RECONCILIATION RULING (carry to human): Codex r3 finding 5 (provisioning-failure "error" audit is best-effort) NOT fixed —
+  repo pattern reserves fatal audit for the pre-spawn "spawn" row (T7 no-unaudited-RUN); all refusal paths (refused/invalid-args)
+  are deliberately best-effort, shipped through prior PASSed reviews. Downgrade Med follow-up, flag at merge.
+- NOTE: marker format changed to content "gantry-agent-home v1\n" — a stale ~/.gantry/agent-home provisioned by the OLD build (empty
+  marker) will refuse; operator deletes it once (error message says so).
+
+## Isolated agent HOME — rounds r4–r6, PASS (2026-07-06 session 3)
+- r4 (reply-mode on r3 thread): BLOCK, 3 High + 1 Med. Dispositions:
+  1. provisioning-failure audit best-effort → FIXED fatal-with-cause: audit("error") written fatally; if appendAudit throws,
+     reject AgentExecError reporting both, original provisioning error as `cause`. (Moots the r3 reconciliation ruling above.)
+  2. AGENT_HOME="" treated as unset → FIXED: set-but-empty refused with AgentExecError in direct mode; provisioning gate is
+     `=== undefined`. Tests delete the var via vi.stubEnv(name, undefined) (works in vitest 4).
+  3. expectedRealFor homedir anchor tolerates symlinked homedir ancestors → DISPUTED via spec amendment ("refuse symlinked
+     ancestors BELOW the trust anchor"; agent can't re-point /home; Fedora/macOS system symlinks legit). Codex accepted.
+  4. marker read-before-size-check → FIXED: size precheck vs Buffer.byteLength(MARKER_CONTENT) before content compare.
+- r5: BLOCK, 1 High — the "" refusal fired before the direct/drop branch, breaking drop mode's "AGENT_HOME never consulted"
+  contract → FIXED: refusal + provisioning gate both scoped inside `!(spec.user ?? AGENT_USER)`. Drop-mode regression test added.
+- r6: **PASS.** Final gates: sandbox 72/72, full console 324/324, eslint clean, next build clean.
+- Merged to main; HANDOFF.fix-round.md deleted. Open (unchanged): haiku alias quirk; copy-at-spawn refresh-rotation ceiling
+  (ponytail note in agent-home.ts); per-lane homes required before multi-lane.

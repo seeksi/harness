@@ -23,7 +23,7 @@ DONE + verified:
 ```
 cd /home/alter/HARNESS/console && npm run build
 ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 HARNESS_LIVE=1 \
-  AGENT_CLI_PATH=/home/alter/.local/bin/claude AGENT_HOME=/home/alter \
+  AGENT_CLI_PATH=/home/alter/.local/bin/claude \
   CONSOLE_BASE_URL=http://127.0.0.1:3000 HARNESS_REPO=/home/alter/HARNESS \
   npx next start -H 127.0.0.1 -p 3000        # or -H 100.72.193.64 for tailnet
 ```
@@ -31,17 +31,20 @@ Two operational must-haves the live smoke exposed (see [[agent-exec-gate]]):
 `AGENT_CLI_PATH` must be the ABSOLUTE claude binary (minimal PATH doesn't find it);
 `buildAgentArgs` passes `--dangerously-skip-permissions` (headless agent has no
 approver → without it, plan mode → no work).
+NOTE (2026-07-06): do NOT set `AGENT_HOME` anymore — unset, the agent gets an ISOLATED
+minimal HOME (`~/.gantry/agent-home`, override with AGENT_ISOLATED_HOME) provisioned per
+spawn with only the Max-plan credential + a git identity. `AGENT_HOME=<path>` remains the
+explicit legacy override (agent uses exactly that home, no provisioning).
 
 ## NEXT-PASS AGENDA (what to build after /clear)
 
-1. **Isolated agent HOME/config** (rough edge #1). Today the agent inherits the operator's
-   `~/.claude` (global CLAUDE.md + deferred ToolSearch surface leak into its trace — cosmetic
-   but noisy, and couples the agent to personal config). Goal: give the spawned agent its own
-   minimal HOME/config dir with ONLY the Max-plan credential it needs for auth, not the global
-   CLAUDE.md / settings / deferred-tool wiring. Constraint: it must still auth via the Max-plan
-   session (no API key), so the credential (`~/.claude/.credentials.json`) or an equivalent must
-   be reachable. Investigate: can a separate CLAUDE_CONFIG_DIR/HOME carry just creds? Keep the
-   security invariants. Cross-review before merge (touches the spawn boundary).
+1. **Isolated agent HOME/config** — DONE 2026-07-06 (branch feat/agent-home-isolation).
+   `console/lib/sandbox/agent-home.ts` `ensureAgentHome()`: direct-mode agents now get a
+   minimal HOME at `~/.gantry/agent-home` (AGENT_ISOLATED_HOME to relocate) with ONLY
+   `.claude/.credentials.json` (re-copied fresh each spawn, 0600/0700, symlink-refusing,
+   fail-closed) + a one-time `.gitconfig` (fresh HOME has no git identity → commits died).
+   Verified live: headless CLI auths from a cred-only HOME; project-level PostToolUse trace
+   hook still fires (Gate D intact). Drop mode (sudo -H) untouched.
 
 2. **Multi-lane concurrency** (rough edge #2). Console daemon is single-lane (`RunPlan` = one
    slug). web/ has the machinery ported (`laneUser`, LANE_CONCURRENCY, asyncPool, handoff-respawn

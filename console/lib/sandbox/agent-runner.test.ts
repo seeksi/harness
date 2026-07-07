@@ -35,6 +35,9 @@ beforeEach(() => {
   // spawn/invocation tests that exercise direct-local mode run. The direct-mode gate
   // block below overrides it per-case to prove the fail-closed refusal.
   vi.stubEnv("AGENT_ALLOW_DIRECT", "1");
+  // AGENT_HOME set ⇒ explicit-override path: spawnAgent skips isolated-home provisioning,
+  // keeping these tests off the real filesystem. The isolated-home block below unstubs it.
+  vi.stubEnv("AGENT_HOME", path.join(os.tmpdir(), "agent-home-override"));
 });
 
 function spec(over: Partial<AgentSpec> = {}): AgentSpec {
@@ -640,6 +643,89 @@ describe("spawnAgent", () => {
     // Both the mandatory pre-spawn "spawn" row and the settle-time "timeout" row exist (DESC).
     expect(listAudit().map((r) => r.outcome)).toEqual(["timeout", "spawn"]);
     killSpy.mockRestore();
+  });
+});
+
+describe("spawnAgent — isolated agent HOME (direct-mode default)", () => {
+  // Fake operator home = the credential source; the isolated home is provisioned into a
+  // scratch dir via AGENT_ISOLATED_HOME. AGENT_HOME is UNSET here (the beforeEach stub is
+  // overridden) so the isolated-home default path is exercised.
+  let operatorHome: string;
+  let isolated: string;
+  beforeEach(() => {
+    // realpath'd: the provisioner requires canonical paths (macOS /tmp is a symlink).
+    operatorHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "op-home-")));
+    fs.mkdirSync(path.join(operatorHome, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(operatorHome, ".claude", ".credentials.json"), "{}", { mode: 0o600 });
+    isolated = path.join(operatorHome, "isolated");
+    vi.stubEnv("HOME", operatorHome);
+    vi.stubEnv("AGENT_HOME", undefined); // deletes the var (vitest 4) — "" would be refused
+    vi.stubEnv("AGENT_ISOLATED_HOME", isolated);
+    vi.stubEnv("ENABLE_AGENT_EXEC", "1");
+  });
+  afterEach(() => fs.rmSync(operatorHome, { recursive: true, force: true }));
+
+  it("provisions the isolated home and spawns with HOME pointed at it (not the operator's)", async () => {
+    mintLane("lane-x");
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawnFn = vi.fn((_c: string, _a: string[], options: { env?: NodeJS.ProcessEnv }) => {
+      capturedEnv = options.env;
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"type":"result","session_id":"sess-abc123"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    await spawnAgent(spec(), { spawnFn: spawnFn as never });
+    expect(capturedEnv!.HOME).toBe(isolated);
+    expect(fs.existsSync(path.join(isolated, ".claude", ".credentials.json"))).toBe(true);
+  });
+
+  it("FAILS CLOSED (no spawn, error audited) when provisioning fails — never falls back to the operator HOME", async () => {
+    fs.rmSync(path.join(operatorHome, ".claude", ".credentials.json"));
+    mintLane("lane-x");
+    const spawnFn = vi.fn();
+    await expect(spawnAgent(spec(), { spawnFn: spawnFn as never })).rejects.toBeInstanceOf(AgentExecError);
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(listAudit().map((r) => r.outcome)).toEqual(["error"]);
+  });
+
+  it("AGENT_HOME set ⇒ explicit override: no provisioning, HOME is exactly the override", async () => {
+    const override = path.join(operatorHome, "legacy-home");
+    vi.stubEnv("AGENT_HOME", override);
+    mintLane("lane-x");
+    let capturedEnv: NodeJS.ProcessEnv | undefined;
+    const spawnFn = vi.fn((_c: string, _a: string[], options: { env?: NodeJS.ProcessEnv }) => {
+      capturedEnv = options.env;
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable };
+      child.stdout = Readable.from(['{"type":"result","session_id":"sess-abc123"}\n']);
+      child.stdout.on("end", () => child.emit("close", 0));
+      return child as unknown as ChildProcess;
+    });
+    await spawnAgent(spec(), { spawnFn: spawnFn as never });
+    expect(capturedEnv!.HOME).toBe(override);
+    expect(fs.existsSync(isolated)).toBe(false); // provisioning skipped entirely
+  });
+
+  it('AGENT_HOME="" (set-but-empty) is REFUSED — not treated as unset, no provisioning, no spawn', async () => {
+    vi.stubEnv("AGENT_HOME", "");
+    mintLane("lane-x");
+    const spawnFn = vi.fn();
+    await expect(spawnAgent(spec(), { spawnFn: spawnFn as never })).rejects.toThrow(/AGENT_HOME must be a non-empty path/);
+    expect(spawnFn).not.toHaveBeenCalled();
+    expect(fs.existsSync(isolated)).toBe(false);
+    expect(listAudit().map((r) => r.outcome)).toEqual(["error"]);
+  });
+
+  it("drop mode (spec.user set) ignores AGENT_HOME entirely — even set-but-empty (sudo -H owns HOME)", async () => {
+    vi.stubEnv("AGENT_HOME", "");
+    vi.stubEnv("AGENT_CLI_PATH", "/abs/claude"); // absolute cli required in drop mode
+    vi.resetModules(); // AGENT_CLI_PATH is bound at module load
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    const spawnFn = fakeSpawn(['{"type":"result","session_id":"sess-drop01"}']);
+    await mod.spawnAgent(spec({ user: "agent" }), { spawnFn: spawnFn as never });
+    expect(spawnFn).toHaveBeenCalled(); // no refusal
+    expect(fs.existsSync(isolated)).toBe(false); // no provisioning either
   });
 });
 
