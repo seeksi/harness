@@ -12,6 +12,7 @@ export interface LaunchPayload {
   projectName: string;
   brief: string;
   modelRouting: string; // "auto" | "haiku" | "sonnet" | "opus"
+  decompose?: boolean; // ask the server to split the brief into disjoint lanes. Default OFF.
 }
 export interface LaunchProject {
   id: string;
@@ -25,16 +26,38 @@ interface Props {
   onLaunch: (p: LaunchPayload) => void;
 }
 
+// Pure so it's unit-testable without a DOM (mirrors laneNowSec's pattern in
+// RunLane.tsx). `decompose` is only present on the payload when true — omitted
+// (not `false`) when off, matching the type's `?: boolean` default-OFF contract.
+export function buildLaunchPayload(
+  projectId: string,
+  projects: LaunchProject[],
+  brief: string,
+  modelRouting: string,
+  decompose: boolean
+): LaunchPayload {
+  const proj = projects.find((p) => p.id === projectId);
+  return {
+    projectId,
+    projectName: proj?.name ?? projectId,
+    brief: brief.trim(),
+    modelRouting,
+    ...(decompose ? { decompose: true } : {}),
+  };
+}
+
 export function LaunchConsole({ open, projects, onClose, onLaunch }: Props) {
   const [projectId, setProjectId] = useState("");
   const [brief, setBrief] = useState("");
   const [routing, setRouting] = useState("auto");
+  const [decompose, setDecompose] = useState(false);
   const [touched, setTouched] = useState(false);
   const briefRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (open) {
       setTouched(false);
+      setDecompose(false); // a canceled "split" choice must not survive close→reopen
       setTimeout(() => briefRef.current?.focus(), 0);
     }
   }, [open]);
@@ -48,11 +71,11 @@ export function LaunchConsole({ open, projects, onClose, onLaunch }: Props) {
   function submit() {
     setTouched(true);
     if (!valid) return;
-    const proj = projects.find((p) => p.id === projectId);
-    onLaunch({ projectId, projectName: proj?.name ?? projectId, brief: brief.trim(), modelRouting: routing });
+    onLaunch(buildLaunchPayload(projectId, projects, brief, routing, decompose));
     setBrief("");
     setProjectId("");
     setRouting("auto");
+    setDecompose(false);
   }
 
   return (
@@ -99,6 +122,28 @@ export function LaunchConsole({ open, projects, onClose, onLaunch }: Props) {
             <option value="sonnet">force sonnet</option>
             <option value="opus">force opus</option>
           </select>
+        </Field>
+
+        <Field label="Decompose (optional)">
+          <button
+            type="button"
+            onClick={() => setDecompose((v) => !v)}
+            aria-pressed={decompose}
+            aria-label={decompose ? "decompose into lanes: on" : "decompose into lanes: off"}
+            title="Ask the server to split the brief into disjoint parallel lanes."
+            className="mono"
+            style={{
+              padding: "8px 12px",
+              borderRadius: 6,
+              fontSize: 12,
+              cursor: "pointer",
+              color: decompose ? "var(--amber)" : "var(--text-dim)",
+              background: "var(--surface-1)",
+              border: `1px solid ${decompose ? "var(--amber-line)" : "var(--border)"}`,
+            }}
+          >
+            {decompose ? "◉ split into lanes" : "◯ single lane"}
+          </button>
         </Field>
 
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 18 }}>
