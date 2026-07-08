@@ -7,6 +7,7 @@
 // GET /api/runs + /api/projects (status).
 //
 //   gantry run "<brief>" [--lane <brief>... | --decompose] [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
+//              (auto = tier routed per lane; named model forces all lanes)
 //   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
 //   gantry status [--url <base>]
 //
@@ -75,6 +76,7 @@ function parseArgs({ args, options, allowPositionals = false }) {
 function usage() {
   console.log(`usage:
   gantry run "<brief>" [--lane <brief>... | --decompose] [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
+             (auto = tier routed per lane; named model forces all lanes)
   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
   gantry status [--url <base>]`);
   process.exit(2);
