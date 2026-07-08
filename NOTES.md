@@ -749,3 +749,18 @@ status: Group A cross-review PASS 2026-07-08; committed to feat/followups (one c
   go/no-go → merge feat/followups → main → push held for operator say-so (main also unpushed since
   f149661 — confirm push scope with operator). THEN Group B drafts (VPS drop-mode #6 + ntfy deep-link
   #5 verify) + Group C live smokes (operator session). Do NOT merge/push without say-so.
+
+## Group B — CLOSED 2026-07-08 (already-landed; docs reconciled, operator go)
+Investigated on "start Group B": the HANDOFF listed B as NOT started, but its substantive work was
+already delivered + live-validated by the #15/#16a/#17b/#17c workstreams. No duplicate drafting done.
+- #6 VPS drop-mode: egress-firewall (`deploy/tier3/agent-egress.nft` + `egress-proxy/`), resource-limit
+  (`agent-exec-wrapper.sh` cgroup scope), agent-N-account (`01b-provision-lane-users.sh`) all committed;
+  threat-model-agent-exec §7 signed off PASS/APPROVED 2026-06-24; `ENABLE_AGENT_EXEC=1` live on VPS,
+  `conformance-multilane.sh` 17/17 PASS (`docs/HANDOFF-17c.md`). NOTHING to draft.
+- #5 ntfy deep-link: VERIFIED CORRECT. `notifier.ts:37 deepLink()` uses CONSOLE_BASE_URL (alias
+  NTFY_DEEPLINK_BASE), abs-link passthrough, runRoute(runId) fallback, relative degrade — no hardcoded
+  host; `notifier.test.ts` covers both base-env paths + Click header. No code change.
+- Doc fix (only genuine stale artifact): `deploy/tier3/GAPS.md` was the pre-completion draft-review; added
+  a dated SUPERSEDED banner + flipped its two stale `OPEN` cells (§7, G1/G9 Bash/commit) to RESOLVED with
+  evidence (Bash in DEFAULT_TOOLS agent-runner.ts:139 + daemon wt-commit daemon.ts:532). Doc-only, no code.
+Remaining truly-open = operator-hands only: Group C live smokes (graph showpiece, phone-approve, ntfy tap).

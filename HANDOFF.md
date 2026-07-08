@@ -1,4 +1,4 @@
-# HANDOFF — Non-gating follow-ups batch (Group A code done; B/C pending) — 2026-07-08T08:42-07:00
+# HANDOFF — Non-gating follow-ups batch (Group A code done; B CLOSED; C = live smokes) — 2026-07-08
 
 > Resume with NOTES.md (section "# Non-gating follow-ups batch (post-agenda)") + this file.
 > Repo /home/alter/HARNESS, branch **feat/followups** (off main ffb18be). Working tree
@@ -17,8 +17,15 @@
     harness-bridge.test.ts / daemon.test.ts:13,20 NODE_ENV / notifier.test.ts — ZERO in files I
     touched); `npx next build` compiled; `node --check bin/gantry` OK; `bash tests/install.test.sh`
     = 29/0 exit 0.
-- **Group B (operator-gated, draft-only): NOT started.** VPS drop-mode (#6) scripts + threat-model
-  §7 doc; ntfy tap deep-link (#5) code verify.
+- **Group B: CLOSED 2026-07-08 (already-landed, docs reconciled).** On "start Group B" the substantive
+  work was found already delivered + live-validated by #15/#16a/#17b/#17c — no duplicate drafting.
+  - #6 VPS drop-mode: egress-firewall (`agent-egress.nft` + `egress-proxy/`), resource-limit
+    (`agent-exec-wrapper.sh`), agent-N-account (`01b-provision-lane-users.sh`) all committed;
+    threat-model §7 signed off 2026-06-24; `ENABLE_AGENT_EXEC=1` live, `conformance-multilane.sh` 17/17.
+  - #5 ntfy deep-link: VERIFIED correct (`notifier.ts:37` CONSOLE_BASE_URL/NTFY_DEEPLINK_BASE, no
+    hardcoded host; tested in `notifier.test.ts`). No code change.
+  - Doc fix only: `deploy/tier3/GAPS.md` SUPERSEDED banner + two stale `OPEN` cells → RESOLVED. See NOTES
+    "## Group B — CLOSED 2026-07-08".
 - **Group C (live smokes, need running server + creds): NOT started.** mixed-tier already done
   (see routing smoke in NOTES); remaining = /graph showpiece capture, phone-approve over tailnet.
 
