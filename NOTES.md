@@ -582,5 +582,115 @@ no findings, routing r2 after 1 refuted High + 1 Medium follow-up); C 448/448 + 
 + opus judge PASS (route.py regex parity byte-identical; briefs-steer-spend-only and
 decompose-contract-unchanged invariants both verified). Batch spanned 2 sessions via
 context-guard HANDOFF respawn. Follow-ups (non-gating): plan.jsonl serialization
-golden-test (Medium, accepted); live mixed-tier --decompose smoke; HUD lane-tier badge
-ponytail.
+golden-test (Medium, accepted); ~~live mixed-tier --decompose smoke~~ (done, below);
+HUD lane-tier badge ponytail.
+
+smoke: mixed-tier live smoke PASSED 2026-07-08 (gantry up --lanes 2 localhost, gantry
+run --decompose, model auto, run c0c24c3a..., ~100s). Audit rows prove the mix in ONE
+run: decompose slug decomp-c0c24c3af6908364 model:sonnet (run-global under auto);
+lane-0 (docs task) model:haiku; lane-1 (review/security task) model:opus. Per-lane
+usage envelopes emitted (lane-1 908 tok; lane-0 530k tok $0.0978 — cache-inclusive,
+non-gating oddity: the haiku docs lane burned far more than the opus lane). Gates
+A/B×2/D×2/C×2 clear, run done exit 0, reset-base returned clean main, agent homes
+reclaimed. Artifacts cleaned: 2 lane worktrees+branches, integration, data/plans/*
+(incl. 6 stale plan files from prior runs), server down. Routing follow-up CLOSED.
+
+# CLI tests (HANDOFF agenda #4) — base: main d0bff05
+project: harness
+
+## Subtasks
+- slug: clitest    spec: "make bin/gantry requirable (require.main guard + test-only module.exports of parseArgs/baseUrl/csrfHeaders/api/resolveProject/renderEvent/findClaude — ZERO behavior change as a CLI) + vitest coverage: parser (long options, defaults, unknown-option/missing-value errors, positionals, --lane repeat, --decompose XOR --lane), baseUrl/csrfHeaders, and api/resolveProject/cmdStatus/followRun against an in-test node:http mock server (incl. SSE stream: filtered runId, done→0 / failed→1 lifecycle exit, malformed-JSON event skip)"  owns: bin/gantry, console/lib/cli/gantry-cli.test.ts  tier: default
+- slug: installsh  spec: "tests/install.test.sh: bash asserts for install.sh against a TMPDIR fake repo + fake ~/.local/bin (fresh install symlink target, idempotent×2, uninstall removes only own symlink, refuses clobbering foreign non-gantry file, symlinked-repo canonicalization); install.sh itself read-only"  owns: tests/install.test.sh  tier: cheap
+
+## Design decisions (S0, don't relitigate)
+- Test seam: bin/gantry gets `if (require.main === module) main();` + module.exports of
+  the pure/units above. Test-only export — argv behavior byte-identical. NO rewrite to
+  ESM, NO extraction into lib files (single-file zero-dep CJS stance stays).
+- CLI tests ride the EXISTING console vitest suite (console/lib/cli/gantry-cli.test.ts,
+  createRequire(import.meta.url) → absolute path to repo-root bin/gantry). Reuses the
+  installed harness; Gate C command unchanged for the vitest half. No jsdom (repo rule).
+- Mock server = node:http on an ephemeral port inside the test file (listen(0)),
+  torn down per suite. SSE = plain chunked text/event-stream response. process.exit
+  in followRun: assert via injected/spied exit if needed — but do NOT refactor
+  followRun's exit semantics; spy on process.exit in-test (vitest vi.spyOn).
+- installsh lane: NEW tests/install.test.sh, plain bash + set -euo pipefail, no bats
+  dep. HOME + repo faked under mktemp -d; PATH-warning case not asserted (cosmetic).
+  Gate C gains one step: `bash tests/install.test.sh` (documented here; cheap, <2s).
+- Router says cheap for clitest (\btest\b keyword); orchestrator holds DEFAULT —
+  mock-server/SSE/exit-code logic + edits to a shipped CLI (same rationale class as
+  the deck/cli precedents). installsh stays cheap.
+- Lanes are file-disjoint (bin/gantry + new console test file vs new tests/ script).
+
+## Checkpoint — S2 launched (2026-07-08, post-/clear resume)
+- Gate A CLEAR $0.212/5.0 (plan.jsonl repo root). Worktrees clitest + installsh off
+  main d0bff05 (`../HARNESS.worktrees/{clitest,installsh}`). NOTES.<slug>.md spec
+  copied into each; console/node_modules + root node_modules symlinked into clitest
+  worktree (vitest/eslint). 2 background build agents in flight: clitest=sonnet
+  (bin/gantry test seam + console/lib/cli/gantry-cli.test.ts), installsh=haiku
+  (tests/install.test.sh). NOTES.{clitest,installsh}.md also written at repo root
+  (untracked spec copies; delete at S7 alongside plan.jsonl).
+- If resuming: check `git -C ../HARNESS.worktrees/<slug> status --porcelain` +
+  `diff --stat` for build output, then S3 cross-review per lane (fresh Codex context:
+  one-line spec + `git -C <wt> diff main` INCLUDING untracked new files — `git add -N`
+  first so the new test files show). Reconcile strict-biased → wt-commit + wt-verify.
+
+## S2/S3 progress (2026-07-08, post-/clear session)
+- BOTH build agents DONE. installsh (haiku): tests/install.test.sh built + indep-verified
+  (19 PASS). Cross-review Codex (thread 019f40b1-2bc0-7212-8681-f110e4f974a1) BLOCK, 5
+  findings — RECONCILED + FIXED by me directly (contained bash file): (1) High `|| true`
+  masked exit codes → run_install() captures rc, asserts exit 0 on install/idempotent/
+  uninstall/symlinked (non-zero only for clobber); (2) High weak canonicalization assert
+  → strengthened + uninstall-via-symlink check; (3) Med `[ ! -e ]` passes dangling symlink
+  → added `&& [ ! -L ]`; (4) Med test coupling → per-scenario subdirs under one TMP_BASE
+  (idempotency stays sequential by design); (5) Low temp-dir leak (also my self-review) →
+  single TMP_BASE removed on EXIT. Re-verified: 26 PASS 0 fail, run2 exit 0 self-clean.
+  NEEDS: Codex r2 re-review of fixed file → then wt-commit + wt-verify.
+- clitest (sonnet): bin/gantry test seam (require.main guard + module.exports of 9 units,
+  agent says no hoist needed — all were top-level) + console/lib/cli/gantry-cli.test.ts
+  (382 lines). Agent reported 481 vitest (448+33), node --check OK, eslint clean. bin/gantry
+  diff = +8/-4 (12 lines). node --check OK confirmed by me. run-guard tests use spawnSync on
+  real binary (guards live in unexported main). ponytail: cmdUp/cmdRun/findClaude-PATH-scan
+  not unit-tested (argv[1]/spawn deps). NEEDS: indep vitest re-run + Codex cross-review →
+  reconcile → wt-commit + wt-verify.
+- THEN S4 integ-start + integ-merge clitest then installsh; Gate C on integration adds
+  `bash tests/install.test.sh` step. S5 trace+judge. S6 human. S7 cleanup (delete repo-root
+  NOTES.{clitest,installsh}.md + plan.jsonl, status line, HANDOFF agenda #4 DONE).
+
+## S3→S4→GateC DONE (2026-07-08, resume session) — at S5
+- clitest indep re-verify: 483/483 vitest, eslint clean, node --check OK. Seam diff = only
+  `require.main` guard + `module.exports` of 9 units (byte-identical CLI). Codex r2 (thread
+  019f422c) BLOCK×3 → fixed (cwd-indep GANTRY_BIN; follow-mode tests record mock hits) →
+  r3 BLOCK×2 NEW (failed→1 still false-green via stream-drop/unknown since cmdRun maps every
+  non-"done" to exit 1; followedStream proved only URL not SSE-Accept branch) — BOTH CONFIRMED
+  vs bin/gantry (followRun:225 "unknown", cmdRun:238). FIXED: (A) stream held OPEN after
+  terminal frame (no res.end) so child can only exit by recognizing the frame — MUTATION-TESTED
+  (broke lifecycle check → failed→1 now TIMES OUT, done→0 also fails; then restored bin/gantry
+  byte-identical); (B) hit recorded inside validated SSE branch as marker "SSE /api/fleet/stream".
+  → Codex r4 PASS. Claude self-review (code-read + mutation) concurs → clitest cross-review PASS.
+- clitest wt-commit: rm node_modules SYMLINK first → commit 7233dbf = ONLY bin/gantry (+8/-4) +
+  gantry-cli.test.ts (508 ln). Gate B CLEAR. installsh Gate B re-confirmed (636e2f5, 1 file).
+- S4: integ-start (branch `integration`) + integ-merge clitest then installsh — zero conflict.
+  NOTES/HANDOFF tracked-mods carried over uncommitted; untracked NOTES.{clitest,installsh}.md +
+  plan.jsonl NOT on either lane branch (verified) → no merge balk.
+- Gate C on integration ALL GREEN: vitest 483/483, eslint clean, tsc=11 baseline (NEW error
+  TS7006 in gantry-cli.test.ts:340 `mock.calls.map(args=>...)` implicit-any → annotated
+  `(args: unknown[])`, committed integration f149661 — pure type fix, no logic change),
+  next build OK, node --check bin/gantry OK, `bash tests/install.test.sh` 29 PASS exit 0,
+  live-argv `node bin/gantry` no-arg → usage exit 2 (designed; proves require.main guard runs
+  main() when executed but not on require).
+- NEXT (S5): harness.sh trace <orchestrator session ids>; scoped opus judge (surfaces = S0
+  decisions + NOTES.{clitest,installsh}.md; high-risk: bin/gantry byte-identical + exports
+  test-only; installsh canonicalization direction). Then S6 human go/no-go → promote → S7 cleanup.
+
+status: COMPLETE 2026-07-08 — agenda #4 CLI tests promoted to main f149661 (ff), S6 human GO
+(promote; push held for separate say-so). Gates: A $0.212/5.0; B cross-review PASS ×2 (clitest
+Codex r4 after r2 BLOCK×3 + r3 BLOCK×2 — the r3 High "failed→1 false-green via stream-drop"
+was live MUTATION-TESTED then fixed by holding the mock SSE stream open; installsh Codex r3
+PASS prior session); C 483/483 vitest + eslint + tsc 11-baseline + next build + node --check
+bin/gantry + install.test.sh 29/0 exit 0 + live-argv usage exit 2, zero-conflict merges; D
+both orchestrator traces clean (1291d2b1 + 16c1ac7d, no anomalies) + opus judge PASS (bin/gantry
+byte-identical, exports test-only, installsh canonicalization direction sound, follow-mode not
+false-green). One Gate-C fix on integration (f149661): tsc noImplicitAny annotation on
+mock.calls map arg (pure type, no logic change). Promote auto-cleaned both lane worktrees +
+feat/clitest + feat/installsh + integration branches. Follow-up (non-gating, ponytail in test):
+cmdUp / findClaude-PATH-scan branch not unit-tested (argv[1]/spawn deps).

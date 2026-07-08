@@ -1,3 +1,24 @@
+# HANDOFF — agenda #4 CLI tests: DONE (promoted main f149661) — 2026-07-08
+
+> Agenda #4 (CLI tests) is CLOSED. All four NEXT-PASS AGENDA items (#1 decompose, #2
+> handoff-respawn, #3 per-lane routing, #4 CLI tests) are now DONE. Standing GANTRY
+> resume doc below the `---` divider. Full batch record: NOTES.md section
+> "# CLI tests (HANDOFF agenda #4)" (status: COMPLETE line at its end).
+
+## Agenda #4 close-out
+- Two file-disjoint lanes promoted to main f149661 (ff): **clitest** (bin/gantry test seam —
+  `require.main` guard + `module.exports` of 9 units, ZERO CLI behavior change — plus
+  console/lib/cli/gantry-cli.test.ts) and **installsh** (tests/install.test.sh, install.sh
+  read-only). Gate C added `bash tests/install.test.sh` (29/0 exit 0) as a standing step.
+- Gates: A $0.212/5.0; B cross-review PASS ×2 (clitest Codex r4 after r2/r3 BLOCKs — the r3
+  "failed→1 false-green via stream-drop" was live mutation-tested then fixed by holding the
+  mock SSE stream open; installsh r3 prior); C 483 vitest + eslint + tsc 11-baseline + next
+  build + node --check + install.test.sh + live-argv usage exit 2; D both traces clean + opus
+  judge PASS. Promote auto-cleaned both worktrees + feat/clitest + feat/installsh + integration.
+- **Push to origin still pending operator say-so** (main advanced locally to f149661; not pushed).
+- Follow-up (non-gating, ponytail in test): cmdUp / findClaude PATH-scan branch not unit-tested.
+
+---
 # HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-08
 
 > Resume context. The product/dashboard is named **GANTRY** (operator-picked
@@ -57,7 +78,7 @@ the default; `AGENT_HOME=<path>` = explicit legacy override). Multi-lane: POST
    (confirm mixed models in audit argv + usage envelopes); plan.jsonl serialization
    golden-test (accepted Medium).
 4. **CLI tests** (accepted Medium at gantry-cli merge) — bin/gantry parser + API client
-   against a mock server; install.sh shell asserts.
+   against a mock server; install.sh shell asserts. ← IN PROGRESS (this batch, above divider).
 5. **Operator DoD leftovers** (dashboard rebuild) — phone approve over tailnet, ntfy
    tap deep-link, /graph showpiece capture. (Live run e2e: done repeatedly.)
 6. **VPS drop-mode track** (when wanted) — agent Max-plan login, egress firewall,
