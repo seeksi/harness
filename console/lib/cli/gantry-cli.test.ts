@@ -337,7 +337,7 @@ describe("HTTP/SSE client paths (mock node:http server)", () => {
       };
       await expect(cmdStatus(base)).resolves.toBeUndefined();
       // Non-TTY under vitest, so bin/gantry emits plain strings (no ANSI) — assert the content.
-      const out = logSpy.mock.calls.map((args) => args.join(" ")).join("\n");
+      const out = logSpy.mock.calls.map((args: unknown[]) => args.join(" ")).join("\n");
       expect(out).toContain("Alpha");
       expect(out).toContain("(p1)");
       expect(out).toContain("done"); // recent run outcome mark
