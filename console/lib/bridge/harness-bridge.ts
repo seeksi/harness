@@ -31,7 +31,8 @@ export type HarnessSubcommand =
   | { cmd: "integ-merge"; slug: string }
   | { cmd: "trace"; session: string }
   | { cmd: "promote" }
-  | { cmd: "reset-base" };
+  | { cmd: "reset-base" }
+  | { cmd: "clean" };
 
 // Re-exported for callers/tests; defined in errors.ts to keep registry.ts ↔
 // harness-bridge.ts free of a circular dependency.
@@ -115,6 +116,10 @@ export function buildArgs(sub: HarnessSubcommand): string[] {
       return ["promote"];
     case "reset-base":
       return ["reset-base"];
+    case "clean":
+      // No trace-keep args: harness.sh clean then keeps only traces touched in the last 24h,
+      // which preserves the just-failed run's fresh trace. Takes no client-influenced input.
+      return ["clean"];
     default: {
       const _never: never = sub;
       throw new HarnessArgError(`unknown subcommand: ${JSON.stringify(_never)}`);

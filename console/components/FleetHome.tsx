@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
-import type { FleetState, GateId, GateStatus, RunState } from "@/lib/contract/types";
+import type { FleetState, GateId, RunState } from "@/lib/contract/types";
 import type { Envelope } from "@/lib/contract/events";
 import { newRun } from "@/lib/contract/types";
 import { activeLanes, laneOrder, totalTokens } from "@/lib/contract/selectors";
@@ -16,6 +16,7 @@ import { createSseClient, type ConnectionStatus } from "@/lib/sse/client";
 import { fmtTokens, fmtClock } from "@/lib/format";
 import { runRoute } from "@/lib/routes";
 import { useChimeMuted, useDeskChime } from "@/lib/chime";
+import { postGate } from "@/lib/client/postGate";
 import { RunLane } from "./RunLane";
 import { OpsBoard } from "./OpsBoard";
 import { LaunchConsole, type LaunchPayload, type LaunchProject } from "./LaunchConsole";
@@ -132,15 +133,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
   // ⌘K "open deck for this run" (§4 drill-through) — a real navigation, same as goToRun.
   const goToHref = useCallback((href: string) => router.push(href), [router]);
 
-  // CSRF-headed POST to a mutating API route (matches lib/server/csrf.ts). Best-effort:
-  // the SSE stream is what actually reflects the result, so a network error is swallowed.
-  const postGate = useCallback((runId: string, gateId: GateId, status: GateStatus) => {
-    void fetch(`/api/runs/${encodeURIComponent(runId)}/gate`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-harness-request": "1" },
-      body: JSON.stringify({ gateId, status }),
-    }).catch(() => {});
-  }, []);
+  // postGate (CSRF-headed live gate POST) is shared with RunFocus — see lib/client/postGate.
 
   // Gate-id-aware. LIVE → route the operator's verdict to the harness gate endpoint (the
   // SSE stream folds the resulting gate event). FIXTURE → optimistic local emit, unchanged.
@@ -158,7 +151,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
       const blocked = run.phases.find((p) => p.status === "blocked");
       if (blocked) emit(run, "phase", { phase: blocked.id, status: "done" });
     },
-    [emit, runById, live, postGate]
+    [emit, runById, live]
   );
   const onApprovePromote = useCallback(
     (runId: string) => {
@@ -173,7 +166,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
       }
       if (promote) emit(run, "phase", { phase: promote.id, status: "done", approval: { kind: "promote-to-main", state: "approved" } });
     },
-    [emit, runById, live, postGate]
+    [emit, runById, live]
   );
   const onReject = useCallback(
     (runId: string, gate: GateId) => {
@@ -187,7 +180,7 @@ export function FleetHome({ initial, projects }: { initial: FleetState; projects
       if (g) emit(run, "gate", { id: gate, status: "rejected", severity: g.severity, summary: `${g.summary} — rejected` });
       emit(run, "health", { verdict: "degraded", note: `Gate ${gate} rejected` });
     },
-    [emit, runById, live, postGate]
+    [emit, runById, live]
   );
   const onAbort = useCallback(
     (runId: string) => {

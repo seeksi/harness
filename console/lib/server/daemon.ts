@@ -366,6 +366,9 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
     let plan: RunPlan | null = null;
     // Hoisted so the `finally` block can also reclaim the decompose agent's isolated home.
     let decompSlug: string | null = null;
+    // Hoisted so the `finally` block can tear down a FAILED run's integration branch +
+    // lane worktrees (see the clean call below). Success leaves integration intact.
+    let failed = false;
     try {
       if (live) {
         let laneBriefs: string[];
@@ -569,6 +572,7 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
       // Producer failed mid-run: log the reason (server-side, no secrets) and persist a
       // terminal failed outcome. Emit a failed-health envelope so the notifier fires.
       console.error(`[daemon] run ${runId} failed:`, err instanceof Error ? err.message : String(err));
+      failed = true;
       ingest(toEnvelope({ type: "health", verdict: "stuck", lifecycle: "failed" }));
       try {
         finalizeRun(runId, "failed", nowSec());
@@ -583,6 +587,23 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
           await runSub({ cmd: "reset-base" });
         } catch (e) {
           console.error(`[daemon] run ${runId} reset-base failed:`, e instanceof Error ? e.message : String(e));
+        }
+        // A FAILED live run never promotes, so its `integration` branch + lane worktrees are
+        // disposable — tear them down so the NEXT run's `integ-start` (which refuses a
+        // pre-existing integration, harness.sh:296) isn't poisoned. Runs AFTER reset-base so
+        // HEAD is back on BASE and `git branch -d integration` isn't deleting the current
+        // branch. Success deliberately leaves integration for the operator to promote (gate
+        // route promote-to-main) or clean manually. Best-effort; never skips slot release.
+        // ponytail: a multi-lane Gate-C conflict leaves the tree dirty on integration and
+        // clean's safe `branch -d` can't remove a dirty/current branch — that rarer case
+        // still needs a manual `harness.sh clean`. skipped: force-teardown of a conflicted
+        // integration; add when multi-lane conflict recovery matters.
+        if (failed) {
+          try {
+            await runSub({ cmd: "clean" });
+          } catch (e) {
+            console.error(`[daemon] run ${runId} clean failed:`, e instanceof Error ? e.message : String(e));
+          }
         }
         // Reclaim the decompose agent's isolated HOME too (same sprawl concern as the lane
         // homes — a run-unique decomp-<sha16> slug per run). Best-effort; a no-op when the

@@ -26,7 +26,8 @@ import { GateCard } from "./GateCard";
 import { LiveFeed } from "./LiveFeed";
 import { BudgetPanel } from "./BudgetPanel";
 import { computeStaleBanner, scheduleStaleTick } from "./staleness";
-import { buildGateApproveEnvelopes, buildGateRejectEnvelopes, buildPromoteApproveEnvelopes, type ActionEnvelope } from "./gateActions";
+import { gateEffect, buildPromoteApproveEnvelopes, type ActionEnvelope } from "./gateActions";
+import { postGate } from "@/lib/client/postGate";
 import styles from "./RunFocus.module.css";
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -51,6 +52,20 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
   const [now, setNow] = useState(nowSec);
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+  // Live-mode probe (parity with FleetHome): HARNESS_LIVE=1 on the server → approve/
+  // reject route to the real gate endpoint; otherwise everything stays optimistic
+  // in-browser (fixture, unchanged). Defaults false so SSR + first paint match fixture.
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/runs")
+      .then((r) => (r.ok ? r.json() : { live: false }))
+      .then((d) => alive && setLive(!!d.live))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // rAF flush loop — one commit + one notify per frame (same discipline as fleet home).
   useEffect(() => {
@@ -92,31 +107,35 @@ export function RunFocus({ initial, runId }: { initial: FleetState; runId: strin
     },
     [store, run]
   );
-  // Gate-id-aware: approving/rejecting gate X emits ONLY an envelope for gate X —
-  // never a blind phase-4 close, never touching any other gate. Structured via the
-  // pure builders in gateActions.ts so a live bridge can route these later.
-  const onApprove = useCallback(
-    (gate: GateId) => {
+  // Gate-id-aware: approving/rejecting gate X touches ONLY gate X — never a blind
+  // phase-4 close, never another gate. LIVE → route the verdict to the harness gate
+  // endpoint (the SSE stream folds the result); FIXTURE → the optimistic local
+  // envelopes, unchanged. gateEffect (gateActions.ts) is the shared branch.
+  const dispatchGate = useCallback(
+    (gate: GateId, decision: "approved" | "rejected") => {
       if (!run) return;
       const g = run.gates.find((x) => x.id === gate);
-      if (g) emitAll(buildGateApproveEnvelopes(g));
+      if (!g) return;
+      const eff = gateEffect(live, run.runId, g, decision);
+      if (eff.kind === "post") postGate(eff.runId, eff.gateId, eff.status);
+      else emitAll(eff.envelopes);
     },
-    [emitAll, run]
+    [emitAll, run, live]
   );
-  const onReject = useCallback(
-    (gate: GateId) => {
-      if (!run) return;
-      const g = run.gates.find((x) => x.id === gate);
-      if (g) emitAll(buildGateRejectEnvelopes(g));
-    },
-    [emitAll, run]
-  );
+  const onApprove = useCallback((gate: GateId) => dispatchGate(gate, "approved"), [dispatchGate]);
+  const onReject = useCallback((gate: GateId) => dispatchGate(gate, "rejected"), [dispatchGate]);
   // Promote is its own action — never a disguised "approve gate A".
   const onPromote = useCallback(() => {
     if (!run) return;
     const phase = run.phases.find((p) => p.approval?.state === "awaiting");
-    if (phase) emitAll(buildPromoteApproveEnvelopes(phase));
-  }, [emitAll, run]);
+    if (!phase) return;
+    // Parity with FleetHome.onApprovePromote: LIVE → record the promote-to-main verdict
+    // via the gate endpoint (server-gated by ENABLE_PROMOTE_TO_MAIN, Gate-D-adjacent);
+    // FIXTURE → the optimistic local envelope, unchanged. Without the live branch a
+    // promote tap on the run-focus page was silently dropped in live mode.
+    if (live) postGate(run.runId, "D", "approved");
+    else emitAll(buildPromoteApproveEnvelopes(phase));
+  }, [emitAll, run, live]);
 
   if (notFound || !run) {
     return (

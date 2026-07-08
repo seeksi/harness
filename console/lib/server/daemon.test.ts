@@ -292,10 +292,12 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
     );
     await waitForSlotFree();
 
-    // The build failed before any commit/verify/merge; only pre-agent steps + reset-base ran.
+    // The build failed before any commit/verify/merge; pre-agent steps + reset-base + the
+    // failure-path clean (tears down the doomed integration branch + worktrees) ran.
     expect(order).toContain("wt-new");
     expect(order).not.toContain("wt-commit");
     expect(order).not.toContain("integ-merge");
+    expect(order).toContain("clean");
     expect(getSnapshot("run-agentfail")?.status).toBe("failed");
     expect(currentSlot()).toBeNull();
   });
@@ -878,8 +880,8 @@ describe("startRun — multi-lane (laneBriefs)", () => {
     await waitForSlotFree();
 
     // [] must NOT be papered over into a single lane from `brief`: planRun throws before
-    // any mint/plan-write/subcommand — only the finalizer's reset-base ever spawned.
-    expect(order).toEqual(["reset-base"]);
+    // any mint/plan-write/subcommand — only the finalizer's reset-base + failure-path clean spawned.
+    expect(order).toEqual(["reset-base", "clean"]);
     expect(getSnapshot("run-mlempty")?.status).toBe("failed");
     expect(currentSlot()).toBeNull();
   });
@@ -1077,7 +1079,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       await waitForSlotFree();
 
       expect(decomposeFn).not.toHaveBeenCalled();
-      expect(order).toEqual(["reset-base"]); // threw before any mint/plan/worktree side effect
+      expect(order).toEqual(["reset-base", "clean"]); // threw before any mint/plan/worktree side effect; failed run cleans
       expect(getSnapshot("run-dcx")?.status).toBe("failed");
       expect(currentSlot()).toBeNull();
     });
@@ -1094,7 +1096,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       await waitForSlotFree();
 
       expect(decomposeFn).not.toHaveBeenCalled();
-      expect(order).toEqual(["reset-base"]);
+      expect(order).toEqual(["reset-base", "clean"]);
       expect(getSnapshot("run-dcgate")?.status).toBe("failed");
       expect(currentSlot()).toBeNull();
     });
@@ -1114,7 +1116,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       await waitForSlotFree();
 
       expect(order.some((k) => k.startsWith("wt-new:"))).toBe(false);
-      expect(order).toEqual(["reset-base"]);
+      expect(order).toEqual(["reset-base", "clean"]);
       expect(cleaned.some((s) => /^decomp-[0-9a-f]{16}$/.test(s))).toBe(true);
       expect(getSnapshot("run-dcfail")?.status).toBe("failed");
       expect(currentSlot()).toBeNull();

@@ -1,3 +1,47 @@
+# Group C close — cross-review PASS + rebuild/restart + live agent-exec smoke (2026-07-08 s4)
+project: harness
+
+## Done this session (feat/followups)
+- CROSS-REVIEW (Claude×Codex, fresh-context): VERDICT PASS. Codex raised 2 High + 3 lower.
+  Both Highs downgraded on verified evidence — `harness.sh clean` uses SAFE `git branch -d`
+  (harness.sh:436): an ahead-of-base integration (real merged work) is never lost; `if(failed)`
+  clean is correctly nested inside `if(live)`, after reset-base, in try/catch (never skips slot
+  release). Fixed the one Medium: RunFocus.onPromote now posts `postGate(runId,"D","approved")`
+  in live mode (parity with FleetHome; was silently dropping promote taps on the run-focus page).
+  Re-verified: console vitest 500 pass, tsc=11 (baseline, 0 in touched prod), eslint clean.
+- REBUILD + RESTART :3001 (agent-exec): `npx next build` clean → killed old pid 263685 →
+  restarted with the HANDOFF step-2 env. **ENV GAP FOUND + FIXED:** HANDOFF's env line omitted
+  `HARNESS_SCRIPT_PATH`; default is RELATIVE (`../.claude/skills/harness/harness.sh`,
+  harness-bridge.ts:309) and spawn resolves it against `cwd=HARNESS_REPO=/tmp/c2-throwaway`
+  (harness-bridge.ts:419) → `/tmp/.claude/...` ENOENT. Added
+  `HARNESS_SCRIPT_PATH=/home/alter/HARNESS/.claude/skills/harness/harness.sh` to the launch env.
+  Server now pid 343982 on 100.72.193.64:3001, live:true. Log: scratchpad/console-3001.log.
+- LIVE SMOKE (2 real agent runs): agent-exec spawns a real Claude agent that commits
+  (agent-exec works end-to-end up to Gate D). **THE FIX VALIDATED TWICE:** both runs fail-closed
+  at Gate D → failure-path `clean` tears down `integration` + resets HEAD to main → next run's
+  `integ-start` succeeds (re-created integration where the OLD build would have died). Poisoning
+  loop BROKEN.
+
+## Residual / new findings (NOT blocking the commit)
+- Gate D trace-relocate FAILS for every real agent-exec run ("agent trace could not be
+  relocated") → runs can't reach `done`. Root cause is the isolated-HOME trace path — this IS
+  the `tracehook` subtask below ("PostToolUse trace hook work from any cwd"). Blocks a green
+  end-to-end agent run; separate from the daemon fix.
+- Stale lane worktrees/branches accumulate on failed runs (agent committed real work → safe
+  `branch -d` preserves the unmerged lane). Does NOT poison the next run (unique slug per run;
+  only a leftover `integration` blocks integ-start). Cosmetic sprawl in /tmp/c2-throwaway
+  (feat/lane-1fb3100f9828986a-0, feat/lane-44ff96b85aca37f0-0 + worktrees) — manual
+  `harness.sh clean` to tidy, or force-teardown enhancement (ponytail in daemon.ts).
+- Cross-review follow-ups (Low): finalizeRun("done") inside the failure try (safe-delete makes
+  it harmless); RunFocus/FleetHome `live` probe defaults false until /api/runs resolves
+  (sub-second first-paint race, shared pre-existing pattern); FleetHome still inlines the
+  live/fixture branch instead of `gateEffect` (different envelope shape, not a mechanical dedup).
+
+## Next
+1. COMMIT on feat/followups (cross-review PASS) — do NOT push (operator say-so).
+2. tracehook subtask → unblocks a green agent-exec run to `done`.
+3. Optionally tidy /tmp/c2-throwaway stale lane worktrees (`harness.sh clean`).
+
 # Memory-integration follow-ups (trace hook cwd, provisional confirm CLI, README docs) — base: main
 project: harness
 
@@ -782,3 +826,91 @@ Session walking operator through GROUP-C-CHECKLIST.md against the live workstati
 - Operator chose: fixture-on-3001 (superseded by dry-daemon per finding above) + ntfy ready
   (awaiting topic name). NEXT: get topic → launch :3001 dry-daemon → gantry run --url :3001 →
   watch raised gate + ntfy push → operator approves from phone → re-capture C1 live.
+
+### Session 2 (2026-07-08 resume) — C2 model corrected + C2/C3 both server-confirmed
+- **C2 was NOT actually blocked.** The prior "need the daemon to PARK at a *waiting* gate"
+  premise was the wrong model. The gate POST route (app/api/runs/[id]/gate/route.ts) is
+  DECOUPLED from daemon pausing — its own ponytail (lines 9-10) says daemon-pause-at-gate is a
+  future step. The route only needs a run SNAPSHOT that contains a gate with status "raised";
+  it records the operator verdict as a persisted+broadcast `gate` envelope (appendEvent+publish),
+  NOT a snapshot mutation. A dry-run that fails closed at wt-verify STILL leaves Gate B "raised"
+  in its snapshot — exactly an approvable gate. So the failed dry-run WAS the vehicle all along.
+- **Approvable run already in console.db: `55af2784b4a9841d411f3036`** — gates
+  [A:clear, B:raised], run page 200 on :3001. This is the operator's real phone-approve target.
+- **C2 approve path: SERVER-CONFIRMED (PASS ✓).** Seeded a throwaway run w/ raised Gate B via
+  upsertRun, POSTed `{gateId:B,status:approved}` THROUGH live :3001 (real CSRF: x-harness-request
+  + Origin=Host) → 200 {ok:true}, decision persisted as gate event, publish() broadcast ran.
+  Seed deleted after; 55af left pristine. Helper: console/scripts/verify-c2-approve.mts (untracked).
+- **C3 re-fired fresh (PASS ✓ server-side).** Called REAL notifier.notify() (run-failed) via
+  console/scripts/fire-c3-push.mts w/ live env → posted:true to topic gantry-smoke-c3, deep-link
+  http://100.72.193.64:3001/run/e9e460ed64c2abb3dceaf19f, retained 12h. Helper untracked.
+- **DISCOVERED BUG (middot confirmed real, NOT curl display):** ntfy push landed with Title
+  "Run failed � HARNESS" — the `·` (U+00B7) in notifier.ts:53 Title HEADER is byte-mangled
+  (HTTP headers are latin-1; fetch sends UTF-8 → replacement char on phone). Message BODY middot
+  renders fine (UTF-8 body). One-line fix: ASCII separator in the Title header. FOLLOW-UP, unfixed.
+- **REMAINING = operator physical taps only:** (C3) tap ntfy push → opens e9e460 run page;
+  (C2) open 55af run page on phone → tap approve on Gate B. (C1 money-shot) still needs a live
+  agent run vs a THROWAWAY repo. When taps confirmed → record "Group C — DONE".
+
+### Session 2b — operator hit UI bugs approving; ROOT-CAUSED 3 seams (C2 UI NOT actually usable as-is)
+Operator report: "approve/reject don't work on VECTOR; no gates on harness-c2verify or HANGAR, they stay stuck."
+Traced all of it — the earlier "open 55af run page and approve" plan is WRONG (RunFocus approve is optimistic-only). The real seams:
+1. **Fixture bleeds into LIVE mode.** app/page.tsx:14 ALWAYS `foldFleet(fixtureEnvelopes())` into the
+   fleet-home initial state, even when HARNESS_LIVE=1. So the browser shows demo lanes vector
+   (run-dropship, has raised Gate B), hangar (run-console, healthy), ledger (run-memoryos) alongside
+   live runs. Clicking Approve on VECTOR → FleetHome.onApprove sees live=true → postGate(run-dropship…)
+   → POST /api/runs/run-dropship/gate → **404** (no such live run) → fire-and-forget error swallowed →
+   "button does nothing." EMPIRICALLY CONFIRMED: curl approve run-dropship & run-console → 404; 55af → 200.
+2. **RunFocus (/run/[id]) approve is OPTIMISTIC-ONLY.** components/run/RunFocus.tsx:98-105 onApprove =
+   emitAll(buildGateApproveEnvelopes) — NO `live` check, NO server POST (comment: "so a live bridge can
+   route these later" = never wired). So approving on the run-focus PAGE never hits the server. Only
+   FleetHome.onApprove has the live→postGate branch. ⇒ the ONLY real-POST approve UI is the fleet home lane.
+3. **No active live run is ever parked at a raised gate.** Daemon fails closed (doesn't pause), so a
+   real run finalizes (ended_at set) → likely not an activeLane → 55af (failed) probably doesn't render
+   as an approvable fleet-home lane. NEEDS CHECK: activeLanes/laneOrder selectors — does a finalized
+   run with a raised gate show a lane? If not, there is NO UI path to really-approve 55af.
+- **harness-c2verify phantom = MY verify-c2-approve.mts seed.** I upsertRun'd c2verifyseed (unfinalized,
+  Gate B raised) then POSTed approved; the approved event published to the :3001 broker's in-memory ring.
+  I deleted the DB row but the broker still replays the event → shows as a STUCK run whose gate already
+  flipped to approved (hence "no gates"). Cosmetic; evict by RESTARTING :3001 (broker re-seeds from DB, clean).
+- **DB truth:** console.db has ONE project harness-57f84330, 15 runs. Runs with B:raised = 55af, ab5991, e3b141
+  (all outcome=failed). NO vector/hangar/harness-c2verify rows (those are fixture + broker-phantom).
+- **CLEAN C2-UI VEHICLE (proposed, not yet done):** seed a PERSISTENT, UNFINALIZED live run (no ended_at)
+  under a clear project (e.g. harness-c2-smoke) with a raised Gate B, LEFT un-approved → it renders as an
+  ACTIVE fleet-home lane with a working Approve → phone taps → real postGate → 200. Approve path is 100%
+  real (only gate-raise seeded, same envelope the daemon uses). Then delete seed + restart :3001.
+- **REAL FIX (code, needs go + rebuild + cross-review):** (a) app/page.tsx — don't fold fixture when
+  HARNESS_LIVE=1 (one-liner; fixture is the demo fallback). (b) wire RunFocus.onApprove/onReject to
+  postGate in live mode (parity with FleetHome). Both are `next build` + :3001 restart. NOT a smoke edit.
+- NEXT (this session): confirm activeLanes shows a finalized-run gate lane; decide with operator between
+  quick seed-vehicle vs the code fix; clean the phantom. Nothing committed/pushed.
+
+# Group C — throwaway run "won't start" fix + agent-exec wiring (2026-07-08 s3)
+ROOT CAUSE: daemon finally (daemon.ts:578) calls ONLY reset-base (switches HEAD to base);
+never deletes the `integration` branch or lane worktrees. Only promote (success) deletes
+integration. Throwaway smokes fail-closed → never promote → each failed run leaves
+integration → next run's `integ-start` dies ("integration already exists — clean first",
+harness.sh:296) → looks like nothing starts (seam #3: failed run never shows on fleet board).
+Confirmed live: cleaned /tmp/c2-throwaway → POST /api/runs started clean (Gate A clear,
+Gate B raised) → failed → left integration again (reproduced the poisoning).
+
+DECISION: failure-path cleanup ONLY. Success intentionally leaves integration (operator
+promotes via gate route promote-to-main kind behind ENABLE_PROMOTE_TO_MAIN, or manual clean).
+FIX (in progress): add {cmd:"clean"} to HarnessSubcommand+buildArgs; daemon finally, on a
+`failed` flag, best-effort runSub({cmd:"clean"}) AFTER reset-base. Update daemon.test.ts
+order asserts (failure cases gain trailing "clean").
+ponytail ceiling: multi-lane Gate-C conflict leaves tree dirty on integration; clean's safe
+`git branch -d` can't remove current/dirty branch → still needs manual clean (rare; throwaway
+smoke is single-lane fail-at-B so unaffected).
+
+Gate B REALITY (corrects prior msg): wt-verify Gate B is pass/fail, NOT an interactive pause.
+Real agent that commits CLEARS Gate B → run proceeds to merge → done (integration left).
+A raised (approvable) Gate B only happens on failure (no-op/dirty). Approve POST records a
+decision but does NOT resume the harness (seam #2, RunFocus was optimistic-only, now wired to
+POST). So ENABLE_AGENT_EXEC=1 makes runs REAL (real commit/trace/graph) but Gate B will CLEAR
+on success — the phone-approve tap needs the deep-link on a still-in-ring failed run, or the
+headless verify-c2-approve.mts path.
+
+ENABLE_AGENT_EXEC=1 wiring: restart :3001 (pid 263685) with agent-exec on (real agent vs
+/tmp/c2-throwaway). Restart empties broker ring (loses stale 846a92b). Rebuild needed (next
+start on built app) for the daemon.ts change.
