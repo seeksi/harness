@@ -764,3 +764,21 @@ already delivered + live-validated by the #15/#16a/#17b/#17c workstreams. No dup
   a dated SUPERSEDED banner + flipped its two stale `OPEN` cells (§7, G1/G9 Bash/commit) to RESOLVED with
   evidence (Bash in DEFAULT_TOOLS agent-runner.ts:139 + daemon wt-commit daemon.ts:532). Doc-only, no code.
 Remaining truly-open = operator-hands only: Group C live smokes (graph showpiece, phone-approve, ntfy tap).
+
+## Group C live smokes — IN PROGRESS 2026-07-08 (workstation console, tailnet 100.72.193.64)
+Session walking operator through GROUP-C-CHECKLIST.md against the live workstation console.
+- Env found: console live on :3000 (HARNESS_LIVE=1 ENABLE_AGENT_EXEC=1 LANE_CONCURRENCY=1),
+  no active run, no NTFY_* envs, CONSOLE_BASE_URL=127.0.0.1:3000 (not phone-reachable).
+- C1 DONE (partial): drove Playwright → /graph/harness-57f84330 → "Show full swarm" = 7 agent
+  nodes, renders clean but IDLE (0 edges, no run). Captures in scratchpad/graph-swarm-c1*.png.
+  Did NOT overwrite curated graph-swarm.png. Re-shoot during a live run for the money shot.
+- KEY FINDING: server notifier notify() fires ONLY in daemon ingest path (daemon.ts:339);
+  fixture mode (HARNESS_LIVE unset) is CLIENT-SIDE optimistic → does NOT fire ntfy and gate
+  approve is local, not a real POST. So pure fixture = hollow C2 + no C3.
+- PLAN (corrected): smoke C2/C3 via DRY daemon run = HARNESS_LIVE=1 + ENABLE_AGENT_EXEC UNSET
+  (daemon.ts:424 agentRan=false) → real ingest/notify/gate paths, NO real agent/creds. gantry
+  up forces ENABLE_AGENT_EXEC=1 so launch next start directly with custom env on :3001, tailnet
+  host, NTFY_URL/NTFY_TOPIC set + CONSOLE_BASE_URL=http://100.72.193.64:3001.
+- Operator chose: fixture-on-3001 (superseded by dry-daemon per finding above) + ntfy ready
+  (awaiting topic name). NEXT: get topic → launch :3001 dry-daemon → gantry run --url :3001 →
+  watch raised gate + ntfy push → operator approves from phone → re-capture C1 live.
