@@ -29,6 +29,7 @@ import {
   type SpawnHarnessOptions,
 } from "@/lib/bridge/harness-bridge";
 import { mintLane, mintPlanFile, mintSession } from "@/lib/bridge/registry";
+import { routeModel } from "./route-tier";
 import {
   runAgentInSandbox,
   decomposeBrief,
@@ -109,11 +110,16 @@ export interface LaneStep {
   slug: string;
   /** Opaque task text for this lane's build agent — never provenance. */
   brief: string;
+  /** Per-lane model tier. routing==="auto" ⇒ routeModel(brief); explicit tier ⇒ forced.
+   *  Steers ONLY spend (build agent + this lane's plan.jsonl price row), never provenance. */
+  model: "haiku" | "sonnet" | "opus";
 }
 
 export interface RunPlan {
   runId: string;
   planFile: string;
+  /** Run-global model: the decompose-agent model + the explicit-override source. NOT the
+   *  per-lane build model — under `auto` each lane routes its own (see LaneStep.model). */
   model: "haiku" | "sonnet" | "opus";
   lanes: LaneStep[];
 }
@@ -139,12 +145,22 @@ export function planRun(runId: string, routing: Routing, laneBriefs: string[]): 
     }
   }
   const id = sha16(runId);
+  // Run-global model: the decompose-agent model AND the explicit-override source. `auto`
+  // maps to "sonnet" here (MODEL_BY_ROUTING.auto) so a decompose under auto still runs on
+  // sonnet — per-lane routing (below) diverges from this only for the build agents.
+  const runModel = MODEL_BY_ROUTING[routing] ?? "sonnet";
   return {
     runId,
     planFile: `plan-${id}.jsonl`, // bare filename
-    model: MODEL_BY_ROUTING[routing] ?? "sonnet",
+    model: runModel,
     // `lane-<16 hex>-<i>` = 23 chars for i ≤ 9 — under the 31-char SLUG cap, letter-first.
-    lanes: laneBriefs.map((brief, i) => ({ slug: `lane-${id}-${i}`, brief })),
+    // auto ⇒ each lane routed from ITS OWN brief (mixed-tier lanes possible); an explicit
+    // tier ⇒ every lane forced to that one model (routeModel not consulted).
+    lanes: laneBriefs.map((brief, i) => ({
+      slug: `lane-${id}-${i}`,
+      brief,
+      model: routing === "auto" ? routeModel(brief) : runModel,
+    })),
   };
 }
 
@@ -164,11 +180,13 @@ function writePlanFile(plan: RunPlan): void {
   const lines = plan.lanes.map((lane) =>
     JSON.stringify({
       task: lane.slug,
-      tier: MODEL_TIER[plan.model],
+      // Each line prices ITS lane: under `auto` sibling lanes can differ (mixed-tier run),
+      // so tier + rate come from lane.model, never the run-global plan.model.
+      tier: MODEL_TIER[lane.model],
       in_ktok: 40,
       out_ktok: 8,
       cached_ktok: 30,
-      rate_usd_per_mtok: TIER_RATE_USD_PER_MTOK[plan.model],
+      rate_usd_per_mtok: TIER_RATE_USD_PER_MTOK[lane.model],
     })
   );
   // O_CREAT|O_EXCL ("wx"): never overwrite or follow a pre-existing file/symlink at the plan
@@ -397,7 +415,6 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
         // leaves another's unhandled and the pool always drains before we inspect
         // outcomes. If ANY lane failed the WHOLE run fails BEFORE any commit/merge.
         const agentRan = process.env.ENABLE_AGENT_EXEC === "1";
-        const model = plan.model; // narrowed capture: `plan` narrowing doesn't cross the worker closure
         let sessions: (string | null)[] = plan.lanes.map(() => null);
         if (agentRan) {
           const builds = await asyncPool(laneConcurrency(), plan.lanes, async (lane, i) => {
@@ -423,7 +440,7 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
                   prompt: buildLanePrompt(lane.brief, handoff),
                   cwd: worktreePathFor(lane.slug),
                   sessionId: lane.slug,
-                  model,
+                  model: lane.model, // per-lane routed tier (auto) or the forced explicit tier
                   allowedTools: DEFAULT_TOOLS,
                   user: laneUser(i), // drop mode: per-lane uid; direct mode: undefined
                 });

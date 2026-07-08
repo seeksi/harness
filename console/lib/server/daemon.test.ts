@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "events";
 import { Readable } from "stream";
-import { startRun, planRun, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn } from "./daemon";
+import { startRun, planRun, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn, type RunPlan } from "./daemon";
 import { resetDb, eventsSince, listAudit, getSnapshot } from "./persist";
 import { subscribe, _resetBroker } from "./broker";
 import { _resetRegistry } from "@/lib/bridge/registry";
@@ -1126,5 +1126,114 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       expect(cleaned.filter((s) => /^lane-[0-9a-f]{16}-\d$/.test(s))).toHaveLength(2);
       expect(getSnapshot("run-dcclean")?.status).toBe("done");
     });
+  });
+});
+
+describe("startRun — per-lane model routing (Phase 4)", () => {
+  const clearVerify = { "wt-verify": [JSON.stringify({ type: "gate", id: "B", status: "clear", severity: "info", summary: "ok" })] };
+  const okAgentModel =
+    (sink: Record<string, string>): RunAgentFn =>
+    async (o) => {
+      sink[o.sessionId!] = o.model!; // record the model this lane's agent was handed
+      return { exitCode: 0, sessionId: `sess-${o.sessionId}`, usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+
+  it("planRun auto: mixed briefs ⇒ per-lane models; run-global model stays sonnet", () => {
+    const plan = planRun("run-rt-auto", "auto", [
+      "review the security threat model", // TOP → opus
+      "write docs for the README", //         CHEAP → haiku
+      "implement the fetch wrapper", //       default → sonnet
+    ]);
+    expect(plan.lanes.map((l) => l.model)).toEqual(["opus", "haiku", "sonnet"]);
+    expect(plan.model).toBe("sonnet"); // run-global (decompose/override source) unchanged
+  });
+
+  it("planRun explicit tier: every lane forced to it, brief keywords ignored", () => {
+    const forced = planRun("run-rt-opus", "opus", [
+      "write docs for the README", //   would route haiku under auto
+      "implement the fetch wrapper", //  would route sonnet under auto
+    ]);
+    expect(forced.lanes.map((l) => l.model)).toEqual(["opus", "opus"]);
+    expect(forced.model).toBe("opus");
+    // haiku forces the low tier even onto a TOP-keyword brief.
+    const h = planRun("run-rt-h", "haiku", ["review the security threat model"]);
+    expect(h.lanes[0].model).toBe("haiku");
+  });
+
+  it("build worker: each lane's agent receives ITS OWN routed model (auto, multi-lane)", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const models: Record<string, string> = {};
+    startRun(
+      {
+        runId: "run-rt-worker",
+        projectId: "proj",
+        projectName: "v",
+        brief: "s",
+        routing: "auto",
+        laneBriefs: ["review the security threat model", "write docs for the README", "implement the fetch wrapper"],
+      },
+      { live: true, spawnFn: fakeSpawn(clearVerify) as never, writePlan: () => {}, runAgent: okAgentModel(models), relocate: () => true }
+    );
+    await waitForSlotFree();
+
+    const slugs = Object.keys(models).sort(); // -0, -1, -2 in slug order
+    expect(slugs).toHaveLength(3);
+    expect(models[slugs[0]]).toBe("opus"); //  lane 0: security/threat/review
+    expect(models[slugs[1]]).toBe("haiku"); // lane 1: docs
+    expect(models[slugs[2]]).toBe("sonnet"); // lane 2: ordinary impl
+    expect(getSnapshot("run-rt-worker")?.status).toBe("done");
+  });
+
+  it("build worker: explicit routing forces the SAME model on every lane", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const models: Record<string, string> = {};
+    startRun(
+      {
+        runId: "run-rt-forced",
+        projectId: "proj",
+        projectName: "v",
+        brief: "s",
+        routing: "haiku",
+        laneBriefs: ["review the security threat model", "write docs for the README"],
+      },
+      { live: true, spawnFn: fakeSpawn(clearVerify) as never, writePlan: () => {}, runAgent: okAgentModel(models), relocate: () => true }
+    );
+    await waitForSlotFree();
+
+    expect(Object.values(models).sort()).toEqual(["haiku", "haiku"]); // both forced despite opus/haiku keywords
+    expect(getSnapshot("run-rt-forced")?.status).toBe("done");
+  });
+
+  it("writePlan seam: the plan handed to the writer carries per-lane models (⇒ per-lane tier+rate lines)", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    let captured: RunPlan | undefined;
+    const models: Record<string, string> = {};
+    startRun(
+      {
+        runId: "run-rt-wp",
+        projectId: "proj",
+        projectName: "v",
+        brief: "s",
+        routing: "auto",
+        laneBriefs: ["review the security threat model", "write docs for the README"],
+      },
+      {
+        live: true,
+        spawnFn: fakeSpawn(clearVerify) as never,
+        writePlan: (p) => {
+          captured = p;
+        },
+        runAgent: okAgentModel(models),
+        relocate: () => true,
+      }
+    );
+    await waitForSlotFree();
+
+    // writePlanFile prices each line from lane.model (tier = MODEL_TIER[lane.model],
+    // rate = TIER_RATE_USD_PER_MTOK[lane.model]); asserting the per-lane models on the plan
+    // it receives is the seam-level proof that sibling lanes get distinct tier+rate rows.
+    expect(captured).toBeDefined();
+    expect(captured!.lanes.map((l) => l.model)).toEqual(["opus", "haiku"]);
+    expect(getSnapshot("run-rt-wp")?.status).toBe("done");
   });
 });
