@@ -117,7 +117,7 @@ export function LaunchConsole({ open, projects, onClose, onLaunch }: Props) {
 
         <Field label="Model routing (optional)">
           <select value={routing} onChange={(e) => setRouting(e.target.value)} style={inputStyle}>
-            <option value="auto">auto (route-cost default)</option>
+            <option value="auto">auto (tier routed per lane)</option>
             <option value="haiku">force haiku</option>
             <option value="sonnet">force sonnet</option>
             <option value="opus">force opus</option>
