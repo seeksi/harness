@@ -914,3 +914,51 @@ headless verify-c2-approve.mts path.
 ENABLE_AGENT_EXEC=1 wiring: restart :3001 (pid 263685) with agent-exec on (real agent vs
 /tmp/c2-throwaway). Restart empties broker ring (loses stale 846a92b). Rebuild needed (next
 start on built app) for the daemon.ts change.
+
+## tracehook Gate-D fix — s5 (2026-07-08 14:0x)
+- IMPLEMENTED in console/lib/sandbox/agent-runner.ts + tests. Full suite 508→ (agent-runner 71) pass, tsc=11 baseline, eslint clean. NOT committed, NOT smoke-tested live yet.
+- Change: buildAgentArgs appends `--settings <json>` injecting the harness's OWN eval-gate PostToolUse trace hook (absolute TRACE_HOOK_PATH); buildInvocation gained `projectDir?` → sets CLAUDE_PROJECT_DIR=worktree cwd (direct: spawnEnv; drop: --preserve-env); spawnAgent passes cwd. Byte-identical when projectDir omitted.
+- HARDENING (from cross-review): traceHookCommand() validates TRACE_HOOK_PATH is shell-safe-absolute (/^\/[A-Za-z0-9_./-]+$/) AND statSync().isFile() — fails CLOSED with AgentExecError before spawn. Closes the AGENT_TRACE_HOOK_PATH override to injection.
+- CROSS-REVIEW (Claude×Codex, sandbox mandatory): round1 BLOCK (2 High). Fixes applied. round2: #1 injection RESOLVED; #2 cwd-resolution → I converted silent-miss to LOUD throw + documented HARNESS_REPO operator contract; residual (existing-but-WRONG hook at bad cwd) is BENIGN (CLAUDE_PROJECT_DIR directs output; missing-hook fails closed → never a false PASS). Downgraded #2 to fails-safe Medium; awaiting operator tie-break before commit.
+- REMAINING: (1) operator OK on #2 tie-break; (2) rebuild+restart :3001 (kill pid 343982, env MUST include HARNESS_SCRIPT_PATH + ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 AGENT_CLI_PATH); (3) live smoke POST run to projectId harness-57f84330, CSRF x-harness-request:1 + origin; confirm Gate D PASSES + trace lands in <worktree>/.claude/traces + copied to /tmp/c2-throwaway/.claude/traces; (4) commit on feat/followups (NO push); (5) force-teardown leftover lane worktrees.
+
+## tracehook — s5-resume (2026-07-08, post-/clear) — STEP 1 DONE
+- FIXED the HARNESS_REPO collision (HANDOFF resume step 1). agent-runner.ts: replaced the
+  TRACE_HOOK_PATH const (was `process.env.HARNESS_REPO ?? cwd/..`) with resolveTraceHookPath():
+  AGENT_TRACE_HOOK_PATH override → HARNESS_SCRIPT_PATH sibling (dirname/../eval-gate/trace-log.py)
+  → cwd/.. fallback. HARNESS_REPO no longer consulted for the hook path (it points at the TARGET
+  repo /tmp/c2-throwaway → would fail closed on every live run). Updated the const comment + all 3
+  traceHookCommand() error strings (HARNESS_REPO→HARNESS_SCRIPT_PATH).
+- TESTS: +2 in agent-runner.test.ts (HARNESS_SCRIPT_PATH sibling resolution; HARNESS_REPO-ignored
+  collision regression — worktreePath aligned to <HARNESS_REPO>.worktrees so containedWorktree
+  doesn't mask the assertion). agent-runner file 73 pass.
+- VERIFY: full console suite 511 pass, tsc 11 (baseline, 0 in touched files), eslint clean on both files.
+- IN PROGRESS: step 2 cross-review of the delta (Codex fresh + Claude self). diff snapshot at
+  scratchpad/tracehook-delta.diff. Then steps 3-7 (rebuild/restart :3001 w/ HARNESS_SCRIPT_PATH+
+  AGENT_TRACE_HOOK_PATH guard, live smoke, verify trace, commit no-push, cleanup).
+
+## tracehook — s7 (2026-07-08, post-/clear resume) — CONTAINMENT TESTS + VERIFY DONE, cross-review CLOSED
+- CONTAINMENT HARDENING now fully tested (HANDOFF step 1). Added 4 tests to agent-runner.test.ts
+  in NEW describe "buildAgentArgs — trace-hook CONTAINMENT": (a) hook INSIDE target repo → THROWS;
+  (b) hook INSIDE a lane worktree → THROWS; (c) shell-safe ASCII SYMLINK whose realpath lands in
+  the worktrees dir → THROWS (realpath catches it, passes charset+isFile first); (d) false-reject
+  guard: hook in a SIBLING harness repo (disjoint from target repo+worktrees) → ACCEPTED, command
+  embeds it. Pattern mirrors the relocateTrace DESTINATION-containment setup (mkdtempSync realpath'd,
+  stub HARNESS_REPO, vi.resetModules + re-import; laneSpec worktreePath aligned to
+  <HARNESS_REPO>.worktrees so containedWorktree doesn't mask the hook-containment throw).
+- VERIFY (step 2): agent-runner.test.ts 77 pass; FULL console suite 515 pass (38 files);
+  tsc 11 = baseline (0 in lib/sandbox); eslint clean on the 3 touched files. GREEN.
+- CROSS-REVIEW CLOSED (step 3): the isAgentWritablePath containment guard + these 4 regression
+  tests resolve Codex #1 (override accepts worktree-controlled abs path) + #2 (statSync follows a
+  symlink → worktree) + #3 (no regression test). Self-reconciled VERDICT = **PASS** (evidence
+  concrete: (a)/(b) cover #1, (c) covers #2 realpath-follow, (d) proves no false-reject of the legit
+  harness-repo hook). Operator tie-break (s6 AskUserQuestion) "add realpath containment" satisfied.
+- REMAINING (steps 4-8, live smoke + commit): rebuild+restart :3001 (RE-CHECK old pid — was 343982
+  in s5, likely dead: `pgrep -af "next start"`) with env ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1
+  AGENT_CLI_PATH=/home/alter/.local/bin/claude HARNESS_LIVE=1 HARNESS_BASE=main
+  HARNESS_REPO=/tmp/c2-throwaway HARNESS_SCRIPT_PATH=<repo>/.claude/skills/harness/harness.sh
+  NTFY_URL/NTFY_TOPIC + belt-and-suspenders AGENT_TRACE_HOOK_PATH=<repo>/.claude/skills/eval-gate/
+  trace-log.py; POST run to projectId harness-57f84330 (CSRF x-harness-request:1 + origin
+  http://100.72.193.64:3001); confirm Gate D reaches `done`; verify trace lands in <worktree>/
+  .claude/traces + copied to /tmp/c2-throwaway/.claude/traces; COMMIT on feat/followups (NO push);
+  harness.sh clean + force-remove leftover lane worktrees. CODE IS COMMIT-READY (cross-review PASS).

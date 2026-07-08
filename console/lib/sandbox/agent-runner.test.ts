@@ -47,7 +47,10 @@ function spec(over: Partial<AgentSpec> = {}): AgentSpec {
 describe("buildAgentArgs / containedWorktree", () => {
   it("builds claude headless argv for a minted lane in its worktree (Bash in the default set)", () => {
     mintLane("lane-x");
-    expect(buildAgentArgs(spec({ model: "opus" }))).toEqual([
+    const args = buildAgentArgs(spec({ model: "opus" }));
+    // The fixed leading argv is byte-stable; the trailing --settings value is an absolute
+    // path resolved at module load, so it's asserted structurally below (not hardcoded).
+    expect(args.slice(0, 10)).toEqual([
       "-p",
       "build the thing",
       "--output-format",
@@ -59,6 +62,12 @@ describe("buildAgentArgs / containedWorktree", () => {
       "--strict-mcp-config",
       "--dangerously-skip-permissions",
     ]);
+    expect(args).toHaveLength(12);
+    expect(args[10]).toBe("--settings");
+    const settings = JSON.parse(args[11]);
+    const hook = settings.hooks.PostToolUse[0].hooks[0];
+    expect(hook.type).toBe("command");
+    expect(hook.command).toMatch(/^python3 "\/.*\/\.claude\/skills\/eval-gate\/trace-log\.py"$/);
   });
 
   it("passes --strict-mcp-config to isolate the agent from inherited MCP servers", () => {
@@ -98,6 +107,177 @@ describe("buildAgentArgs / containedWorktree", () => {
     for (const bad of ["Edit; rm -rf /", "Bash(rm -rf /)", "Edit,Write", "Read ", "mcp__x"]) {
       expect(() => buildAgentArgs(spec({ allowedTools: [bad] })), bad).toThrow(AgentExecError);
     }
+  });
+});
+
+describe("buildAgentArgs — trace-hook path hardening (fixed absolute, shell-safe, exists)", () => {
+  // The --settings hook command is run via a shell by claude, so the path must be a fixed
+  // shell-safe absolute path (spec invariant). AGENT_TRACE_HOOK_PATH is an operator env
+  // override that must still be validated, and a mis-resolved path must fail LOUDLY (never
+  // silently drop the Gate-D trace). These stub the module-load env then re-import.
+  afterEach(() => vi.resetModules());
+
+  const withEnv = async (val: string) => {
+    vi.stubEnv("AGENT_TRACE_HOOK_PATH", val);
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    return mod;
+  };
+  const s = { slug: "lane-x", worktreePath: wt("lane-x"), taskPrompt: "build the thing" };
+
+  it("rejects a non-absolute hook path (fail closed)", async () => {
+    const mod = await withEnv(".claude/skills/eval-gate/trace-log.py");
+    expect(() => mod.buildAgentArgs(s)).toThrow(mod.AgentExecError);
+  });
+
+  it("rejects a hook path with shell-injection chars (quote/semicolon breakout)", async () => {
+    for (const bad of ['/x/t.py"; rm -rf ~; echo "', "/x/$(id).py", "/x/`id`.py", "/x /t.py"]) {
+      const mod = await withEnv(bad);
+      expect(() => mod.buildAgentArgs(s), bad).toThrow(mod.AgentExecError);
+      vi.resetModules();
+    }
+  });
+
+  it("rejects an absolute but non-existent hook path (no silent Gate-D miss)", async () => {
+    const mod = await withEnv("/nonexistent/eval-gate/trace-log.py");
+    expect(() => mod.buildAgentArgs(s)).toThrow(mod.AgentExecError);
+  });
+
+  it("rejects a hook path that resolves to a directory (must be a regular file)", async () => {
+    const mod = await withEnv("/tmp"); // exists but is not a regular file
+    expect(() => mod.buildAgentArgs(s)).toThrow(mod.AgentExecError);
+  });
+
+  it("embeds the resolved ABSOLUTE hook path in the command (cwd-independent, operator override)", async () => {
+    // A fixed absolute override is resolved verbatim regardless of the process cwd — the
+    // command embeds exactly that path. Use the real hook file so the existence check passes.
+    const abs = path.resolve(process.cwd(), "..", ".claude", "skills", "eval-gate", "trace-log.py");
+    expect(fs.existsSync(abs)).toBe(true);
+    const mod = await withEnv(abs);
+    const args = mod.buildAgentArgs(s);
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(`python3 "${abs}"`);
+  });
+
+  it("resolves the hook from HARNESS_SCRIPT_PATH's sibling eval-gate skill (harness-repo anchor)", async () => {
+    // No AGENT_TRACE_HOOK_PATH override: the hook is found relative to the harness's OWN
+    // harness.sh (dirname/../eval-gate/trace-log.py), NOT relative to the target repo.
+    const repoRoot = path.resolve(process.cwd(), "..");
+    const abs = path.join(repoRoot, ".claude", "skills", "eval-gate", "trace-log.py");
+    expect(fs.existsSync(abs)).toBe(true);
+    vi.stubEnv("AGENT_TRACE_HOOK_PATH", undefined);
+    vi.stubEnv("HARNESS_SCRIPT_PATH", path.join(repoRoot, ".claude", "skills", "harness", "harness.sh"));
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    const args = mod.buildAgentArgs(s);
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(`python3 "${abs}"`);
+  });
+
+  it("IGNORES HARNESS_REPO (the target repo) when resolving its own hook (collision regression)", async () => {
+    // HARNESS_REPO points at the TARGET repo being built (e.g. /tmp/c2-throwaway), which does
+    // not ship the eval-gate hook. Resolving against it would fail closed and refuse every
+    // live run. The hook must resolve against HARNESS_SCRIPT_PATH's harness repo regardless.
+    const repoRoot = path.resolve(process.cwd(), "..");
+    const abs = path.join(repoRoot, ".claude", "skills", "eval-gate", "trace-log.py");
+    // HARNESS_REPO also drives the worktree allow-dir (<HARNESS_REPO>.worktrees), so point the
+    // lane's worktree there too — otherwise containedWorktree (not the hook path) would throw.
+    const target = "/tmp/c2-throwaway-does-not-exist";
+    vi.stubEnv("AGENT_TRACE_HOOK_PATH", undefined);
+    vi.stubEnv("HARNESS_REPO", target);
+    vi.stubEnv("HARNESS_SCRIPT_PATH", path.join(repoRoot, ".claude", "skills", "harness", "harness.sh"));
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    const targetSpec = { slug: "lane-x", worktreePath: path.join(`${target}.worktrees`, "lane-x"), taskPrompt: "build the thing" };
+    const args = mod.buildAgentArgs(targetSpec); // must NOT throw (hook exists in the harness repo)
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(`python3 "${abs}"`);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).not.toContain("/tmp/c2-throwaway");
+  });
+});
+
+describe("buildAgentArgs — trace-hook CONTAINMENT (hook must live OUTSIDE agent-writable territory)", () => {
+  // isAgentWritablePath's anchors (REPO_ROOT_ABS, WORKTREES_DIR_ABS) are module-load constants
+  // derived from HARNESS_REPO, so drive the boundary off a throwaway temp repo and re-import.
+  // The injected Gate-D hook SCRIPT must never resolve into the target repo or a lane worktree:
+  // the direct-mode agent runs as the operator and could plant such a file/symlink, then the
+  // "trusted" hook would execute agent-authored code. realpath containment (worktree.ts) refuses.
+  let tmp: string;
+  afterEach(() => {
+    vi.resetModules();
+    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // Re-import agent-runner with HARNESS_REPO + AGENT_TRACE_HOOK_PATH stubbed; mint lane-x.
+  async function withRepoAndHook(repoRoot: string, hookPath: string) {
+    vi.stubEnv("HARNESS_REPO", repoRoot);
+    vi.stubEnv("AGENT_TRACE_HOOK_PATH", hookPath);
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    return mod;
+  }
+  // The lane's worktree entry under the (stubbed) allow-dir, so containedWorktree passes and
+  // the throw we assert comes from the HOOK containment check, not the worktree check.
+  const laneSpec = (repoRoot: string) => ({
+    slug: "lane-x",
+    worktreePath: path.join(`${repoRoot}.worktrees`, "lane-x"),
+    taskPrompt: "build the thing",
+  });
+
+  it("THROWS when the resolved hook lives INSIDE the target repo (agent-writable)", async () => {
+    // /tmp is not a symlink on Linux, but realpath the temp root anyway so containment
+    // compares canonical paths (macOS /tmp → /private/tmp) — matches relocateTrace's setup.
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hookcontain-")));
+    const repoRoot = path.join(tmp, "repo");
+    const hook = path.join(repoRoot, ".claude", "skills", "eval-gate", "trace-log.py");
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, "# real trace hook\n"); // a REAL regular file → passes the isFile check
+    const mod = await withRepoAndHook(repoRoot, hook);
+    expect(() => mod.buildAgentArgs(laneSpec(repoRoot))).toThrow(mod.AgentExecError);
+  });
+
+  it("THROWS when the resolved hook lives INSIDE a lane worktree (agent-writable)", async () => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hookcontain-")));
+    const repoRoot = path.join(tmp, "repo");
+    const hook = path.join(`${repoRoot}.worktrees`, "lane-x", "planted-hook.py");
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, "# planted by the agent in its own worktree\n");
+    const mod = await withRepoAndHook(repoRoot, hook);
+    expect(() => mod.buildAgentArgs(laneSpec(repoRoot))).toThrow(mod.AgentExecError);
+  });
+
+  it("THROWS when a shell-safe ASCII symlink resolves (realpath) into the worktrees dir", async () => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hookcontain-")));
+    const repoRoot = path.join(tmp, "repo");
+    // A real hook planted inside the worktrees allow-dir…
+    const planted = path.join(`${repoRoot}.worktrees`, "planted-hook.py");
+    fs.mkdirSync(path.dirname(planted), { recursive: true });
+    fs.writeFileSync(planted, "# planted\n");
+    // …reached via a clean ASCII symlink OUTSIDE the writable area. The link path passes the
+    // charset + isFile (follows the link) checks, but realpath containment catches its target.
+    const link = path.join(tmp, "clean-hook.py");
+    fs.symlinkSync(planted, link);
+    const mod = await withRepoAndHook(repoRoot, link);
+    expect(() => mod.buildAgentArgs(laneSpec(repoRoot))).toThrow(mod.AgentExecError);
+  });
+
+  it("ACCEPTS a hook OUTSIDE the target repo / worktrees (legit harness-repo sibling)", async () => {
+    // False-reject guard: the legit hook lives in the harness's OWN repo, disjoint from the
+    // TARGET repo + its worktrees, so containment must NOT refuse it.
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "hookcontain-")));
+    const repoRoot = path.join(tmp, "repo"); // the TARGET repo
+    fs.mkdirSync(repoRoot, { recursive: true });
+    const hook = path.join(tmp, "harness", ".claude", "skills", "eval-gate", "trace-log.py");
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, "# real trace hook\n");
+    const mod = await withRepoAndHook(repoRoot, hook);
+    const args = mod.buildAgentArgs(laneSpec(repoRoot)); // must NOT throw
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+    expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(`python3 "${hook}"`);
   });
 });
 
@@ -409,6 +589,49 @@ describe("buildInvocation — resourceLimits plumbing (SANDBOX_* env)", () => {
   });
 });
 
+describe("buildInvocation — CLAUDE_PROJECT_DIR (trace-hook Gate-D fix)", () => {
+  // The injected --settings trace hook (buildAgentArgs) reads CLAUDE_PROJECT_DIR to write
+  // the Gate-D trace into the worktree. buildInvocation forwards it so relocateTrace finds
+  // the trace. Omitting projectDir must keep the invocation byte-identical to before.
+  afterEach(() => vi.resetModules());
+
+  it("sets CLAUDE_PROJECT_DIR to the worktree in direct mode when projectDir is passed", () => {
+    const inv = buildInvocation("/abs/claude", ["-p", "x"], undefined, undefined, undefined, "/wt/lane-x");
+    expect(inv.cmd).toBe("/abs/claude"); // direct — no sudo
+    expect(inv.argv).toEqual(["-p", "x"]); // projectDir never touches the argv
+    expect(inv.spawnEnv.CLAUDE_PROJECT_DIR).toBe("/wt/lane-x");
+  });
+
+  it("forwards CLAUDE_PROJECT_DIR through sudo via --preserve-env in drop mode", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x"], undefined, undefined, undefined, "/wt/lane-x");
+    expect(inv.argv).toEqual([
+      "-n", "-H", "--preserve-env=CLAUDE_PROJECT_DIR", "-u", "agent", "--", "/abs/claude", "-p", "x",
+    ]);
+    expect(inv.spawnEnv.CLAUDE_PROJECT_DIR).toBe("/wt/lane-x");
+  });
+
+  it("appends CLAUDE_PROJECT_DIR after the SANDBOX_* keys in the drop-mode preserve list", async () => {
+    vi.stubEnv("AGENT_USER", "agent");
+    vi.stubEnv("AGENT_PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    const inv = mod.buildInvocation("/abs/claude", ["-p", "x"], { memoryMax: "2G" }, undefined, undefined, "/wt/lane-x");
+    expect(inv.argv).toEqual([
+      "-n", "-H", "--preserve-env=SANDBOX_MEM_MAX,CLAUDE_PROJECT_DIR", "-u", "agent", "--", "/abs/claude", "-p", "x",
+    ]);
+    expect(inv.spawnEnv).toMatchObject({ SANDBOX_MEM_MAX: "2G", CLAUDE_PROJECT_DIR: "/wt/lane-x" });
+  });
+
+  it("omits CLAUDE_PROJECT_DIR entirely when projectDir is not passed (byte-identical)", () => {
+    const inv = buildInvocation("/abs/claude", ["-p", "x"]);
+    expect(inv.spawnEnv).not.toHaveProperty("CLAUDE_PROJECT_DIR");
+  });
+});
+
 describe("validateLimits — fail-closed against injection / out-of-bounds", () => {
   it("accepts a valid, canonicalized set", () => {
     expect(validateLimits({ memoryMax: "1500M", tasksMax: 64, cpuQuota: "200%", cpuSeconds: 600, wallMs: 60000 })).toEqual({
@@ -613,7 +836,9 @@ describe("spawnAgent", () => {
       { spawnFn: spawnFn as never }
     );
     expect(capturedCmd).toBe("/usr/bin/sudo");
-    expect(capturedArgs!.slice(0, 4)).toEqual(["-n", "-H", "-u", "agent-1"]); // lane-1's uid
+    // Worktree cwd is now threaded as CLAUDE_PROJECT_DIR (trace-hook fix) → forwarded via
+    // --preserve-env through sudo. The lane user still drops to agent-1's uid.
+    expect(capturedArgs!.slice(0, 5)).toEqual(["-n", "-H", "--preserve-env=CLAUDE_PROJECT_DIR", "-u", "agent-1"]);
     vi.resetModules();
   });
 

@@ -17,11 +17,12 @@
 // Execution is REFUSED unless ENABLE_AGENT_EXEC=1.
 
 import { spawn as nodeSpawn, type SpawnOptions as NodeSpawnOptions, type ChildProcess } from "child_process";
+import fs from "fs";
 import path from "path";
 import os from "os";
 import { AgentExecError, HarnessTimeoutError } from "@/lib/bridge/errors";
 import { appendAudit, type AuditRecord } from "@/lib/server/persist";
-import { containedWorktree, worktreePathFor } from "./worktree";
+import { containedWorktree, worktreePathFor, isAgentWritablePath } from "./worktree";
 import { ensureAgentHome } from "./agent-home";
 
 export { AgentExecError };
@@ -188,6 +189,21 @@ export function buildAgentArgs(spec: AgentSpec): string[] {
     // consistent with the decided direct-local + full-toolset(incl. Bash) posture — the
     // agent is meant to run autonomously as the operator. (feat/agent-exec-wire follow-up.)
     "--dangerously-skip-permissions",
+    // Inject the harness's OWN eval-gate trace hook (mirrors .claude/settings.json's
+    // PostToolUse shape) so the Gate-D trace is written to <worktree>/.claude/traces/
+    // even when the TARGET repo doesn't ship the hook. --settings MERGES additively with
+    // any project settings. The command interpolates ONLY the fixed, module-load-resolved
+    // absolute TRACE_HOOK_PATH (never agent/user input) and is quoted for path safety;
+    // passed as a single argv element with shell:false so nothing is re-parsed. The hook
+    // writes to $CLAUDE_PROJECT_DIR (set to the worktree cwd at the spawn site) — without
+    // that env var, trace-log.py's fallback would resolve to the HARNESS repo, not the
+    // worktree, and relocateTrace would fail. NOT an MCP/memory boundary change (rule 5).
+    "--settings",
+    JSON.stringify({
+      hooks: {
+        PostToolUse: [{ hooks: [{ type: "command", command: traceHookCommand() }] }],
+      },
+    }),
   ];
 }
 
@@ -229,6 +245,89 @@ export interface ResourceLimits {
 const DEFAULT_AGENT_CLI = process.env.AGENT_CLI_PATH ?? "claude";
 const DEFAULT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS) || 1_800_000; // 30 min
 const DEFAULT_KILL_GRACE_MS = 5_000;
+
+// Absolute path to the harness's OWN eval-gate PostToolUse trace hook, resolved at MODULE
+// LOAD. Injected into every agent run via --settings (buildAgentArgs) so the Gate-D trace
+// is produced REGARDLESS of whether the target repo ships the hook — this is
+// operator-controlled (server env/cwd), NEVER agent- or worktree-controlled, so it's
+// strictly safer than trusting the worktree's own settings.json (which the agent can edit).
+//
+// The hook lives in the HARNESS's OWN repo — NOT the target repo being built. HARNESS_REPO
+// is deliberately NOT consulted here: harness-bridge points it at the TARGET repo (e.g.
+// /tmp/c2-throwaway), which does not ship the eval-gate hook, so resolving against it would
+// fail closed and refuse every live run. Resolution order:
+//   1. AGENT_TRACE_HOOK_PATH — explicit operator override.
+//   2. HARNESS_SCRIPT_PATH — the reliable harness-repo anchor (harness-bridge already sets
+//      it to the harness's own .../skills/harness/harness.sh). The eval-gate hook is its
+//      SIBLING skill: dirname(script)/../eval-gate/trace-log.py.
+//   3. Fallback cwd/.. — the server runs from console/, so ".." is the harness repo root.
+function resolveTraceHookPath(): string {
+  const override = process.env.AGENT_TRACE_HOOK_PATH;
+  if (override) return override;
+  const scriptPath = process.env.HARNESS_SCRIPT_PATH;
+  if (scriptPath) {
+    return path.resolve(path.dirname(scriptPath), "..", "eval-gate", "trace-log.py");
+  }
+  return path.resolve(process.cwd(), "..", ".claude", "skills", "eval-gate", "trace-log.py");
+}
+const TRACE_HOOK_PATH = resolveTraceHookPath();
+// The hook command is embedded in the --settings JSON and RUN VIA A SHELL by claude, so
+// the path must be a fixed, shell-safe absolute path (per spec) — enforce it, don't trust
+// it. This closes the AGENT_TRACE_HOOK_PATH override to injection (a `"`, `$`, `;`, space,
+// backtick… would break out of the double-quoted command) and rejects a non-absolute path.
+// Charset is deliberately narrow: real deploy paths are plain ASCII (symlink if not).
+const TRACE_HOOK_SAFE_RE = /^\/[A-Za-z0-9_./-]+$/;
+
+/**
+ * Resolve the fixed absolute trace-hook path into the PostToolUse hook command, FAILING
+ * CLOSED (throws) if it is not a shell-safe absolute path or the hook file is missing.
+ * Validated lazily at each build (not at module import) so a misconfig refuses the spawn
+ * LOUDLY rather than crashing the server import — and, critically, so a mis-resolved path
+ * (e.g. server launched from an unexpected cwd) can never SILENTLY drop the Gate-D trace
+ * and leave the daemon with nothing to gate. Never interpolates agent/target-repo input.
+ */
+function traceHookCommand(): string {
+  if (!TRACE_HOOK_SAFE_RE.test(TRACE_HOOK_PATH)) {
+    throw new AgentExecError(
+      `trace hook path must be a shell-safe absolute path (set AGENT_TRACE_HOOK_PATH/HARNESS_SCRIPT_PATH): ${JSON.stringify(TRACE_HOOK_PATH)}`
+    );
+  }
+  // Must be a REGULAR FILE (isFile follows symlinks) — a directory/socket/missing path
+  // would let the hook silently no-op at runtime (python errors → no trace → Gate D miss).
+  // NOTE (accepted, fails SAFE): this catches a MISSING hook loudly, but a cwd-misresolved
+  // path that happens to point at ANOTHER real trace-log.py is not distinguished here. That
+  // residual is benign — trace output is directed by CLAUDE_PROJECT_DIR (set to the worktree
+  // at spawn), so any trace-log.py that honors it still writes to the right place; and the
+  // harmful case (no hook) fails the run CLOSED, never a false PASS. HARNESS_SCRIPT_PATH
+  // (set by harness-bridge to the harness's own harness.sh) anchors the resolution; operators
+  // running the server from a cwd other than console/ with no HARNESS_SCRIPT_PATH set MUST set
+  // AGENT_TRACE_HOOK_PATH. ponytail: pin to a trusted resolved repo root if the console ever
+  // ships a layout where cwd/HARNESS_SCRIPT_PATH can't be relied on.
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(TRACE_HOOK_PATH);
+  } catch {
+    throw new AgentExecError(
+      `trace hook not found — the Gate-D trace would be silently missing (set HARNESS_SCRIPT_PATH/AGENT_TRACE_HOOK_PATH): ${JSON.stringify(TRACE_HOOK_PATH)}`
+    );
+  }
+  if (!st.isFile()) {
+    throw new AgentExecError(`trace hook is not a regular file: ${JSON.stringify(TRACE_HOOK_PATH)}`);
+  }
+  // TRUST-BOUNDARY guard (defense in depth): the hook SCRIPT must live in the harness's OWN
+  // repo, NEVER in the target repo or a worktree the agent can write. realpath-resolve and
+  // refuse if it lands in agent-writable territory — this also catches a symlink at the hook
+  // path redirecting into a worktree (realpath follows it). Even though the path itself comes
+  // only from operator env (AGENT_TRACE_HOOK_PATH/HARNESS_SCRIPT_PATH/cwd — never the agent),
+  // in direct mode the agent runs as the operator and could plant such a file/symlink; this
+  // keeps the injected hook from ever executing agent-authored code as a "trusted" hook.
+  if (isAgentWritablePath(TRACE_HOOK_PATH)) {
+    throw new AgentExecError(
+      `trace hook path resolves into agent-writable territory (target repo/worktrees) — refusing to trust it: ${JSON.stringify(TRACE_HOOK_PATH)}`
+    );
+  }
+  return `python3 "${TRACE_HOOK_PATH}"`;
+}
 
 // Privilege drop (threat model §6): when AGENT_USER is set, the agent is launched as
 // that dedicated low-priv OS account via `sudo -u` instead of the daemon's own user, so
@@ -397,10 +496,15 @@ export function buildInvocation(
   claudeArgs: string[],
   limits?: ResourceLimits,
   user: string | undefined = AGENT_USER,
-  isolatedHome?: string
+  isolatedHome?: string,
+  projectDir?: string
 ): { cmd: string; argv: string[]; spawnEnv: NodeJS.ProcessEnv } {
   const limitEnv = resourceLimitEnv(limits);
   const limitKeys = Object.keys(limitEnv);
+  // The injected trace hook (buildAgentArgs --settings) reads CLAUDE_PROJECT_DIR to write
+  // the Gate-D trace into the worktree. Undefined ⇒ omitted entirely, so an invocation
+  // built without it is byte-identical to before (existing direct-mode unit tests hold).
+  const projectDirEnv = projectDir ? { CLAUDE_PROJECT_DIR: projectDir } : {};
   if (!user) {
     // Direct mode ALWAYS requires an EXPLICIT opt-out (AGENT_ALLOW_DIRECT=1), regardless of
     // NODE_ENV — a daemon launched without NODE_ENV=production must NOT silently run
@@ -413,7 +517,7 @@ export function buildInvocation(
           "set AGENT_USER for a privilege drop, or AGENT_ALLOW_DIRECT=1 to allow direct-local mode (threat model §6)"
       );
     }
-    return { cmd: cli, argv: claudeArgs, spawnEnv: agentEnv(limits, isolatedHome) };
+    return { cmd: cli, argv: claudeArgs, spawnEnv: { ...agentEnv(limits, isolatedHome), ...projectDirEnv } };
   }
   if (!USERNAME_RE.test(user)) {
     throw new AgentExecError(`invalid agent user (must be a plain username): ${JSON.stringify(user)}`);
@@ -431,16 +535,21 @@ export function buildInvocation(
   if (!path.isAbsolute(cli)) {
     throw new AgentExecError("AGENT_CLI_PATH must be an absolute path when AGENT_USER is set (no PATH-based hijack)");
   }
-  // Preserve only the explicit SANDBOX_* keys across sudo's env_reset (none by default,
-  // so the argv is byte-identical to before when no resourceLimits are passed).
-  const preserve = limitKeys.length > 0 ? [`--preserve-env=${limitKeys.join(",")}`] : [];
+  // Preserve only the explicit SANDBOX_* keys (+ CLAUDE_PROJECT_DIR when set) across sudo's
+  // env_reset (none by default, so the argv is byte-identical to before when no
+  // resourceLimits/projectDir are passed). Without preserving it, sudo would strip
+  // CLAUDE_PROJECT_DIR and trace-log.py's fallback would resolve to the harness repo, not
+  // the worktree — so the trace hook must get it explicitly in drop mode too.
+  const preserveKeys = projectDir ? [...limitKeys, "CLAUDE_PROJECT_DIR"] : limitKeys;
+  const preserve = preserveKeys.length > 0 ? [`--preserve-env=${preserveKeys.join(",")}`] : [];
   return {
     cmd: SUDO_PATH,
     argv: ["-n", "-H", ...preserve, "-u", user, "--", cli, ...claudeArgs],
     // The child's env is set by sudo (env_reset + -H); node only needs PATH to exist for
-    // the (absolute) sudo invocation. The SANDBOX_* limit vars must exist in the spawn
-    // env for --preserve-env to forward them. No daemon secret is forwarded.
-    spawnEnv: { PATH: process.env.AGENT_PATH ?? "/usr/local/bin:/usr/bin:/bin", ...limitEnv } as unknown as NodeJS.ProcessEnv,
+    // the (absolute) sudo invocation. The SANDBOX_* limit vars (and CLAUDE_PROJECT_DIR)
+    // must exist in the spawn env for --preserve-env to forward them. No daemon secret is
+    // forwarded.
+    spawnEnv: { PATH: process.env.AGENT_PATH ?? "/usr/local/bin:/usr/bin:/bin", ...limitEnv, ...projectDirEnv } as unknown as NodeJS.ProcessEnv,
   };
 }
 
@@ -542,7 +651,7 @@ export function spawnAgent(
     try {
       // Drop to the lane's user via sudo if set (spec.user, defaulting to AGENT_USER for
       // single-lane). buildInvocation re-validates it with the same not-root/not-daemon checks.
-      inv = buildInvocation(DEFAULT_AGENT_CLI, args, opts.resourceLimits, spec.user, isolatedHome);
+      inv = buildInvocation(DEFAULT_AGENT_CLI, args, opts.resourceLimits, spec.user, isolatedHome, cwd);
     } catch (e) {
       audit("invalid-args", null, null);
       reject(e);

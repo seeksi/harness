@@ -25,6 +25,25 @@ export function worktreePathFor(slug: string): string {
   return path.join(WORKTREES_DIR_ABS, slug);
 }
 
+/**
+ * True if `absPath` (or its realpath, when it exists) lies within the TARGET repo or the
+ * worktrees allow-dir — i.e. an area a build agent can write to (drop mode: its own worktree;
+ * direct mode: the whole target tree). Used to keep the injected Gate-D trace-hook path OUT of
+ * agent-writable territory: the hook SCRIPT must live in the harness's OWN repo, never
+ * somewhere the agent could plant OR redirect it. realpath is applied to both the path and the
+ * anchors, so a symlink pointing INTO the worktree is caught by the resolved target (this is
+ * strictly better than a blanket symlink refusal, which would break a legit non-ASCII symlink).
+ */
+export function isAgentWritablePath(absPath: string): boolean {
+  const real = fs.existsSync(absPath) ? fs.realpathSync(absPath) : path.resolve(absPath);
+  const within = (anchor: string): boolean => {
+    const realAnchor = fs.existsSync(anchor) ? fs.realpathSync(anchor) : path.resolve(anchor);
+    const rel = path.relative(realAnchor, real);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+  return within(REPO_ROOT_ABS) || within(WORKTREES_DIR_ABS);
+}
+
 // Repo root = the cwd harness.sh runs from (where `harness.sh trace` looks for the
 // trace), derived ONCE like WORKTREES_DIR_ABS. Same fixed boundary, not per-call env.
 const REPO_ROOT_ABS = path.resolve(process.env.HARNESS_REPO ?? process.cwd());
