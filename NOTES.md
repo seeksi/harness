@@ -491,3 +491,96 @@ opus judge PASS (all 5 surfaces + both invariants). Cost: Max-plan orchestrator 
 Codex calls (r2-r5 thread) + 3 review/judge subagents (~250k tok session 2) + 1 r1 fix
 agent (session 1) — vs $0.646 route-cost estimate (plan-only; actual spend Max-plan
 subscription + Codex calls).
+
+smoke: respawn live smoke PASSED 2026-07-07 (gantry up --lanes 1 localhost, run
+89a238e6..., 45s, --model sonnet). Attempt 1 created SMOKE-RESPAWN.md ("part one"),
+wrote HANDOFF.md, exit 0 → daemon archived to data/handoffs/lane-a1bf46e509cfcf29-0
+.HANDOFF.0.md, restored baseline, respawned → attempt 2 appended "part two" per the
+inline handoff. Two usage envelopes (1008/1121 tok). Lane commit = ONLY SMOKE-RESPAWN.md
+(+2 lines); HANDOFF.md on integration byte-identical to main (zero pollution). Gates
+A/B/D/C clear, run done exit 0, homes reclaimed, checkout back on clean main. Artifacts
+cleaned (worktree, lane+integration branches, plan file, handoff archive). Agenda #2
+follow-up closed.
+
+# Per-lane model routing (HANDOFF agenda #3) — base: main
+project: harness
+
+## Subtasks
+- slug: routing  spec: "per-lane model routing: new route-tier module (route.py keyword heuristic ported) + daemon per-lane model (LaneStep.model, planRun routes auto per brief, writePlanFile per-lane tier/rate, build worker uses lane.model)"  owns: console/lib/server/route-tier.ts, console/lib/server/route-tier.test.ts, console/lib/server/daemon.ts, console/lib/server/daemon.test.ts  tier: top
+- slug: cli      spec: "gantry usage text: document --model auto as tier-routed per lane"  owns: bin/gantry  tier: cheap
+- slug: ui       spec: "LaunchConsole auto option label says tier routed per lane"  owns: console/components/LaunchConsole.tsx, console/components/LaunchConsole.test.tsx  tier: cheap
+
+## Design decisions (S0, don't relitigate)
+- Routing is a SERVER-SIDE deterministic keyword heuristic — port route.py's TOP/CHEAP
+  regexes verbatim into console/lib/server/route-tier.ts (doctrine parity, cite source;
+  top→opus, cheap→haiku, default→sonnet). NEVER agent-proposed: the decompose agent's
+  output contract is UNCHANGED — a child-proposed tier would be child-controlled input
+  steering spend (same family as the usage.model clamp, daemon.ts:80).
+- Semantics: routing==="auto" ⇒ lane.model = routeModel(lane.brief) PER LANE (this is
+  the feature); explicit haiku|sonnet|opus ⇒ run-global force, all lanes that model
+  (operator override preserved, byte-identical to today). Decomposed lane briefs flow
+  through planRun like any others ⇒ auto-routed per lane.
+- LaneStep.model added; RunPlan.model KEPT as the run-global value (decompose agent
+  model + the explicit-override source). writePlanFile prices per lane: tier =
+  MODEL_TIER[lane.model], rate = TIER_RATE_USD_PER_MTOK[lane.model] — Gate A budgets
+  the actual mix. Build worker passes lane.model to runAgent (the run-global `model`
+  capture goes away).
+- NO new API surface: POST /api/runs fields unchanged (auto is already the default);
+  no HUD/contract change — per-spawn audit row (argv model:) + per-lane usage envelope
+  already expose the routed/actual model. ponytail: HUD lane-tier badge if wanted later.
+- cli + ui lanes are text-only operator visibility (auto ≠ "sonnet default" anymore).
+- Router note: route.py said default for cli/ui (spec phrasing); orchestrator held CHEAP
+  (literal one-line label edits) — inverse of the deck precedent, same rationale class.
+
+## Checkpoint (context-guard 61%, S1 done 2026-07-07 ~23:45)
+- Respawn smoke PASSED + cleaned (see smoke: line above); server DOWN.
+- S0 done (subtasks routing/cli/ui + decisions above); NOTES.<slug>.md ×3 +
+  NOTES.status.json written. Gate A CLEAR: $0.421/5.0 (routing top $0.397, cli+ui cheap).
+- NEXT: wt-new ×3 → build agents (opus for routing, haiku for cli+ui, each pointed at
+  NOTES.<slug>.md copied into its worktree; symlink console/node_modules into worktrees
+  needing tests) → S3 cross-review per lane → integ-start/merge → Gate C → S5 → S6 human.
+- S2 launched: worktrees routing/cli/ui off c3ef92e; 3 background build agents in flight
+  (routing=opus, cli=haiku, ui=haiku). node_modules symlinked into routing+ui worktrees.
+  If resuming: check `git -C ../HARNESS.worktrees/<slug> diff --stat` for build output,
+  then S3 cross-review per lane (fresh Codex context: diff + one-line spec ONLY).
+- cli+ui lanes: built to spec (cli +2 usage lines; ui 1-line label, suite 437 green) →
+  cross-review r1 PASS both (Codex thread 019f406b-62cd-7872-9ed0-62d4368e2aa4: no
+  findings; Claude: non-gating Low — texts describe routing-lane behavior, resolved by
+  merge order routing-first) → wt-commit + wt-verify clear. Both reviewed. routing lane
+  (opus) still building.
+- routing lane Gate B (2026-07-08, post-/clear session): built by opus agent (448 vitest
+  green incl. 11 new, eslint clean, tsc 11-baseline). Claude self-review PASS (2 Lows:
+  brief-steered spend bounded by Gate A + 4-lane cap, documented in-code; writePlanFile
+  seam-level assert). Codex r1 (fresh thread 019f4072-ee6b-7763-bdd8-f98c1f6daa57):
+  BLOCK — 1 High "startRun tests violate pure-function vitest constraint" REFUTED with
+  evidence (spec line means no-jsdom; pre-existing suite has 39 startRun tests + ~30
+  identical env mutations, global afterEach deletes ENABLE_AGENT_EXEC at line 21);
+  1 Medium plan.jsonl serialization not golden-tested = same finding as Claude's Low,
+  kept as Medium follow-up (export-for-test or golden-file), non-gating. Codex r2 reply:
+  PASS, no High+ held. VERDICT PASS → wt-commit + wt-verify clear. All 3 lanes reviewed.
+- S4: 3 lanes merged zero-conflict (routing → cli → ui); repo-root untracked
+  NOTES.{routing,cli,ui}.md spec copies moved to scratchpad first (identical copies rode
+  the lane commits; merge refused to overwrite untracked). Gate C on integration ALL
+  GREEN: 448/448 vitest (37 files), eslint clean, tsc 11 = main baseline, next build
+  compiled, node --check bin/gantry OK.
+- S5: Gate D traces CLEAN on BOTH orchestrator sessions (411b6ec8 prior + 89b735a6
+  current, longest identical run 1, no anomalies — no EXPLOSION FP this round; short
+  post-/clear sessions). Opus judge (independent, scoped) dispatched.
+- S5 judge (opus, independent): PASS. Regex parity byte-identical to route.py:14,16;
+  daemon wiring conforms (LaneStep.model, RunPlan.model run-global, per-lane pricing,
+  worker lane.model, decompose-under-auto stays sonnet); no API surface change;
+  invariant A (briefs steer spend only, provenance all server-derived from runId) and
+  B (decompose.ts untouched, no tier field parsed) both verified; gates re-run
+  independently (448 vitest + eslint clean). Lows: TIER_RATE flat blended rate =
+  pre-existing ponytail; untracked NOTES.* outside the diff. ALL GATES GREEN
+  (A $0.421/5.0, B ×3 PASS, C suite+build, D traces clean + judge PASS).
+
+status: COMPLETE 2026-07-08 — per-lane routing batch promoted to main cf2090a (ff),
+S6 human GO (promote + push). Gates: A $0.421/5.0; B cross-review PASS ×3 (cli+ui r1
+no findings, routing r2 after 1 refuted High + 1 Medium follow-up); C 448/448 + eslint
++ tsc 11-baseline + next build + gantry check, zero-conflict merges; D traces clean ×2
++ opus judge PASS (route.py regex parity byte-identical; briefs-steer-spend-only and
+decompose-contract-unchanged invariants both verified). Batch spanned 2 sessions via
+context-guard HANDOFF respawn. Follow-ups (non-gating): plan.jsonl serialization
+golden-test (Medium, accepted); live mixed-tier --decompose smoke; HUD lane-tier badge
+ponytail.

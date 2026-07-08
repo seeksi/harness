@@ -1,29 +1,4 @@
-# HANDOFF — agenda #2 handoff-respawn batch: COMPLETE + promoted — 2026-07-07T22:45-07:00
-
-> Session close-out (context-guard hard limit hit at the very end — batch is DONE,
-> nothing in flight). Standing GANTRY resume doc below the `---` divider.
-
-## Current state
-- Batch COMPLETE: handoff + cli lanes promoted to main 5f200e7 (ff), pushed. All gates
-  clear (B, C: 437 vitest/eslint/tsc-11/next build/gantry-syntax, D traces, S5 opus judge
-  PASS, S6 human GO given). Worktrees/lanes/integration cleaned; plan.jsonl +
-  NOTES.status.json + NOTES.{handoff,cli}.md deleted; memory agent-exec-gate updated.
-## Decisions
-- All batch decisions recorded in NOTES.md checkpoints + memory agent-exec-gate
-  (r3 wildcard-pathspec + r4 symlink-ancestor Highs live-reproduced then fixed).
-## Files touched
-- (this close-out) HANDOFF.md, NOTES.md, memory files — docs only; code all on main.
-## Next steps
-1. Next batch = standing agenda #3: per-lane model routing (route-cost tier per lane).
-   Or #4 CLI tests / #5 DoD leftovers. Operator picks.
-2. Non-gating follow-up from this batch: live smoke of a real respawn (lane that writes
-   HANDOFF.md → observe fresh-agent respawn + archive in data/handoffs).
-## Dead ends / open questions
-- None open from this batch. Dissimilar-rename undetectability is a documented boundary,
-  not a bug (see NOTES.md + memory).
-
----
-# HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-07
+# HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-08
 
 > Resume context. The product/dashboard is named **GANTRY** (operator-picked
 > 2026-07-06; UI rebranded 2026-07-07). Open this + NOTES.md + memory
@@ -44,16 +19,22 @@ DONE + verified:
   `LANE_CONCURRENCY` clamp, finalize-ALL→merge-ALL, 2-lane live smoke PASS).
 - **`gantry` CLI** (`bin/gantry` run/up/status, zero-dep Node ≥18 over the console API)
   + **install.sh** symlink install — cross-review PASS, live-verified twice.
-- **GANTRY rebrand** in the UI (wordmark, tab title, /brand marks the pick).
-- Sandbox: `console/lib/sandbox/{agent-runner,worktree,agent-home}.ts`. Wired in
-  `console/lib/server/daemon.ts` (agent between wt-new and wt-commit + trace/Gate-D step).
+- **Decompose agent** (READ-ONLY headless split of brief → 1..4 disjoint lanes,
+  fail-closed validation) — promoted 2c900fb; live decomposed-run smoke PASS.
+- **Handoff-respawn loop** (context-guard HANDOFF.md → fresh-agent respawn, fail-closed
+  neutralization) — promoted 5f200e7; live respawn smoke PASS 2026-07-07.
+- **Per-lane model routing** — promoted cf2090a 2026-07-08: `route-tier.ts` (route.py
+  TOP/CHEAP regexes verbatim), `auto` ⇒ routeModel(brief) per lane, explicit tier ⇒
+  force-all, per-lane plan.jsonl pricing, worker uses lane.model. No API change.
+- Sandbox: `console/lib/sandbox/{agent-runner,worktree,agent-home,decompose,handoff}.ts`.
+  Wired in `console/lib/server/daemon.ts`.
 - Posture (operator-approved): DIRECT mode (agent runs as operator), FULL toolset incl.
   Bash, zero-MCP, credential-free env, worktree-cwd, timeout, audit. Gates:
   `ENABLE_AGENT_EXEC=1` + `AGENT_ALLOW_DIRECT=1`.
 
 ## To run GANTRY live (proven working)
-Easiest (2026-07-07): `gantry up` (live env owned by the CLI), `gantry run "<brief>"`,
-`gantry status`. Manual equivalent:
+Easiest: `gantry up` (live env owned by the CLI), `gantry run "<brief>"`, `gantry status`.
+Manual equivalent:
 ```
 cd /home/alter/HARNESS/console && npm run build
 ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 HARNESS_LIVE=1 \
@@ -61,68 +42,41 @@ ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 HARNESS_LIVE=1 \
   CONSOLE_BASE_URL=http://127.0.0.1:3000 HARNESS_REPO=/home/alter/HARNESS \
   npx next start -H 127.0.0.1 -p 3000        # or -H 100.72.193.64 for tailnet
 ```
-Two operational must-haves the live smoke exposed (see [[agent-exec-gate]]):
-`AGENT_CLI_PATH` must be the ABSOLUTE claude binary (minimal PATH doesn't find it);
-`buildAgentArgs` passes `--dangerously-skip-permissions` (headless agent has no
-approver → without it, plan mode → no work).
-NOTE (2026-07-07): do NOT set `AGENT_HOME` anymore — unset, each lane's agent gets an
-ISOLATED minimal HOME at `~/.gantry/agent-homes/<lane-slug>` (AGENT_ISOLATED_HOME overrides
-the BASE dir) provisioned per spawn with only the Max-plan credential + a git identity, and
-reclaimed at end of run. `AGENT_HOME=<path>` remains the explicit legacy override (agent
-uses exactly that home, no provisioning). Multi-lane: pass
-`lanes:["brief1","brief2"]` (1..4) to POST /api/runs and set `LANE_CONCURRENCY=2..4` for
-overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts first).
+`AGENT_CLI_PATH` must be the ABSOLUTE claude binary; `buildAgentArgs` passes
+`--dangerously-skip-permissions`. Do NOT set `AGENT_HOME` (isolated per-lane homes are
+the default; `AGENT_HOME=<path>` = explicit legacy override). Multi-lane: POST
+`lanes:["b1","b2"]` (1..4) + `LANE_CONCURRENCY=2..4`. Decompose: `gantry run --decompose`.
 
 ## NEXT-PASS AGENDA (what to build after /clear)
 
-1. **Decompose agent** — DONE 2026-07-07 (harness batch, 3 lanes, promoted 2c900fb).
-   `console/lib/sandbox/decompose.ts` `decomposeBrief()`: READ-ONLY headless claude
-   (Read/Grep/Glob, zero-MCP, isolated home, audit, timeout) splits one brief into 1..4
-   file-disjoint lane briefs before planRun; fail-closed validation (owns caps 32×256,
-   prefix-disjointness, ≤4000 composed briefs, agent-content-free errors). Surfaces:
-   POST /api/runs `decompose:true` (XOR lanes), `gantry run --decompose`, LaunchConsole
-   toggle. Follow-ups: decompose-split approval flow (PhasePayload kind exists, unused);
-   live smoke of a real decomposed run.
-2. **Console handoff-respawn loop** — DONE 2026-07-07 (harness batch, 2 lanes, promoted
-   5f200e7). `console/lib/sandbox/handoff.ts`: CONTEXT_GUARD_PROMPT + buildLanePrompt
-   (<100k budget-proven) + HandoffFs (porcelain-dirty trigger — HANDOFF.md is TRACKED
-   here); daemon.ts attempt loop (respawn on exit-0 + agent handoff, CONTEXT_MAX_HANDOFFS
-   0..5 default 2, per-attempt usage, last-attempt session → Gate D, finally-sweep).
-   Fail-closed neutralization: archive to gitignored data/handoffs, O_NOFOLLOW fd read,
-   staged-rename targets (`:(literal)` pathspec, realpath symlink-ancestor guard,
-   sanitized errors). Boundary (documented): dissimilar-content renames are provably
-   undetectable — plain `A` files are cross-review's job. cli lane: CONTEXT_MAX_HANDOFFS
-   in bin/gantry LIVE_ENV. Follow-up: live smoke of a real respawn.
-3. **Per-lane model routing** — route-cost tier per lane instead of run-global model.
+1. **Decompose agent** — DONE 2026-07-07 (promoted 2c900fb + live smoke PASS).
+2. **Console handoff-respawn loop** — DONE 2026-07-07 (promoted 5f200e7 + live respawn
+   smoke PASS). Boundary (documented): dissimilar-content renames undetectable.
+3. **Per-lane model routing** — DONE 2026-07-08 (promoted cf2090a; all gates green,
+   opus judge PASS). Non-gating follow-up: live mixed-tier `--decompose` smoke
+   (confirm mixed models in audit argv + usage envelopes); plan.jsonl serialization
+   golden-test (accepted Medium).
 4. **CLI tests** (accepted Medium at gantry-cli merge) — bin/gantry parser + API client
-   against a mock server; install.sh shell asserts (fake-HOME cases from 2026-07-07).
+   against a mock server; install.sh shell asserts.
 5. **Operator DoD leftovers** (dashboard rebuild) — phone approve over tailnet, ntfy
    tap deep-link, /graph showpiece capture. (Live run e2e: done repeatedly.)
 6. **VPS drop-mode track** (when wanted) — agent Max-plan login, egress firewall,
    resource limits, agent-N accounts for multi-lane, threat-model §7 sign-off.
 
-Low/background: haiku alias quirk; gantry SSE reconnect if runs get long; agent-home
+Low/background: haiku alias quirk (+ usage-extraction may pick wrong modelUsage key —
+see decompose smoke note in NOTES.md); gantry SSE reconnect if runs get long; agent-home
 hardening notes (git-identity cache, openat-anchored writes).
 
 ## Decisions already made (don't relitigate)
 - Direct mode + Bash for the local build agent — intentional, gated, live-verified. Not a
   regression of web/'s no-Bash/OS-jail invariants (those stay for the VPS drop mode).
 - Cross-review gate before every merge to main has caught real bugs each time — keep it.
-- Throwaway smoke artifacts (SMOKE.md, lane worktrees, integration branch) are cleaned; `main`
-  never carries them. Promote to main stays human-gated + `ENABLE_PROMOTE_TO_MAIN`.
+- Throwaway smoke artifacts are cleaned; `main` never carries them. Promote to main stays
+  human-gated + `ENABLE_PROMOTE_TO_MAIN`.
 
 ## Open / notes
-- `main` pushed to origin (2026-07-06, through 28ab173: isolated agent HOME). Isolated-home
-  live smoke PASSED same day: clean one-line trace (no global-CLAUDE.md noise), 711-token
-  agent context, gates A/B/D/C clear, artifacts cleaned. Note: the smoke agent didn't
-  commit itself (daemon wt-commit fallback fired), so the .gitconfig identity path in the
-  isolated home is still unexercised live.
-- `data/` (repo-root plan dir) is now gitignored (runtime artifact).
-- The dashboard binds tailnet IP for real use (100.72.193.64); localhost for local smoke.
+- RUN-RECIPE GOTCHA: a live run against THIS repo flips the operator checkout to
+  `integration` mid-run; reset-base returns to base only from a CLEAN tree. Dirty tree ⇒
+  recover with `git switch <branch>` + delete `integration`. Smoke leftovers to clean:
+  lane worktree+branch, integration branch, data/plans/plan-<id>.jsonl.
 - Model alias quirk: `--model haiku` resolved to sonnet-5 in one run; sonnet/opus map fine.
-  Low priority; revisit if haiku routing matters.
-- RUN-RECIPE GOTCHA: a run against THIS repo flips the operator checkout to `integration`
-  mid-run; harness.sh reset-base switches back to base only from a CLEAN tree (by design —
-  never migrates junk). Dirty tree ⇒ stranded on integration: recover with
-  `git switch <branch>` (changes carry) + delete `integration`. Smoke leftovers to clean
-  after a local run: lane worktree + branch, integration branch, data/plans/plan-<id>.jsonl.
