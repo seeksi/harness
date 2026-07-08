@@ -384,3 +384,110 @@ C 402/402 + lint + build, zero-conflict merges; D trace clean + judge PASS. Actu
 subagent spend ~735k tokens across 8 agents (2 builds + 1 resume + 1 fix, 3 reviews,
 1 judge) + 5 Codex calls. Follow-ups: decompose-split approval flow; live decomposed-run
 smoke; ui RTL interaction tests (no jsdom); typed POST body contract.
+
+smoke: PASS 2026-07-07 — live decomposed run (gantry up --lanes 2 localhost, gantry run
+--decompose --model sonnet, run 8c5d9494..., 23s). Phase-1 decompose active→done (audit
+cmd:decompose slug:decomp-af97e4c21648e76f spawn→exit 0); split into 2 truly disjoint
+lanes (lane-0 committed ONLY SMOKE-DECOMP-A.md, lane-1 ONLY SMOKE-DECOMP-B.md); gates
+A, B×2, D×2, C×2 all clear; both merged to integration; reset-base returned checkout to
+main from clean tree; per-lane + decomp agent homes reclaimed (~/.gantry/agent-homes/
+empty). Artifacts cleaned post-run: 2 lane worktrees+branches, integration branch,
+data/plans/plan-af97e4c21648e76f.jsonl. main untouched (97848f2, clean). Quirk (low,
+same family as haiku alias): audit argv says model:sonnet but snapshot usage reports
+claude-haiku-4-5 for both lanes (738 in/14-20 out) — usage-extraction may pick the
+wrong modelUsage key from the result envelope; revisit if model attribution matters.
+
+# Console handoff-respawn loop (HANDOFF agenda #2) — base: main 97848f2
+project: harness
+
+## Subtasks
+- slug: handoff  spec: "Port web/ context-guard handoff-respawn into console daemon build phase: sandbox handoff module (HandoffFs, guard prompt, clamps) + attempt loop around the runAgent seam"  owns: console/lib/sandbox/handoff.ts, console/lib/sandbox/handoff.test.ts, console/lib/sandbox/index.ts, console/lib/server/daemon.ts, console/lib/server/daemon.test.ts  tier: top
+- slug: cli      spec: "Add CONTEXT_MAX_HANDOFFS to bin/gantry LIVE_ENV force-clear list"  owns: bin/gantry  tier: cheap
+
+## Design decisions (S0, don't relitigate)
+- Loop placement: daemon.ts build worker (inside the asyncPool callback) around the
+  existing runAgent seam — runAgentInSandbox stays a one-shot primitive (mirrors web/
+  placement; StartRunOptions.runAgent + new TEST-ONLY handoffFs seam drive it in tests,
+  mirroring decomposeFn).
+- New console/lib/sandbox/handoff.ts: HandoffFs {read,archive,sweep}, defaultHandoffFs,
+  CONTEXT_GUARD_PROMPT, buildLanePrompt(brief, handoff?) composing over buildAgentPrompt,
+  HANDOFF_INLINE_CAP=20_000 (head-truncate), MAX_HANDOFFS from CONTEXT_MAX_HANDOFFS
+  (default 2, clamp 0..5; 0 disables). Re-export via sandbox/index.ts.
+- TRACKED-FILE HAZARD (differs from web/): THIS repo tracks HANDOFF.md at root, so every
+  lane worktree already contains it. Trigger is NOT bare existence: read(slug) returns
+  content ONLY if `git -C <wt> status --porcelain -- HANDOFF.md` is non-empty (agent
+  wrote/modified it). Tracked-and-unchanged => null.
+- Archive moves the file OUT of the worktree to data/handoffs/<slug>.HANDOFF.<n>.md
+  (repo-root data/ is gitignored) so wt-commit never commits handoff artifacts and a
+  stale file can't retrigger. If HANDOFF.md was tracked-and-modified, restore baseline
+  after the move (`git checkout -- HANDOFF.md`). Archive failure throws => lane fails
+  (never merge a polluted lane).
+- Post-loop sweep ALWAYS runs before returning (even at cap / nonzero exit): any
+  agent-written HANDOFF.md is archived out so it can never reach wt-commit.
+- Respawn trigger: exitCode===0 && attempt<MAX_HANDOFFS && read()!==null. Same worktree
+  carries continuity. Isolated per-lane home IS re-provisioned per attempt (ensureAgentHome
+  runs inside the spawn path per spawn — decided: keep; home holds only credential+gitconfig,
+  wipe+recreate per attempt is deterministic and weakens nothing).
+- Per-attempt: usage envelope emitted per attempt (builder verifies fleetReducer cost
+  accumulation); audit row per attempt comes free (runAgentInSandbox audits per spawn).
+  Gate D + cross-lane distinctness use the LAST attempt's sessionId (web/ parity).
+- cli lane: CONTEXT_MAX_HANDOFFS joins gantry up's force-cleared LIVE_ENV set (live env
+  is CLI-owned; inherited shell vars must not silently change the respawn cap).
+
+## Checkpoint (context-guard 61%, orchestrator session 2026-07-07)
+- Decompose live smoke: PASS (see smoke: line above) — agenda #1 fully closed.
+- This batch (agenda #2): S0 done (subtasks handoff+cli, decisions above), Gate A clear
+  $0.646/5.0. Next: wt-new handoff + cli -> background build agents (opus for handoff,
+  haiku for cli, each pointed at its NOTES.<slug>.md in its worktree) -> S3 cross-review
+  per lane -> integ-start/merge -> Gate C suite -> S5 eval+trace -> S6 human go/no-go
+  (operator must explicitly approve promote; do NOT push to main without say-so).
+- Server from smoke is DOWN; smoke artifacts cleaned; tree had only NOTES.* additions.
+
+- cli lane: build (haiku, 1-line LIVE_ENV add) + cross-review r1 — Codex: NO findings
+  (risk Low); Claude: Lows only (no --max-handoffs tuning flag, no CLI tests — both
+  pre-accepted follow-ups). VERDICT PASS → wt-commit + wt-verify clear. reviewed.
+
+checkpoint 2026-07-07T19:55-07:00 (session 362f9480, post-/clear resume): fix agent
+(accecd550a67fa2b4) had auto-resumed in background and COMPLETED all r1 dispositions 1-8
+(433 tests green, eslint clean, tsc 11-baseline) — verified independently. r2 dispatched:
+Codex reply on thread 019f3ecc-2660-7e01-a169-3915b23021a1 ⇒ BLOCK, 1 NEW High:
+staged rename (git mv HANDOFF.md OTHER.md) leaves rename TARGET staged ⇒ handoff content
+committable; Claude re-check agent ac9df77a3049d8d97 ⇒ PASS (same rename issue rated Low,
+"no new capability"), + Medium TOCTOU lstat→open needs O_NOFOLLOW+fstat, + Low empty-""
+handoff respawns with no inline, + Low utf8 mojibake at byte-cap tail (ACCEPTED, cosmetic).
+Stricter-wins ⇒ fixing: rename-target neutralization (porcelain -z parse, archive-out +
+restore), O_NOFOLLOW bounded read, ""⇒null in read(). Then r3 on same Codex thread +
+Claude recheck via SendMessage. r2 diff snapshot: scratchpad/handoff-r2.diff.
+
+## Checkpoint 2026-07-07 ~22:30 (session 2, post-Gate-B)
+- handoff lane r2 fixes DONE in worktree + committed (feat/handoff a0b9062): rename-target
+  neutralization (targets before restoreBaseline, `.renamed-<i>.md` archive, `:(literal)`
+  pathspec), O_NOFOLLOW fd read (TOCTOU), empty-"" neutralize→null.
+- r3 Codex BLOCK (wildcard pathspec: target named `*` reverts WHOLE worktree — reproduced
+  live) → fixed `:(literal)` + sanitized errors + regression test.
+- r4 Codex BLOCK (symlink-ancestor escape via crafted `update-index --cacheinfo` R pairing —
+  reproduced live) → fixed realpathSync(parent) containment guard, sanitized throw + test.
+  Claude fresh agent (af1bdce31475d0508) r4 PASS w/ Low (status.renames=false) → fixed
+  `-c status.renames=true`.
+- r5 verdicts: Codex PASS (thread 019f3ecc-2660-7e01-a169-3915b23021a1), Claude PASS (delta
+  matrix traced). Verify: 437 vitest green, eslint clean, tsc = 11 baseline.
+- wt-commit handoff done, Gate B CLEAR ("lane feat/handoff committed and clean").
+- NOTE: run harness.sh from /home/alter/HARNESS (repo root), NOT from a worktree (wt_path
+  derives from cwd's toplevel).
+- Diffs: scratchpad b10cf205-*/handoff-r{3,4,5}.diff. Session tasks #2-#4 = integ+GateC,
+  S5 eval-gate, S6/S7 human-gate+closeout (steps 6-7 of session-1 HANDOFF).
+- NEXT: integ-start; integ-merge handoff (spine first) then cli; Gate C on integration
+  (vitest+eslint+tsc-11+next build+node --check bin/gantry).
+- S5 (session 2): Gate C on integration ALL GREEN (437 vitest, eslint clean, tsc 11-baseline,
+  next build compiled, node --check bin/gantry OK; merges 5f200e7+a47dfde zero-conflict).
+  Gate D traces clean (both orchestrator sessions). S5 judge (opus, independent,
+  ad2308950575a636d): PASS all 5 handoff surfaces + both high-risk invariants + cli spec;
+  only pre-accepted Lows. AWAITING S6 HUMAN GO/NO-GO → promote.
+status: COMPLETE 2026-07-07 — handoff-respawn batch promoted to main 5f200e7 (ff). r2→r5
+cross-review found 2 more real Codex Highs (wildcard `:(literal)` pathspec revert;
+symlink-ancestor escape via crafted index entry) — both live-reproduced BEFORE fixing,
+both regression-tested; final verdicts Codex PASS + Claude PASS. Gates B/C/D clear, S5
+opus judge PASS (all 5 surfaces + both invariants). Cost: Max-plan orchestrator + ~5
+Codex calls (r2-r5 thread) + 3 review/judge subagents (~250k tok session 2) + 1 r1 fix
+agent (session 1) — vs $0.646 route-cost estimate (plan-only; actual spend Max-plan
+subscription + Codex calls).

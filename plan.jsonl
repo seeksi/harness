@@ -1,3 +1,0 @@
-{"task":"decompose: sandbox decomposeBrief + daemon wiring + route field","tier":"top","in_ktok":140,"out_ktok":30,"cached_ktok":90}
-{"task":"cli: gantry run --decompose flag","tier":"default","in_ktok":30,"out_ktok":5,"cached_ktok":20}
-{"task":"ui: LaunchConsole decompose toggle","tier":"default","in_ktok":70,"out_ktok":14,"cached_ktok":45}

@@ -1,3 +1,28 @@
+# HANDOFF — agenda #2 handoff-respawn batch: COMPLETE + promoted — 2026-07-07T22:45-07:00
+
+> Session close-out (context-guard hard limit hit at the very end — batch is DONE,
+> nothing in flight). Standing GANTRY resume doc below the `---` divider.
+
+## Current state
+- Batch COMPLETE: handoff + cli lanes promoted to main 5f200e7 (ff), pushed. All gates
+  clear (B, C: 437 vitest/eslint/tsc-11/next build/gantry-syntax, D traces, S5 opus judge
+  PASS, S6 human GO given). Worktrees/lanes/integration cleaned; plan.jsonl +
+  NOTES.status.json + NOTES.{handoff,cli}.md deleted; memory agent-exec-gate updated.
+## Decisions
+- All batch decisions recorded in NOTES.md checkpoints + memory agent-exec-gate
+  (r3 wildcard-pathspec + r4 symlink-ancestor Highs live-reproduced then fixed).
+## Files touched
+- (this close-out) HANDOFF.md, NOTES.md, memory files — docs only; code all on main.
+## Next steps
+1. Next batch = standing agenda #3: per-lane model routing (route-cost tier per lane).
+   Or #4 CLI tests / #5 DoD leftovers. Operator picks.
+2. Non-gating follow-up from this batch: live smoke of a real respawn (lane that writes
+   HANDOFF.md → observe fresh-agent respawn + archive in data/handoffs).
+## Dead ends / open questions
+- None open from this batch. Dissimilar-rename undetectability is a documented boundary,
+  not a bug (see NOTES.md + memory).
+
+---
 # HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-07
 
 > Resume context. The product/dashboard is named **GANTRY** (operator-picked
@@ -58,9 +83,16 @@ overlapping builds (default 1 = sequential; VPS drop mode needs agent-N accounts
    POST /api/runs `decompose:true` (XOR lanes), `gantry run --decompose`, LaunchConsole
    toggle. Follow-ups: decompose-split approval flow (PhasePayload kind exists, unused);
    live smoke of a real decomposed run.
-2. **Console handoff-respawn loop** — port web/ daemon's context-guard respawn
-   (HANDOFF.md existence + exit 0 ⇒ respawn, cap 2, archive HANDOFF.<n>.md) into
-   console runAgentInSandbox; needs the handoffFs seam web/lib/daemon/daemon.ts has.
+2. **Console handoff-respawn loop** — DONE 2026-07-07 (harness batch, 2 lanes, promoted
+   5f200e7). `console/lib/sandbox/handoff.ts`: CONTEXT_GUARD_PROMPT + buildLanePrompt
+   (<100k budget-proven) + HandoffFs (porcelain-dirty trigger — HANDOFF.md is TRACKED
+   here); daemon.ts attempt loop (respawn on exit-0 + agent handoff, CONTEXT_MAX_HANDOFFS
+   0..5 default 2, per-attempt usage, last-attempt session → Gate D, finally-sweep).
+   Fail-closed neutralization: archive to gitignored data/handoffs, O_NOFOLLOW fd read,
+   staged-rename targets (`:(literal)` pathspec, realpath symlink-ancestor guard,
+   sanitized errors). Boundary (documented): dissimilar-content renames are provably
+   undetectable — plain `A` files are cross-review's job. cli lane: CONTEXT_MAX_HANDOFFS
+   in bin/gantry LIVE_ENV. Follow-up: live smoke of a real respawn.
 3. **Per-lane model routing** — route-cost tier per lane instead of run-global model.
 4. **CLI tests** (accepted Medium at gantry-cli merge) — bin/gantry parser + API client
    against a mock server; install.sh shell asserts (fake-HOME cases from 2026-07-07).
