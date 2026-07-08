@@ -36,9 +36,13 @@ import {
   removeAgentHome,
   worktreePathFor,
   laneUser,
+  buildLanePrompt,
+  maxHandoffs,
+  defaultHandoffFs,
   DEFAULT_TOOLS,
   type RunAgentInSandboxOptions,
   type RunAgentInSandboxResult,
+  type HandoffFs,
 } from "@/lib/sandbox";
 
 export class SlotTakenError extends Error {
@@ -242,37 +246,6 @@ export type RunAgentFn = (opts: RunAgentInSandboxOptions) => Promise<RunAgentInS
 /** Decompose-step signature (test seam mirrors runAgent). */
 export type DecomposeFn = (opts: { brief: string; slug: string; model: "haiku" | "sonnet" | "opus" }) => Promise<{ laneBriefs: string[] }>;
 
-// Length-cap the brief before it becomes the agent prompt. Well under agent-runner's
-// MAX_PROMPT (100k chars); the composed wrapper below adds only a few hundred chars.
-const MAX_BRIEF = 90_000;
-
-/**
- * Compose the headless build agent's prompt from the run brief. The agent runs in DIRECT
- * mode with the FULL toolset (incl. Bash) inside the lane worktree, so the prompt tells it
- * to implement in-place and verify with the project's own tooling — and, crucially, to NOT
- * commit: the harness commits the lane afterwards (wt-commit), and an agent `git commit`
- * would leave nothing for wt-commit to stage → Gate B would misfire. The brief is opaque
- * task text (never provenance) and is length-capped here.
- */
-export function buildAgentPrompt(brief: string): string {
-  const task = (typeof brief === "string" ? brief : "").slice(0, MAX_BRIEF);
-  return [
-    "Implement the following task IN THIS WORKTREE (your current working directory).",
-    "You have the FULL toolset, including Bash — use it to run the project's own",
-    "tests, build, and lint to verify your work as you go.",
-    "",
-    "TASK:",
-    task,
-    "",
-    "RULES:",
-    "- Make all changes inside the current working directory only.",
-    "- Verify your work by running the project's own tests/build before finishing.",
-    "- DO NOT run `git commit` or `git add`. The harness commits your lane after you",
-    "  finish; committing yourself will break the commit/verify step (wt-commit).",
-    "Finish once the task is implemented and its tests/build pass.",
-  ].join("\n");
-}
-
 export interface StartRunOptions {
   /** Force live. Defaults to HARNESS_LIVE === "1". */
   live?: boolean;
@@ -288,6 +261,8 @@ export interface StartRunOptions {
   cleanupHome?: (slug: string) => void;
   /** TEST-ONLY seam: injectable decompose step (default = real decomposeBrief). IGNORED unless test. */
   decomposeFn?: DecomposeFn;
+  /** TEST-ONLY seam: injectable handoff-file access (default = real defaultHandoffFs). IGNORED unless test. */
+  handoffFs?: HandoffFs;
 }
 
 const nowSec = () => Math.floor(Date.now() / 1000);
@@ -316,6 +291,7 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
   const relocate = (testSeam && opts.relocate) || relocateTrace;
   const cleanupHome = (testSeam && opts.cleanupHome) || removeAgentHome;
   const decompose: DecomposeFn = (testSeam && opts.decomposeFn) || decomposeBrief;
+  const handoffFs: HandoffFs = (testSeam && opts.handoffFs) || defaultHandoffFs;
 
   // ONE ingest path: fold → persist → broadcast → notify (edge-triggered).
   let fleet: FleetState = initialFleetState;
@@ -425,30 +401,86 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
         let sessions: (string | null)[] = plan.lanes.map(() => null);
         if (agentRan) {
           const builds = await asyncPool(laneConcurrency(), plan.lanes, async (lane, i) => {
-            const result = await runAgent({
-              prompt: buildAgentPrompt(lane.brief),
-              cwd: worktreePathFor(lane.slug),
-              sessionId: lane.slug,
-              model,
-              allowedTools: DEFAULT_TOOLS,
-              user: laneUser(i), // drop mode: per-lane uid; direct mode: undefined
-            });
-            // FAIL CLOSED on a nonzero agent exit: runAgentInSandbox only REJECTS on
-            // timeout/gate-refusal — a clean process exit with a nonzero code RESOLVES
-            // normally. A failed agent must NOT flow into wt-commit/verify/merge, so
-            // throw here (the pool records it as this lane's rejection).
-            if (result.exitCode !== 0) {
-              throw new Error(`agent exited nonzero (code ${result.exitCode}) — failing run before wt-commit`);
+            // Handoff-respawn loop (ported from web/): an agent that judged it couldn't
+            // finish (see CONTEXT_GUARD_PROMPT) writes HANDOFF.md and exits 0; the next
+            // attempt reruns in the SAME worktree (same lane uid — NO wt-new/chown between
+            // attempts) with the previous handoff inlined. The trigger is an AGENT-WRITTEN
+            // HANDOFF.md (handoffFs.read → git-status detected: this repo TRACKS HANDOFF.md,
+            // so bare existence is not enough), NOT the usage ratio — usage is post-hoc, and
+            // a lane that finished at 80% finished. The per-lane isolated HOME is RE-
+            // PROVISIONED per attempt by construction (ensureAgentHome runs inside the spawn
+            // path per spawn) — decided behavior: the home holds only a credential+gitconfig
+            // copy, so a wipe+recreate per attempt is deterministic and weakens nothing.
+            const cap = maxHandoffs();
+            let attempt = 0;
+            // Tracks whether a PRIMARY failure is already propagating when the finally-
+            // sweep runs, so a sweep failure never MASKS the original rejection reason.
+            let primaryInFlight = false;
+            try {
+              let handoff: string | undefined;
+              for (;;) {
+                const result = await runAgent({
+                  prompt: buildLanePrompt(lane.brief, handoff),
+                  cwd: worktreePathFor(lane.slug),
+                  sessionId: lane.slug,
+                  model,
+                  allowedTools: DEFAULT_TOOLS,
+                  user: laneUser(i), // drop mode: per-lane uid; direct mode: undefined
+                });
+                // Surface ACTUAL usage/cost/context PER ATTEMPT (HUD gauges) when the agent
+                // reported it. The child-controlled `model` string bypasses the harness
+                // stdout schema, so clamp it to a known-safe shape (else drop the field);
+                // numeric usage kept. NOTE: console's fleetReducer keys lane usage by laneId
+                // and RECOMPUTES totals from the LATEST per-lane value, so a respawn OVERWRITES
+                // (not accumulates) this lane's cost — totalCostUsd reflects the last attempt.
+                // We still emit per attempt (each attempt's audit row comes free from the
+                // per-spawn sandbox audit); tag laneId per attempt if cross-attempt cost
+                // accumulation is ever needed, rather than changing the reducer.
+                if (result.usage) {
+                  const { model: usageModel, ...numeric } = result.usage;
+                  const safeModel = typeof usageModel === "string" && SAFE_MODEL_ID.test(usageModel) ? { model: usageModel } : {};
+                  ingest(toEnvelope({ type: "usage", laneId: lane.slug, ...safeModel, ...numeric }));
+                }
+                // FAIL CLOSED on a nonzero agent exit: runAgentInSandbox only REJECTS on
+                // timeout/gate-refusal — a clean process exit with a nonzero code RESOLVES
+                // normally. NO respawn on nonzero (respawn is exit-0 only); a failed agent
+                // must NOT flow into wt-commit/verify/merge, so throw here (the pool records
+                // it as this lane's rejection). The finally-sweep below still archives any
+                // HANDOFF.md the failed attempt wrote so it can never reach wt-commit.
+                if (result.exitCode !== 0) {
+                  throw new Error(`agent exited nonzero (code ${result.exitCode}) — failing run before wt-commit`);
+                }
+                // Respawn trigger: exit 0 AND under the cap AND an agent-written handoff
+                // exists. At the cap read() is not consulted and the last result stands —
+                // the lane proceeds to the normal gates with the LAST attempt's sessionId.
+                const next = attempt < cap ? handoffFs.read(lane.slug) : null;
+                if (next === null) return result.sessionId; // finished (or at cap) — finally still sweeps
+                handoffFs.archive(lane.slug, attempt); // a stale HANDOFF.md must not retrigger / reach wt-commit
+                handoff = next;
+                attempt++;
+              }
+            } catch (err) {
+              primaryInFlight = true;
+              throw err;
+            } finally {
+              // Post-loop sweep ALWAYS runs before the worker returns (clean finish, at cap,
+              // a nonzero-exit throw, OR a runAgent rejection): archive any agent-written
+              // HANDOFF.md still in the worktree so it can NEVER reach wt-commit. At the cap
+              // the final attempt's handoff (never archived in-loop) is swept out here.
+              // Sweep-failure precedence: with NO primary error in flight a sweep failure
+              // fails the lane (fail closed — a possibly-polluted worktree must not reach
+              // wt-commit); with a primary error in flight the ORIGINAL reason propagates
+              // and the sweep failure is only logged (lane slug, no file content).
+              try {
+                handoffFs.sweep(lane.slug, attempt);
+              } catch (sweepErr) {
+                if (!primaryInFlight) throw sweepErr;
+                console.error(
+                  `[daemon] handoff sweep failed for lane ${lane.slug} (original failure propagates):`,
+                  sweepErr instanceof Error ? sweepErr.message : String(sweepErr)
+                );
+              }
             }
-            // Surface ACTUAL usage/cost/context (HUD gauges) when the agent reported it.
-            // The child-controlled `model` string bypasses the harness stdout schema, so
-            // clamp it to a known-safe shape (else drop the field); numeric usage kept.
-            if (result.usage) {
-              const { model, ...numeric } = result.usage;
-              const safeModel = typeof model === "string" && SAFE_MODEL_ID.test(model) ? { model } : {};
-              ingest(toEnvelope({ type: "usage", laneId: lane.slug, ...safeModel, ...numeric }));
-            }
-            return result.sessionId;
           });
           const failed = builds.findIndex((b) => b.status === "rejected");
           if (failed !== -1) {

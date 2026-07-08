@@ -24,3 +24,12 @@ export {
 export { worktreePathFor, containedWorktree, relocateTrace } from "./worktree";
 export { ensureAgentHome, removeAgentHome } from "./agent-home";
 export { decomposeBrief, parseLaneBriefs, buildDecomposePrompt, DecomposeError, type DecomposeOptions } from "./decompose";
+export {
+  buildAgentPrompt,
+  buildLanePrompt,
+  maxHandoffs,
+  defaultHandoffFs,
+  CONTEXT_GUARD_PROMPT,
+  HANDOFF_INLINE_CAP,
+  type HandoffFs,
+} from "./handoff";
