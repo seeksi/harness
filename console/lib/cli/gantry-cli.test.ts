@@ -7,6 +7,8 @@ import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
+import os from "node:os";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, rmSync, realpathSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 
 const requireCli = createRequire(import.meta.url);
@@ -408,6 +410,74 @@ describe("HTTP/SSE client paths (mock node:http server)", () => {
       expect(exitSpy).not.toHaveBeenCalled();
       expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("stream connect failed"));
     });
+
+    it("reconnects from the last event id after a mid-run drop, then resolves on the resumed terminal frame", async () => {
+      let hits = 0;
+      let resumeParam: string | null = null;
+      handler = (req, res) => {
+        // Match by PATHNAME (not exact URL): the resume request carries ?lastEventId=, which
+        // the real server reads from searchParams — an exact-URL match would 404 the reconnect.
+        const u = new URL(req.url ?? "", base);
+        const isStream = req.method === "GET" && u.pathname === "/api/fleet/stream" && (req.headers.accept ?? "").includes("text/event-stream");
+        if (!isStream) return notFound(res);
+        hits += 1;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        if (hits === 1) {
+          // A non-terminal frame carrying an `id:` line, then DROP (end without terminal).
+          res.write(`id: 7\n` + frame({ runId: "r5", type: "phase", ts: Date.now() / 1000, payload: { phase: 2, status: "active" } }));
+          res.end();
+        } else {
+          resumeParam = u.searchParams.get("lastEventId");
+          res.write(`id: 8\n` + frame({ runId: "r5", type: "health", ts: Date.now() / 1000, payload: { verdict: "ok", lifecycle: "done" } }));
+          res.end();
+        }
+      };
+      await expect(followRun(base, "r5")).resolves.toBe("done");
+      expect(hits).toBe(2); // dropped once, reconnected once
+      expect(resumeParam).toBe("7"); // resumed strictly after the last-seen seq (exclusive replay)
+      expect(exitSpy).not.toHaveBeenCalled();
+    });
+
+    it("gives up after the bounded reconnect budget of consecutive frame-less drops and returns 'unknown'", async () => {
+      // Every connection ends immediately with no frame → each is a silent drop; the client
+      // must stop after MAX_RECONNECTS attempts rather than loop forever. 1 initial + 5 retries.
+      let hits = 0;
+      handler = (req, res) => {
+        if (!isStreamRequest(req)) return notFound(res);
+        hits += 1;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.end(); // opened, then dropped with nothing
+      };
+      await expect(followRun(base, "r6")).resolves.toBe("unknown");
+      expect(hits).toBe(6);
+      expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("stream dropped"));
+      expect(exitSpy).not.toHaveBeenCalled();
+    }, 20000);
+
+    it("an id-less frame (': ping' keepalive) refills the reconnect budget, so a live-but-quiet run survives more drops than the budget", async () => {
+      // The live server sends id-less frames on a healthy connection (': open', ': ping'/15s,
+      // 'sync' resync). Each proves the server is alive and MUST reset the budget — otherwise a
+      // quiet run behind a flaky proxy gives up prematurely. Here 6 connections (> MAX_RECONNECTS)
+      // each send only a ": ping" then drop; the 7th delivers the terminal frame. It resolves
+      // "done" ONLY if the ping reset the budget each time; without the reset it would have
+      // returned "unknown" after the 6th frame-less-id drop.
+      let hits = 0;
+      handler = (req, res) => {
+        if (!isStreamRequest(req)) return notFound(res);
+        hits += 1;
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        if (hits <= 6) {
+          res.write(": ping\n\n"); // id-less keepalive comment, then drop
+          res.end();
+        } else {
+          res.write(`id: 1\n` + frame({ runId: "r7", type: "health", ts: Date.now() / 1000, payload: { verdict: "ok", lifecycle: "done" } }));
+          res.end();
+        }
+      };
+      await expect(followRun(base, "r7")).resolves.toBe("done");
+      expect(hits).toBe(7); // never gave up across 6 ping-then-drop cycles
+      expect(exitSpy).not.toHaveBeenCalled();
+    }, 20000);
   });
 });
 
@@ -501,8 +571,86 @@ describe("cmdRun follow-mode exit codes (subprocess)", () => {
   });
 });
 
-// ponytail: cmdUp and findClaude's PATH-scan branch are not unit-tested here — cmdUp resolves the
-// repo root from process.argv[1] (explicitly out of scope per the spec's hard constraint) and
-// spawns `next start`. cmdRun is now covered end-to-end via the subprocess exit-code tests above
-// (done→0 / failed→1) plus resolveProject/followRun in-process; only its `npx next start` spawn in
-// cmdUp remains undriven. Add a subprocess-level fixture-mode smoke test if cmdUp needs coverage.
+// --- findClaude (AGENT_CLI_PATH validation + PATH scan) --------------------------------------
+// The daemon needs an ABSOLUTE claude binary (its minimal agent PATH can't resolve one), so
+// findClaude enforces that on both the env override and the PATH fallback. Cover both branches
+// against real files on disk (X_OK + isFile), including the directory trap (accessSync(X_OK)
+// passes for directories — only the isFile() guard rejects them) and symlink resolution.
+describe("findClaude", () => {
+  const { findClaude } = gantry;
+  let tmp: string;
+  const saved: { cli?: string; path?: string } = {};
+
+  beforeEach(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "gantry-claude-"));
+    saved.cli = process.env.AGENT_CLI_PATH;
+    saved.path = process.env.PATH;
+  });
+  afterEach(() => {
+    if (saved.cli === undefined) delete process.env.AGENT_CLI_PATH;
+    else process.env.AGENT_CLI_PATH = saved.cli;
+    process.env.PATH = saved.path;
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const makeExec = (dir: string, name = "claude") => {
+    const p = path.join(dir, name);
+    writeFileSync(p, "#!/bin/sh\n");
+    chmodSync(p, 0o755);
+    return p;
+  };
+
+  it("returns an absolute AGENT_CLI_PATH pointing at an executable file (verbatim, no realpath)", () => {
+    const bin = makeExec(tmp);
+    process.env.AGENT_CLI_PATH = bin;
+    expect(findClaude()).toBe(bin);
+  });
+
+  it("dies when AGENT_CLI_PATH is not absolute", () => {
+    process.env.AGENT_CLI_PATH = "relative/claude";
+    expect(() => findClaude()).toThrow(ExitSignal);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("must be absolute"));
+  });
+
+  it("dies when AGENT_CLI_PATH points at a missing / non-executable file", () => {
+    process.env.AGENT_CLI_PATH = path.join(tmp, "nope");
+    expect(() => findClaude()).toThrow(ExitSignal);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("not an executable file"));
+  });
+
+  it("dies when AGENT_CLI_PATH is a directory (X_OK passes for dirs; isFile guards it)", () => {
+    process.env.AGENT_CLI_PATH = tmp; // a dir with the exec bit — accessSync(X_OK) would pass
+    expect(() => findClaude()).toThrow(ExitSignal);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("not an executable file"));
+  });
+
+  it("scans PATH (skipping empty segments) and returns the realpath of the first executable claude", () => {
+    delete process.env.AGENT_CLI_PATH;
+    const realDir = mkdtempSync(path.join(os.tmpdir(), "gantry-real-"));
+    try {
+      const real = makeExec(realDir);
+      const linkDir = path.join(tmp, "bin");
+      mkdirSync(linkDir, { recursive: true });
+      symlinkSync(real, path.join(linkDir, "claude")); // PATH entry is a symlink → realpath'd
+      const emptyDir = path.join(tmp, "empty"); // earlier, no claude → keep scanning
+      mkdirSync(emptyDir, { recursive: true });
+      process.env.PATH = [emptyDir, "", linkDir].join(path.delimiter);
+      expect(findClaude()).toBe(realpathSync(real));
+    } finally {
+      rmSync(realDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dies when no claude is found on any PATH dir", () => {
+    delete process.env.AGENT_CLI_PATH;
+    process.env.PATH = tmp; // exists but has no claude
+    expect(() => findClaude()).toThrow(ExitSignal);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("claude CLI not found"));
+  });
+});
+
+// ponytail: cmdUp is not unit-tested here — it resolves the repo root from process.argv[1]
+// (explicitly out of scope per the spec's hard constraint) and spawns `npx next start`. cmdRun
+// is covered end-to-end via the subprocess exit-code tests above (done→0 / failed→1) plus
+// resolveProject/followRun in-process; findClaude (both branches) is now covered directly above.
+// Only cmdUp's `npx next start` spawn remains undriven — add a fixture-mode subprocess smoke if needed.

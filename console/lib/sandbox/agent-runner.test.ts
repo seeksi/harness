@@ -841,6 +841,55 @@ describe("parseAgentUsage", () => {
     });
   });
 
+  it("attributes to the DOMINANT model when modelUsage carries several keys (haiku side-call quirk)", () => {
+    // A tiny haiku side-call (title/summary) is listed FIRST; the run's real work is the
+    // opus entry. entries[0] would mis-attribute to haiku — the dominant entry must win.
+    const multi = JSON.stringify({
+      type: "result",
+      total_cost_usd: 0.9,
+      modelUsage: {
+        "claude-haiku-4-5": {
+          inputTokens: 8, outputTokens: 6, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0, contextWindow: 200000, costUSD: 0.0001,
+        },
+        "claude-opus-4-8": {
+          inputTokens: 400, outputTokens: 900, cacheReadInputTokens: 50000,
+          cacheCreationInputTokens: 12000, contextWindow: 1000000, costUSD: 0.87,
+        },
+      },
+    });
+    expect(parseAgentUsage(multi)).toEqual({
+      model: "claude-opus-4-8",
+      inputTokens: 400,
+      outputTokens: 900,
+      cacheReadTokens: 50000,
+      cacheCreationTokens: 12000,
+      contextWindow: 1000000,
+      costUsd: 0.87,
+    });
+  });
+
+  it("breaks an equal-token tie on insertion order (the `>` guard keeps the FIRST entry)", () => {
+    // Both models report identical total token volume. `>` (not `>=`) means the reduce never
+    // replaces the incumbent on a tie, so the FIRST-inserted key wins — deterministic, no
+    // dependence on object-key iteration surprises.
+    const tie = JSON.stringify({
+      type: "result",
+      total_cost_usd: 0.5,
+      modelUsage: {
+        "claude-sonnet-5": {
+          inputTokens: 100, outputTokens: 100, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0, contextWindow: 200000, costUSD: 0.3,
+        },
+        "claude-opus-4-8": {
+          inputTokens: 100, outputTokens: 100, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0, contextWindow: 1000000, costUSD: 0.2,
+        },
+      },
+    });
+    expect(parseAgentUsage(tie)?.model).toBe("claude-sonnet-5");
+  });
+
   it("falls back to top-level usage + total_cost_usd when modelUsage is absent", () => {
     const noModel = JSON.stringify({
       usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 1, cache_creation_input_tokens: 2 },

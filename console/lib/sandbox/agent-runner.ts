@@ -87,8 +87,18 @@ export function parseAgentUsage(raw: string): AgentUsage | null {
   if (modelUsage && typeof modelUsage === "object") {
     const entries = Object.entries(modelUsage as Record<string, unknown>);
     if (entries.length > 0) {
-      // Single-model agent run: take the first (and typically only) model entry.
-      const [model, muRaw] = entries[0];
+      // A run can report MULTIPLE model keys (e.g. a tiny haiku side-call — title/summary —
+      // alongside the requested model). Insertion-ordered `entries[0]` has mis-attributed
+      // the run to that side model in practice (the "haiku alias" usage quirk), so select
+      // the DOMINANT entry by total token volume: the model that did the actual work. `>`
+      // (not `>=`) keeps a single-entry map and ties on insertion order — deterministic.
+      const tokensOf = (v: unknown): number => {
+        const m = (v ?? {}) as Record<string, unknown>;
+        return (
+          num(m.inputTokens) + num(m.outputTokens) + num(m.cacheReadInputTokens) + num(m.cacheCreationInputTokens)
+        );
+      };
+      const [model, muRaw] = entries.reduce((best, cur) => (tokensOf(cur[1]) > tokensOf(best[1]) ? cur : best));
       const mu = (muRaw ?? {}) as Record<string, unknown>;
       return {
         model,

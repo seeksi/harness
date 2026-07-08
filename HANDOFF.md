@@ -1,103 +1,71 @@
-# HANDOFF — agenda #4 CLI tests: DONE (promoted main f149661) — 2026-07-08
+# HANDOFF — Non-gating follow-ups batch (Group A code done; B/C pending) — 2026-07-08T08:42-07:00
 
-> Agenda #4 (CLI tests) is CLOSED. All four NEXT-PASS AGENDA items (#1 decompose, #2
-> handoff-respawn, #3 per-lane routing, #4 CLI tests) are now DONE. Standing GANTRY
-> resume doc below the `---` divider. Full batch record: NOTES.md section
-> "# CLI tests (HANDOFF agenda #4)" (status: COMPLETE line at its end).
+> Resume with NOTES.md (section "# Non-gating follow-ups batch (post-agenda)") + this file.
+> Repo /home/alter/HARNESS, branch **feat/followups** (off main ffb18be). Working tree
+> has uncommitted Group-A edits. GANTRY product context: prior HANDOFF content is below
+> the older divider in git history / NOTES; all four NEXT-PASS agenda items (#1-#4) are DONE.
 
-## Agenda #4 close-out
-- Two file-disjoint lanes promoted to main f149661 (ff): **clitest** (bin/gantry test seam —
-  `require.main` guard + `module.exports` of 9 units, ZERO CLI behavior change — plus
-  console/lib/cli/gantry-cli.test.ts) and **installsh** (tests/install.test.sh, install.sh
-  read-only). Gate C added `bash tests/install.test.sh` (29/0 exit 0) as a standing step.
-- Gates: A $0.212/5.0; B cross-review PASS ×2 (clitest Codex r4 after r2/r3 BLOCKs — the r3
-  "failed→1 false-green via stream-drop" was live mutation-tested then fixed by holding the
-  mock SSE stream open; installsh r3 prior); C 483 vitest + eslint + tsc 11-baseline + next
-  build + node --check + install.test.sh + live-argv usage exit 2; D both traces clean + opus
-  judge PASS. Promote auto-cleaned both worktrees + feat/clitest + feat/installsh + integration.
-- **Push to origin still pending operator say-so** (main advanced locally to f149661; not pushed).
-- Follow-up (non-gating, ponytail in test): cmdUp / findClaude PATH-scan branch not unit-tested.
+## Current state
+- **Group A (4 code follow-ups): DONE + CROSS-REVIEW PASS + COMMITTED on feat/followups.**
+  Cross-review r1 BLOCK (1 High: reconnect budget reset only on id-frames vs live server's id-less
+  ping/sync/open frames → premature give-up) → fixed (reset on any frame) + 2 test additions →
+  Codex r2 PASS. Gate C after fix: 496 vitest, eslint clean, tsc 11=baseline, node --check OK.
+  Commit = 62d1a25 on feat/followups. Operator go/no-go 2026-07-08: **HOLD — stay on branch**
+  (no merge, no push; deliberate, not pending-unasked). Merge/push await a later explicit say-so.
+  - Gate C just run clean: `cd console && npx vitest run` = **494 pass** (483 baseline + 11 new);
+    eslint clean; `tsc --noEmit` = **11 errors = main baseline** (all pre-existing, in
+    harness-bridge.test.ts / daemon.test.ts:13,20 NODE_ENV / notifier.test.ts — ZERO in files I
+    touched); `npx next build` compiled; `node --check bin/gantry` OK; `bash tests/install.test.sh`
+    = 29/0 exit 0.
+- **Group B (operator-gated, draft-only): NOT started.** VPS drop-mode (#6) scripts + threat-model
+  §7 doc; ntfy tap deep-link (#5) code verify.
+- **Group C (live smokes, need running server + creds): NOT started.** mixed-tier already done
+  (see routing smoke in NOTES); remaining = /graph showpiece capture, phone-approve over tailnet.
 
----
-# HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-08
+## Decisions
+- Group A is small + file-disjoint → direct edits on ONE branch + cross-review before merge
+  (repo doctrine: "smaller changes edit directly, still cross-review"), NOT the worktree harness.
+- SSE reconnect: resume via `?lastEventId=` (server replay is EXCLUSIVE — broker `since(seq)` is
+  `> seq`, fixture `resumeStartIndex` is `cursor+1` — so gapless/dup-free). Bounded
+  MAX_RECONNECTS=5 + linear backoff 300ms base/3s cap, reset on any frame. never-opened stream =
+  fast-fail (no retry storm), preserving the existing "stream connect failed" test. STREAM_END
+  ("__console_end", hardcoded — mirrors client.ts) stops the loop for finite fixture streams.
+- usage fix: pick DOMINANT modelUsage entry by total token volume (not entries[0]); `>` keeps
+  single-entry + insertion-order ties deterministic. Fixes haiku side-call mis-attribution.
+- plan.jsonl: extracted pure exported `serializePlanFile(plan)`; writePlanFile calls it (byte
+  identical write). Enables golden-test without fs.
 
-> Resume context. The product/dashboard is named **GANTRY** (operator-picked
-> 2026-07-06; UI rebranded 2026-07-07). Open this + NOTES.md + memory
-> (agent-exec-gate, umbrella-vps-deploy) to continue. Repo: /home/alter/HARNESS,
-> branch `main`.
+## Files touched (all uncommitted on feat/followups)
+- bin/gantry — followRun rewritten with bounded lastEventId reconnect; header ponytail note updated.
+- console/lib/sandbox/agent-runner.ts — parseAgentUsage picks dominant modelUsage entry.
+- console/lib/sandbox/agent-runner.test.ts — +1 multi-model (opus-dominant) test.
+- console/lib/server/daemon.ts — new exported serializePlanFile; writePlanFile delegates.
+- console/lib/server/daemon.test.ts — import serializePlanFile; +2 golden tests (mixed-tier, single sonnet).
+- console/lib/cli/gantry-cli.test.ts — +os/fs imports; +6 findClaude tests; +2 SSE reconnect tests
+  (resume test matches by PATHNAME — the resume URL carries ?lastEventId=, exact-URL match 404s);
+  trailing ponytail reworded (only cmdUp spawn undriven now).
+- NOTES.md — new "# Non-gating follow-ups batch (post-agenda)" section (this batch record).
 
-## Where things stand (all on `main`, pushed to origin through ea03823, 2026-07-07)
+## Next steps
+1. **Cross-review the Group-A diff** (`git -C /home/alter/HARNESS diff main -- bin/ console/`; small,
+   single branch). Use the cross-review skill (fresh Codex thread: diff + one-line spec per change).
+   Reconcile strict-biased → fix rounds until PASS. NOTE the recurring lesson: `git add -N` any
+   untracked file so it shows in the diff (none here — all edits are to tracked files).
+2. Commit feat/followups (one commit), then human go/no-go → merge to main → **push is still held
+   for operator say-so** (main also unpushed since f149661 per prior HANDOFF — confirm push scope).
+3. Update NOTES status line (COMPLETE), memory if durable.
+4. **Group B drafts**: VPS drop-mode (#6) — draft egress-firewall + resource-limit + agent-N-account
+   scripts + threat-model §7 doc (draft only; operator runs on real VPS). ntfy deep-link (#5) — verify
+   the deep-link base URL config in code (console notifier / ntfy hooks), fix if wrong.
+5. **Group C live smokes** (queue for a live operator session, `gantry up`): /graph showpiece capture
+   (playwright screenshot), phone-approve over tailnet, ntfy tap. Needs ENABLE_AGENT_EXEC + creds.
 
-DONE + verified:
-- **Dashboard rebuild** (`console/` Next.js 16 app) shipped: fleet home, `/run/[id]`,
-  `/deck`, `/graph/[projectId]`, launch console, ⌘K palette, ntfy, chime, `/brand`.
-  Industrial-CRT identity (graphite + amber phosphor, green=live only). 351 tests green.
-- **Live build-agent executor** wired + cross-reviewed + **live-verified end-to-end**:
-  agent→wt-commit→Gate B→Gate D(trace)→Gate C (merge to integration), `main` untouched
-  (promote gated). See memory [[agent-exec-gate]].
-- **Isolated per-lane agent HOMEs** (`~/.gantry/agent-homes/<slug>`, provisioned per
-  spawn, reclaimed per run) + **multi-lane concurrency** (1..4 lanes per run,
-  `LANE_CONCURRENCY` clamp, finalize-ALL→merge-ALL, 2-lane live smoke PASS).
-- **`gantry` CLI** (`bin/gantry` run/up/status, zero-dep Node ≥18 over the console API)
-  + **install.sh** symlink install — cross-review PASS, live-verified twice.
-- **Decompose agent** (READ-ONLY headless split of brief → 1..4 disjoint lanes,
-  fail-closed validation) — promoted 2c900fb; live decomposed-run smoke PASS.
-- **Handoff-respawn loop** (context-guard HANDOFF.md → fresh-agent respawn, fail-closed
-  neutralization) — promoted 5f200e7; live respawn smoke PASS 2026-07-07.
-- **Per-lane model routing** — promoted cf2090a 2026-07-08: `route-tier.ts` (route.py
-  TOP/CHEAP regexes verbatim), `auto` ⇒ routeModel(brief) per lane, explicit tier ⇒
-  force-all, per-lane plan.jsonl pricing, worker uses lane.model. No API change.
-- Sandbox: `console/lib/sandbox/{agent-runner,worktree,agent-home,decompose,handoff}.ts`.
-  Wired in `console/lib/server/daemon.ts`.
-- Posture (operator-approved): DIRECT mode (agent runs as operator), FULL toolset incl.
-  Bash, zero-MCP, credential-free env, worktree-cwd, timeout, audit. Gates:
-  `ENABLE_AGENT_EXEC=1` + `AGENT_ALLOW_DIRECT=1`.
-
-## To run GANTRY live (proven working)
-Easiest: `gantry up` (live env owned by the CLI), `gantry run "<brief>"`, `gantry status`.
-Manual equivalent:
-```
-cd /home/alter/HARNESS/console && npm run build
-ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 HARNESS_LIVE=1 \
-  AGENT_CLI_PATH=/home/alter/.local/bin/claude \
-  CONSOLE_BASE_URL=http://127.0.0.1:3000 HARNESS_REPO=/home/alter/HARNESS \
-  npx next start -H 127.0.0.1 -p 3000        # or -H 100.72.193.64 for tailnet
-```
-`AGENT_CLI_PATH` must be the ABSOLUTE claude binary; `buildAgentArgs` passes
-`--dangerously-skip-permissions`. Do NOT set `AGENT_HOME` (isolated per-lane homes are
-the default; `AGENT_HOME=<path>` = explicit legacy override). Multi-lane: POST
-`lanes:["b1","b2"]` (1..4) + `LANE_CONCURRENCY=2..4`. Decompose: `gantry run --decompose`.
-
-## NEXT-PASS AGENDA (what to build after /clear)
-
-1. **Decompose agent** — DONE 2026-07-07 (promoted 2c900fb + live smoke PASS).
-2. **Console handoff-respawn loop** — DONE 2026-07-07 (promoted 5f200e7 + live respawn
-   smoke PASS). Boundary (documented): dissimilar-content renames undetectable.
-3. **Per-lane model routing** — DONE 2026-07-08 (promoted cf2090a; all gates green,
-   opus judge PASS). Non-gating follow-up: live mixed-tier `--decompose` smoke
-   (confirm mixed models in audit argv + usage envelopes); plan.jsonl serialization
-   golden-test (accepted Medium).
-4. **CLI tests** (accepted Medium at gantry-cli merge) — bin/gantry parser + API client
-   against a mock server; install.sh shell asserts. ← IN PROGRESS (this batch, above divider).
-5. **Operator DoD leftovers** (dashboard rebuild) — phone approve over tailnet, ntfy
-   tap deep-link, /graph showpiece capture. (Live run e2e: done repeatedly.)
-6. **VPS drop-mode track** (when wanted) — agent Max-plan login, egress firewall,
-   resource limits, agent-N accounts for multi-lane, threat-model §7 sign-off.
-
-Low/background: haiku alias quirk (+ usage-extraction may pick wrong modelUsage key —
-see decompose smoke note in NOTES.md); gantry SSE reconnect if runs get long; agent-home
-hardening notes (git-identity cache, openat-anchored writes).
-
-## Decisions already made (don't relitigate)
-- Direct mode + Bash for the local build agent — intentional, gated, live-verified. Not a
-  regression of web/'s no-Bash/OS-jail invariants (those stay for the VPS drop mode).
-- Cross-review gate before every merge to main has caught real bugs each time — keep it.
-- Throwaway smoke artifacts are cleaned; `main` never carries them. Promote to main stays
-  human-gated + `ENABLE_PROMOTE_TO_MAIN`.
-
-## Open / notes
-- RUN-RECIPE GOTCHA: a live run against THIS repo flips the operator checkout to
-  `integration` mid-run; reset-base returns to base only from a CLEAN tree. Dirty tree ⇒
-  recover with `git switch <branch>` + delete `integration`. Smoke leftovers to clean:
-  lane worktree+branch, integration branch, data/plans/plan-<id>.jsonl.
-- Model alias quirk: `--model haiku` resolved to sonnet-5 in one run; sonnet/opus map fine.
+## Dead ends / open questions
+- reconnect "give-up" test costs ~4.5s (5 backoffs) — given a 20000ms `it` timeout; acceptable but
+  slow. Did NOT add an env knob to shrink backoff (would add surface to the zero-dep CLI a reviewer
+  may ding). If the suite time matters, revisit.
+- Group B/C are mostly operator-hands; I can only produce review-ready drafts + code verifies. The
+  VPS drop-mode threat-model §7 sign-off is a HUMAN decision — do not self-approve.
+- Prior open low/background items still stand: haiku model-alias quirk (distinct from the usage-key
+  fix — that was attribution; alias is `--model haiku`→sonnet resolution); agent-home git-identity
+  cache / openat-anchored writes.

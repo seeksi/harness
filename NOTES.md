@@ -694,3 +694,58 @@ false-green). One Gate-C fix on integration (f149661): tsc noImplicitAny annotat
 mock.calls map arg (pure type, no logic change). Promote auto-cleaned both lane worktrees +
 feat/clitest + feat/installsh + integration branches. Follow-up (non-gating, ponytail in test):
 cmdUp / findClaude-PATH-scan branch not unit-tested (argv[1]/spawn deps).
+
+# Non-gating follow-ups batch (post-agenda) — base: main ffb18be, branch feat/followups
+project: harness
+checkpoint: 2026-07-08 (context-guard soft limit; group-A code changes done, gates not yet run)
+
+## Scope (from HANDOFF "Low/background" + accepted follow-ups). Group A = code I land direct;
+   B = operator-gated (draft only); C = live-smoke (needs running server + creds).
+Group A (DONE in working tree, direct edits, NOT yet gated/committed):
+1. SSE reconnect — bin/gantry followRun: was one-shot→exit-hint. Now resumes across drops via
+   ?lastEventId= (tracks last `id:` seq; server replay is exclusive so gapless/dup-free), bounded
+   MAX_RECONNECTS=5 + linear backoff (300ms base, 3s cap), reset on any frame. STREAM_END
+   ("__console_end") recognized → stop (finite fixture). never-opened stream = fast fail (no
+   retry storm). Header ponytail note updated. node --check OK.
+2. usage modelUsage key fix — agent-runner.ts parseAgentUsage: entries[0] → DOMINANT entry by
+   total token volume (fixes haiku side-call mis-attribution). `>` keeps single-entry + tie=insertion
+   order deterministic. +1 test (multi-model opus-dominant).
+3. plan.jsonl golden-test — daemon.ts: extracted pure `serializePlanFile(plan)` (exported),
+   writePlanFile calls it. +2 tests (mixed-tier haiku/opus golden bytes; single sonnet).
+4. findClaude tests — gantry-cli.test.ts: +6 (abs-exec return, non-abs die, missing/non-exec die,
+   dir-trap die, PATH scan w/ symlink realpath + empty-seg skip, no-claude die) + 2 SSE reconnect
+   (resume-from-id happy; give-up-after-budget). Trailing ponytail reworded (only cmdUp undriven).
+FILES TOUCHED: bin/gantry, console/lib/sandbox/agent-runner.ts (+.test.ts),
+  console/lib/server/daemon.ts (+.test.ts), console/lib/cli/gantry-cli.test.ts.
+NEXT: cd console && npx vitest run (expect 483 + 2 usage + 2 plan + 8 cli = 495-ish) + eslint +
+  tsc 11-baseline + next build + node --check bin/gantry. Then cross-review the diff (single
+  branch, small) → fix → commit → human go/no-go → push. THEN group B drafts (VPS drop-mode
+  scripts+threat-model §7; ntfy deep-link verify) + group C live smokes queued for operator session.
+Group B/C NOT started. HANDOFF agenda items #5 (operator DoD: phone approve, ntfy tap, graph
+  showpiece) + #6 (VPS drop-mode) remain — mostly operator-hands; I prep review-ready drafts.
+
+## Group A cross-review — r1 BLOCK → fixed → r2 (2026-07-08, resume session)
+- Gate C re-confirmed green before review: 494 vitest, eslint clean, tsc 11=baseline, node --check OK.
+- Cross-review r1: Codex (thread 019f4267-4d62-7bb2-8887-95b6845aa351) BLOCK 1 High + 1 Med + 1 Low;
+  Claude self-review CONCURS on all three (traced the High against the live server stream route).
+  - HIGH (bin/gantry followRun): reconnect budget `failures=0` reset was nested inside `if(idLine)`
+    → only id-bearing frames refilled it. But the LIVE server (app/api/fleet/stream/route.ts) sends
+    id-less frames on a healthy connection: `: open`, `: ping`/15s, and id-less `sync` resync frames.
+    So a quiet run behind a flaky proxy (only pings between drops) could exhaust MAX_RECONNECTS and
+    return "unknown" (→cmdRun exit 1) prematurely while the server is alive — contradicting the code's
+    own "reset whenever any frame arrives" header note + "consecutive SILENT reconnects" knob comment.
+    FIX: moved `failures=0` to fire on EVERY complete frame (event/sync/comment); `if(idLine)` now only
+    advances the resume cursor. A truly silent server sends nothing → still exhausts the budget (the
+    existing give-up test, res.end() with no frame, still passes hits=6→unknown).
+  - MED (test guard for the High): added gantry-cli.test.ts test — 6 ping-then-drop cycles (>MAX_RECONNECTS)
+    then a terminal frame on the 7th; resolves "done" ONLY if id-less pings reset the budget (old code
+    → "unknown" at 6). Fast: failures oscillates 0→1 so backoff stays 300ms (~1.8s total).
+  - LOW (tie coverage): added agent-runner.test.ts test — two model entries, EQUAL total tokens →
+    asserts first-inserted (sonnet) wins, locking the `>`-not-`>=` insertion-order contract.
+- Affected 3 test files: 151 pass (+2 new). Full Gate C after fix: 496 vitest, eslint clean, tsc 11=baseline.
+- Cross-review r2: Codex (same thread) PASS — all 3 r1 findings resolved, no new findings. Claude concurs.
+  VERDICT: PASS. Group A cross-review CLOSED.
+status: Group A cross-review PASS 2026-07-08; committed to feat/followups (one commit). NEXT: human
+  go/no-go → merge feat/followups → main → push held for operator say-so (main also unpushed since
+  f149661 — confirm push scope with operator). THEN Group B drafts (VPS drop-mode #6 + ntfy deep-link
+  #5 verify) + Group C live smokes (operator session). Do NOT merge/push without say-so.

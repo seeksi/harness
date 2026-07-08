@@ -167,16 +167,10 @@ export function planRun(runId: string, routing: Routing, laneBriefs: string[]): 
 // Materialize the route-cost plan.jsonl Gate A (`harness.sh budget`) prices, into the SAME
 // contained allow-dir path the bridge passes to budget. One line per lane (budget.py reads
 // the batch). Conservative fixed per-lane estimate.
-function writePlanFile(plan: RunPlan): void {
-  const abs = containedPlanFile(plan.planFile);
-  const dir = dirname(abs);
-  mkdirSync(dir, { recursive: true });
-  // Symlink guard (threat model T5, depth): containedPlanFile's containment is LEXICAL; a
-  // symlink planted inside the allow-dir could still redirect the write. realpath the
-  // materialized dir and re-verify it is exactly the allow-dir before writing.
-  if (realpathSync(dir) !== realpathSync(planAllowDir())) {
-    throw new Error("plan dir escapes allow-dir after realpath resolution");
-  }
+// Pure serialization of a plan's Gate-A price rows (one JSON object per lane, newline-joined
+// with a trailing newline — exactly the bytes budget.py reads). Split out from the fs write so
+// the on-disk contract can be golden-tested without touching the filesystem.
+export function serializePlanFile(plan: RunPlan): string {
   const lines = plan.lanes.map((lane) =>
     JSON.stringify({
       task: lane.slug,
@@ -189,10 +183,23 @@ function writePlanFile(plan: RunPlan): void {
       rate_usd_per_mtok: TIER_RATE_USD_PER_MTOK[lane.model],
     })
   );
+  return lines.join("\n") + "\n";
+}
+
+function writePlanFile(plan: RunPlan): void {
+  const abs = containedPlanFile(plan.planFile);
+  const dir = dirname(abs);
+  mkdirSync(dir, { recursive: true });
+  // Symlink guard (threat model T5, depth): containedPlanFile's containment is LEXICAL; a
+  // symlink planted inside the allow-dir could still redirect the write. realpath the
+  // materialized dir and re-verify it is exactly the allow-dir before writing.
+  if (realpathSync(dir) !== realpathSync(planAllowDir())) {
+    throw new Error("plan dir escapes allow-dir after realpath resolution");
+  }
   // O_CREAT|O_EXCL ("wx"): never overwrite or follow a pre-existing file/symlink at the plan
   // path. The runId is server-random so a fresh run never legitimately collides — an EEXIST
   // here is a signal (a planted file), not a normal condition.
-  writeFileSync(abs, lines.join("\n") + "\n", { flag: "wx" });
+  writeFileSync(abs, serializePlanFile(plan), { flag: "wx" });
 }
 
 /**
