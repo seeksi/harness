@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "events";
 import { Readable } from "stream";
-import { startRun, planRun, buildAgentPrompt, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn } from "./daemon";
+import { startRun, planRun, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn } from "./daemon";
 import { resetDb, eventsSince, listAudit, getSnapshot } from "./persist";
 import { subscribe, _resetBroker } from "./broker";
 import { _resetRegistry } from "@/lib/bridge/registry";
 import type { Envelope } from "@/lib/contract/events";
+import type { HandoffFs } from "@/lib/sandbox";
 
 const OLD_ENV = process.env.NODE_ENV;
 beforeEach(() => {
@@ -19,6 +20,7 @@ afterEach(() => {
   process.env.NODE_ENV = OLD_ENV;
   delete process.env.ENABLE_AGENT_EXEC;
   delete process.env.LANE_CONCURRENCY;
+  delete process.env.CONTEXT_MAX_HANDOFFS;
   vi.restoreAllMocks();
 });
 
@@ -146,20 +148,6 @@ describe("startRun — live spawn pipeline: persist + broadcast + slot", () => {
     await waitForSlotFree();
     expect(spawnFn).not.toHaveBeenCalled();
     expect(eventsSince("run-fix", 0).map((e) => e.env.type)).toEqual(["sync"]);
-  });
-});
-
-describe("buildAgentPrompt", () => {
-  it("embeds the brief, mandates the full toolset, and forbids git commit", () => {
-    const p = buildAgentPrompt("add a /health route");
-    expect(p).toContain("add a /health route");
-    expect(p).toContain("FULL toolset");
-    expect(p).toMatch(/DO NOT run `git commit`/);
-  });
-
-  it("length-caps an oversized brief (never exceeds agent-runner's MAX_PROMPT)", () => {
-    const p = buildAgentPrompt("x".repeat(200_000));
-    expect(p.length).toBeLessThan(100_000);
   });
 });
 
@@ -357,6 +345,328 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
     expect(order).not.toContain("integ-merge"); // ⇒ never merged
     expect(getSnapshot("run-noreloc")?.status).toBe("failed");
     expect(currentSlot()).toBeNull();
+  });
+});
+
+describe("startRun — handoff-respawn loop (context-guard)", () => {
+  // A recording harness child (order-tagged) + a wt-verify that clears Gate B so the
+  // success flow reaches merge. Mirrors the agent-exec describe's recordingSpawn.
+  function recordingSpawn(order: string[], byCmd: Record<string, string[]> = {}) {
+    return vi.fn((_script: string, args: string[], opts: Record<string, unknown>) => {
+      expect(opts.shell).toBe(false);
+      order.push(args[0]);
+      const lines = byCmd[args[0]] ?? [];
+      const child = new EventEmitter() as EventEmitter & { stdout: Readable; stderr: Readable; pid: number; kill: () => boolean };
+      child.stdout = Readable.from(lines.map((l) => l + "\n"));
+      child.stderr = Readable.from([]);
+      child.pid = 999;
+      child.kill = () => true;
+      child.stdout.on("end", () => setImmediate(() => child.emit("close", 0)));
+      return child as never;
+    });
+  }
+  const clearVerify = { "wt-verify": [JSON.stringify({ type: "gate", id: "B", status: "clear", severity: "info", summary: "ok" })] };
+
+  // Programmable handoff-fs seam: `read` supplies the (per-attempt) handoff detection; archive
+  // + sweep just record the attempt index they were called with, so the loop's control flow
+  // (respawn / archive-out / post-loop sweep) is fully assertable without a real worktree.
+  function makeHandoffFs(read: HandoffFs["read"]) {
+    const archived: number[] = [];
+    const swept: number[] = [];
+    const fs: HandoffFs = {
+      read,
+      archive: (_slug, attempt) => {
+        archived.push(attempt);
+      },
+      sweep: (_slug, attempt) => {
+        swept.push(attempt);
+      },
+    };
+    return { fs, archived, swept };
+  }
+  const usageOf = (costUsd: number) => ({ model: "sonnet", inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheCreationTokens: 4, contextWindow: 200_000, costUsd });
+
+  it("respawn trigger fires: exit-0 + agent-written handoff ⇒ 2nd attempt reruns with the handoff inlined", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1"; // default CONTEXT_MAX_HANDOFFS (2)
+    const prompts: string[] = [];
+    const runAgent: RunAgentFn = async (o) => {
+      prompts.push(o.prompt);
+      return { exitCode: 0, sessionId: "sess-agent01", usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+    // Attempt 0 wrote a handoff; attempt 1 did not.
+    const seq = ["HANDOFF-ALPHA", null];
+    let i = 0;
+    const h = makeHandoffFs(() => (i < seq.length ? seq[i++] : null));
+
+    startRun(
+      { runId: "run-hf1", projectId: "proj", projectName: "v", brief: "keep going" },
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    expect(prompts).toHaveLength(2); // one respawn
+    expect(prompts[0]).not.toContain("Handoff from the previous agent");
+    expect(prompts[1]).toContain("Handoff from the previous agent (continue from here)");
+    expect(prompts[1]).toContain("HANDOFF-ALPHA");
+    expect(h.archived).toEqual([0]); // attempt 0's handoff archived out before respawn
+    expect(h.swept).toEqual([1]); // post-loop sweep at the final attempt
+    expect(getSnapshot("run-hf1")?.status).toBe("done");
+  });
+
+  it("cap honored: CONTEXT_MAX_HANDOFFS respawns then the LAST result stands (no infinite loop)", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    process.env.CONTEXT_MAX_HANDOFFS = "1"; // exactly one respawn allowed
+    let calls = 0;
+    const runAgent: RunAgentFn = async () => {
+      calls++;
+      return { exitCode: 0, sessionId: "sess-agent01", usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+    // read ALWAYS reports a handoff — only the cap can stop the loop.
+    const h = makeHandoffFs(() => "STILL-MORE");
+
+    startRun(
+      { runId: "run-hfcap", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    expect(calls).toBe(2); // initial + 1 respawn, then cap stops it
+    expect(h.archived).toEqual([0]); // only the pre-respawn archive
+    expect(h.swept).toEqual([1]); // the cap attempt's handoff is swept out post-loop
+    expect(getSnapshot("run-hfcap")?.status).toBe("done");
+  });
+
+  it("stale archive: once a handoff is archived out, the next read returns null ⇒ no re-trigger", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    process.env.CONTEXT_MAX_HANDOFFS = "5"; // generous cap — the archive, not the cap, must stop it
+    let calls = 0;
+    const runAgent: RunAgentFn = async () => {
+      calls++;
+      return { exitCode: 0, sessionId: "sess-agent01", usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+    // Real-fs contract: read reports the handoff until archive() moves it out.
+    let present = true;
+    const archived: number[] = [];
+    const swept: number[] = [];
+    const fs: HandoffFs = {
+      read: () => (present ? "H" : null),
+      archive: (_s, a) => {
+        present = false;
+        archived.push(a);
+      },
+      sweep: (_s, a) => {
+        swept.push(a);
+      },
+    };
+
+    startRun(
+      { runId: "run-hfstale", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: fs }
+    );
+    await waitForSlotFree();
+
+    expect(calls).toBe(2); // one respawn, then the archived handoff no longer retriggers
+    expect(archived).toEqual([0]);
+    expect(getSnapshot("run-hfstale")?.status).toBe("done");
+  });
+
+  it("tracked-unchanged: read()===null (no agent handoff) ⇒ NO respawn, single attempt", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1"; // default cap 2
+    let calls = 0;
+    const runAgent: RunAgentFn = async () => {
+      calls++;
+      return { exitCode: 0, sessionId: "sess-agent01", usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+    // The tracked-and-unchanged HANDOFF.md case: the seam reports no agent handoff.
+    const h = makeHandoffFs(() => null);
+
+    startRun(
+      { runId: "run-hftrack", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    expect(calls).toBe(1); // no respawn
+    expect(h.archived).toEqual([]); // nothing archived in-loop
+    expect(h.swept).toEqual([0]); // post-loop sweep still runs (a no-op for the real fs)
+    expect(getSnapshot("run-hftrack")?.status).toBe("done");
+  });
+
+  it("nonzero exit ⇒ NO respawn, run fails before wt-commit, sweep still runs (finally)", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const order: string[] = [];
+    let calls = 0;
+    let readCalls = 0;
+    const runAgent: RunAgentFn = async () => {
+      calls++;
+      return { exitCode: 1, sessionId: "sess-agent01", usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 1 } };
+    };
+    // read would report a handoff — but a nonzero exit must throw BEFORE read is consulted.
+    const h = makeHandoffFs(() => {
+      readCalls++;
+      return "H";
+    });
+
+    startRun(
+      { runId: "run-hfexit", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    expect(calls).toBe(1); // no respawn on nonzero
+    expect(readCalls).toBe(0); // trigger never evaluated on the failure path
+    expect(h.swept).toEqual([0]); // finally-sweep runs even on the throw path
+    expect(order).not.toContain("wt-commit");
+    expect(order).not.toContain("integ-merge");
+    expect(getSnapshot("run-hfexit")?.status).toBe("failed");
+    expect(currentSlot()).toBeNull();
+  });
+
+  it("sweep at cap=0 (respawn disabled): a written handoff is NOT respawned but IS swept out", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    process.env.CONTEXT_MAX_HANDOFFS = "0"; // disables respawn entirely
+    let calls = 0;
+    const runAgent: RunAgentFn = async () => {
+      calls++;
+      return { exitCode: 0, sessionId: "sess-agent01", usage: null, audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+    const h = makeHandoffFs(() => "H"); // agent wrote a handoff, but cap 0 forbids respawn
+
+    startRun(
+      { runId: "run-hfcap0", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    expect(calls).toBe(1); // no respawn (cap 0)
+    expect(h.archived).toEqual([]); // never archived in-loop
+    expect(h.swept).toEqual([0]); // but the leftover handoff is swept out before wt-commit
+    expect(getSnapshot("run-hfcap0")?.status).toBe("done");
+  });
+
+  it("per-attempt usage envelopes: BOTH attempts emit a usage event tagged with the lane", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1"; // default cap 2 → one respawn (2 attempts)
+    const broadcast: Envelope[] = [];
+    subscribe((item) => broadcast.push(item.env));
+    let calls = 0;
+    const runAgent: RunAgentFn = async () => {
+      const costUsd = calls === 0 ? 0.11 : 0.22;
+      calls++;
+      return { exitCode: 0, sessionId: "sess-agent01", usage: usageOf(costUsd), audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 } };
+    };
+    const seq = ["H", null];
+    let i = 0;
+    const h = makeHandoffFs(() => (i < seq.length ? seq[i++] : null));
+
+    startRun(
+      { runId: "run-hfusage", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    const usageEvents = broadcast.filter((e) => e.type === "usage") as Extract<Envelope, { type: "usage" }>[];
+    expect(usageEvents).toHaveLength(2); // one envelope PER attempt
+    expect(usageEvents.every((e) => /^lane-[0-9a-f]{16}-0$/.test(e.payload.laneId ?? ""))).toBe(true); // tagged with the lane
+    expect(usageEvents.map((e) => e.payload.costUsd).sort()).toEqual([0.11, 0.22]);
+    expect(getSnapshot("run-hfusage")?.status).toBe("done");
+  });
+
+  it("runAgent REJECTION (timeout/gate refusal): read never consulted, sweep still runs, ORIGINAL reason recorded", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const order: string[] = [];
+    let readCalls = 0;
+    // runAgentInSandbox REJECTS on timeout/gate refusal (vs a clean nonzero exit, which resolves).
+    const runAgent: RunAgentFn = async () => {
+      throw new Error("sandbox gate refused: agent timed out (SIGKILL)");
+    };
+    const h = makeHandoffFs(() => {
+      readCalls++;
+      return "H";
+    });
+
+    startRun(
+      { runId: "run-hfreject", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+    );
+    await waitForSlotFree();
+
+    expect(readCalls).toBe(0); // rejection propagates before the respawn trigger is evaluated
+    expect(h.swept).toEqual([0]); // finally-sweep STILL ran on the rejection path
+    expect(order).not.toContain("wt-commit");
+    expect(order).not.toContain("integ-merge");
+    expect(getSnapshot("run-hfreject")?.status).toBe("failed");
+    // The pool recorded the ORIGINAL rejection reason — not a sweep/masking artifact.
+    const logged = errSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(logged).toContain("sandbox gate refused: agent timed out (SIGKILL)");
+    expect(currentSlot()).toBeNull();
+  });
+
+  it("sweep failure with NO primary error ⇒ fail closed: the sweep error fails the lane", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const order: string[] = [];
+    const runAgent: RunAgentFn = async () => ({
+      exitCode: 0,
+      sessionId: "sess-agent01",
+      usage: null,
+      audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 0 },
+    });
+    // Clean finish (read ⇒ null), but the mandatory finally-sweep explodes: a possibly-
+    // polluted worktree must NOT proceed to wt-commit — the sweep error fails the lane.
+    const fsSeam: HandoffFs = {
+      read: () => null,
+      archive: () => {},
+      sweep: () => {
+        throw new Error("sweep exploded (git restore failed)");
+      },
+    };
+
+    startRun(
+      { runId: "run-hfsweepfail", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: fsSeam }
+    );
+    await waitForSlotFree();
+
+    expect(order).not.toContain("wt-commit");
+    expect(getSnapshot("run-hfsweepfail")?.status).toBe("failed");
+    const failLine = errSpy.mock.calls.find((c) => String(c[0]).includes("run run-hfsweepfail failed"));
+    expect(failLine?.join(" ")).toContain("sweep exploded"); // the sweep error IS the failure
+  });
+
+  it("sweep failure WITH a primary error in flight: original reason propagates, sweep failure only logged", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const order: string[] = [];
+    // Primary failure: clean nonzero exit ⇒ the loop throws its own error first.
+    const runAgent: RunAgentFn = async () => ({
+      exitCode: 1,
+      sessionId: "sess-agent01",
+      usage: null,
+      audit: { ts: 1, cmd: "agent", argv: ["lane:x"], outcome: "exit", code: 1 },
+    });
+    const fsSeam: HandoffFs = {
+      read: () => null,
+      archive: () => {},
+      sweep: () => {
+        throw new Error("sweep exploded (git restore failed)");
+      },
+    };
+
+    startRun(
+      { runId: "run-hfsweepmask", projectId: "proj", projectName: "v", brief: "b" },
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: fsSeam }
+    );
+    await waitForSlotFree();
+
+    expect(getSnapshot("run-hfsweepmask")?.status).toBe("failed");
+    const logged = errSpy.mock.calls.map((c) => c.join(" "));
+    // The run's recorded failure is the ORIGINAL nonzero-exit reason — never masked...
+    const failLine = logged.find((l) => l.includes("run run-hfsweepmask failed"));
+    expect(failLine).toContain("agent exited nonzero (code 1)");
+    expect(failLine).not.toContain("sweep exploded");
+    // ...while the sweep failure is still surfaced separately (lane slug, no content).
+    expect(logged.some((l) => l.includes("handoff sweep failed for lane") && l.includes("sweep exploded"))).toBe(true);
   });
 });
 
