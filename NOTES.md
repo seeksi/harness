@@ -1,3 +1,47 @@
+# Group C close — cross-review PASS + rebuild/restart + live agent-exec smoke (2026-07-08 s4)
+project: harness
+
+## Done this session (feat/followups)
+- CROSS-REVIEW (Claude×Codex, fresh-context): VERDICT PASS. Codex raised 2 High + 3 lower.
+  Both Highs downgraded on verified evidence — `harness.sh clean` uses SAFE `git branch -d`
+  (harness.sh:436): an ahead-of-base integration (real merged work) is never lost; `if(failed)`
+  clean is correctly nested inside `if(live)`, after reset-base, in try/catch (never skips slot
+  release). Fixed the one Medium: RunFocus.onPromote now posts `postGate(runId,"D","approved")`
+  in live mode (parity with FleetHome; was silently dropping promote taps on the run-focus page).
+  Re-verified: console vitest 500 pass, tsc=11 (baseline, 0 in touched prod), eslint clean.
+- REBUILD + RESTART :3001 (agent-exec): `npx next build` clean → killed old pid 263685 →
+  restarted with the HANDOFF step-2 env. **ENV GAP FOUND + FIXED:** HANDOFF's env line omitted
+  `HARNESS_SCRIPT_PATH`; default is RELATIVE (`../.claude/skills/harness/harness.sh`,
+  harness-bridge.ts:309) and spawn resolves it against `cwd=HARNESS_REPO=/tmp/c2-throwaway`
+  (harness-bridge.ts:419) → `/tmp/.claude/...` ENOENT. Added
+  `HARNESS_SCRIPT_PATH=/home/alter/HARNESS/.claude/skills/harness/harness.sh` to the launch env.
+  Server now pid 343982 on 100.72.193.64:3001, live:true. Log: scratchpad/console-3001.log.
+- LIVE SMOKE (2 real agent runs): agent-exec spawns a real Claude agent that commits
+  (agent-exec works end-to-end up to Gate D). **THE FIX VALIDATED TWICE:** both runs fail-closed
+  at Gate D → failure-path `clean` tears down `integration` + resets HEAD to main → next run's
+  `integ-start` succeeds (re-created integration where the OLD build would have died). Poisoning
+  loop BROKEN.
+
+## Residual / new findings (NOT blocking the commit)
+- Gate D trace-relocate FAILS for every real agent-exec run ("agent trace could not be
+  relocated") → runs can't reach `done`. Root cause is the isolated-HOME trace path — this IS
+  the `tracehook` subtask below ("PostToolUse trace hook work from any cwd"). Blocks a green
+  end-to-end agent run; separate from the daemon fix.
+- Stale lane worktrees/branches accumulate on failed runs (agent committed real work → safe
+  `branch -d` preserves the unmerged lane). Does NOT poison the next run (unique slug per run;
+  only a leftover `integration` blocks integ-start). Cosmetic sprawl in /tmp/c2-throwaway
+  (feat/lane-1fb3100f9828986a-0, feat/lane-44ff96b85aca37f0-0 + worktrees) — manual
+  `harness.sh clean` to tidy, or force-teardown enhancement (ponytail in daemon.ts).
+- Cross-review follow-ups (Low): finalizeRun("done") inside the failure try (safe-delete makes
+  it harmless); RunFocus/FleetHome `live` probe defaults false until /api/runs resolves
+  (sub-second first-paint race, shared pre-existing pattern); FleetHome still inlines the
+  live/fixture branch instead of `gateEffect` (different envelope shape, not a mechanical dedup).
+
+## Next
+1. COMMIT on feat/followups (cross-review PASS) — do NOT push (operator say-so).
+2. tracehook subtask → unblocks a green agent-exec run to `done`.
+3. Optionally tidy /tmp/c2-throwaway stale lane worktrees (`harness.sh clean`).
+
 # Memory-integration follow-ups (trace hook cwd, provisional confirm CLI, README docs) — base: main
 project: harness
 
@@ -694,3 +738,227 @@ false-green). One Gate-C fix on integration (f149661): tsc noImplicitAny annotat
 mock.calls map arg (pure type, no logic change). Promote auto-cleaned both lane worktrees +
 feat/clitest + feat/installsh + integration branches. Follow-up (non-gating, ponytail in test):
 cmdUp / findClaude-PATH-scan branch not unit-tested (argv[1]/spawn deps).
+
+# Non-gating follow-ups batch (post-agenda) — base: main ffb18be, branch feat/followups
+project: harness
+checkpoint: 2026-07-08 (context-guard soft limit; group-A code changes done, gates not yet run)
+
+## Scope (from HANDOFF "Low/background" + accepted follow-ups). Group A = code I land direct;
+   B = operator-gated (draft only); C = live-smoke (needs running server + creds).
+Group A (DONE in working tree, direct edits, NOT yet gated/committed):
+1. SSE reconnect — bin/gantry followRun: was one-shot→exit-hint. Now resumes across drops via
+   ?lastEventId= (tracks last `id:` seq; server replay is exclusive so gapless/dup-free), bounded
+   MAX_RECONNECTS=5 + linear backoff (300ms base, 3s cap), reset on any frame. STREAM_END
+   ("__console_end") recognized → stop (finite fixture). never-opened stream = fast fail (no
+   retry storm). Header ponytail note updated. node --check OK.
+2. usage modelUsage key fix — agent-runner.ts parseAgentUsage: entries[0] → DOMINANT entry by
+   total token volume (fixes haiku side-call mis-attribution). `>` keeps single-entry + tie=insertion
+   order deterministic. +1 test (multi-model opus-dominant).
+3. plan.jsonl golden-test — daemon.ts: extracted pure `serializePlanFile(plan)` (exported),
+   writePlanFile calls it. +2 tests (mixed-tier haiku/opus golden bytes; single sonnet).
+4. findClaude tests — gantry-cli.test.ts: +6 (abs-exec return, non-abs die, missing/non-exec die,
+   dir-trap die, PATH scan w/ symlink realpath + empty-seg skip, no-claude die) + 2 SSE reconnect
+   (resume-from-id happy; give-up-after-budget). Trailing ponytail reworded (only cmdUp undriven).
+FILES TOUCHED: bin/gantry, console/lib/sandbox/agent-runner.ts (+.test.ts),
+  console/lib/server/daemon.ts (+.test.ts), console/lib/cli/gantry-cli.test.ts.
+NEXT: cd console && npx vitest run (expect 483 + 2 usage + 2 plan + 8 cli = 495-ish) + eslint +
+  tsc 11-baseline + next build + node --check bin/gantry. Then cross-review the diff (single
+  branch, small) → fix → commit → human go/no-go → push. THEN group B drafts (VPS drop-mode
+  scripts+threat-model §7; ntfy deep-link verify) + group C live smokes queued for operator session.
+Group B/C NOT started. HANDOFF agenda items #5 (operator DoD: phone approve, ntfy tap, graph
+  showpiece) + #6 (VPS drop-mode) remain — mostly operator-hands; I prep review-ready drafts.
+
+## Group A cross-review — r1 BLOCK → fixed → r2 (2026-07-08, resume session)
+- Gate C re-confirmed green before review: 494 vitest, eslint clean, tsc 11=baseline, node --check OK.
+- Cross-review r1: Codex (thread 019f4267-4d62-7bb2-8887-95b6845aa351) BLOCK 1 High + 1 Med + 1 Low;
+  Claude self-review CONCURS on all three (traced the High against the live server stream route).
+  - HIGH (bin/gantry followRun): reconnect budget `failures=0` reset was nested inside `if(idLine)`
+    → only id-bearing frames refilled it. But the LIVE server (app/api/fleet/stream/route.ts) sends
+    id-less frames on a healthy connection: `: open`, `: ping`/15s, and id-less `sync` resync frames.
+    So a quiet run behind a flaky proxy (only pings between drops) could exhaust MAX_RECONNECTS and
+    return "unknown" (→cmdRun exit 1) prematurely while the server is alive — contradicting the code's
+    own "reset whenever any frame arrives" header note + "consecutive SILENT reconnects" knob comment.
+    FIX: moved `failures=0` to fire on EVERY complete frame (event/sync/comment); `if(idLine)` now only
+    advances the resume cursor. A truly silent server sends nothing → still exhausts the budget (the
+    existing give-up test, res.end() with no frame, still passes hits=6→unknown).
+  - MED (test guard for the High): added gantry-cli.test.ts test — 6 ping-then-drop cycles (>MAX_RECONNECTS)
+    then a terminal frame on the 7th; resolves "done" ONLY if id-less pings reset the budget (old code
+    → "unknown" at 6). Fast: failures oscillates 0→1 so backoff stays 300ms (~1.8s total).
+  - LOW (tie coverage): added agent-runner.test.ts test — two model entries, EQUAL total tokens →
+    asserts first-inserted (sonnet) wins, locking the `>`-not-`>=` insertion-order contract.
+- Affected 3 test files: 151 pass (+2 new). Full Gate C after fix: 496 vitest, eslint clean, tsc 11=baseline.
+- Cross-review r2: Codex (same thread) PASS — all 3 r1 findings resolved, no new findings. Claude concurs.
+  VERDICT: PASS. Group A cross-review CLOSED.
+status: Group A cross-review PASS 2026-07-08; committed to feat/followups (one commit). NEXT: human
+  go/no-go → merge feat/followups → main → push held for operator say-so (main also unpushed since
+  f149661 — confirm push scope with operator). THEN Group B drafts (VPS drop-mode #6 + ntfy deep-link
+  #5 verify) + Group C live smokes (operator session). Do NOT merge/push without say-so.
+
+## Group B — CLOSED 2026-07-08 (already-landed; docs reconciled, operator go)
+Investigated on "start Group B": the HANDOFF listed B as NOT started, but its substantive work was
+already delivered + live-validated by the #15/#16a/#17b/#17c workstreams. No duplicate drafting done.
+- #6 VPS drop-mode: egress-firewall (`deploy/tier3/agent-egress.nft` + `egress-proxy/`), resource-limit
+  (`agent-exec-wrapper.sh` cgroup scope), agent-N-account (`01b-provision-lane-users.sh`) all committed;
+  threat-model-agent-exec §7 signed off PASS/APPROVED 2026-06-24; `ENABLE_AGENT_EXEC=1` live on VPS,
+  `conformance-multilane.sh` 17/17 PASS (`docs/HANDOFF-17c.md`). NOTHING to draft.
+- #5 ntfy deep-link: VERIFIED CORRECT. `notifier.ts:37 deepLink()` uses CONSOLE_BASE_URL (alias
+  NTFY_DEEPLINK_BASE), abs-link passthrough, runRoute(runId) fallback, relative degrade — no hardcoded
+  host; `notifier.test.ts` covers both base-env paths + Click header. No code change.
+- Doc fix (only genuine stale artifact): `deploy/tier3/GAPS.md` was the pre-completion draft-review; added
+  a dated SUPERSEDED banner + flipped its two stale `OPEN` cells (§7, G1/G9 Bash/commit) to RESOLVED with
+  evidence (Bash in DEFAULT_TOOLS agent-runner.ts:139 + daemon wt-commit daemon.ts:532). Doc-only, no code.
+Remaining truly-open = operator-hands only: Group C live smokes (graph showpiece, phone-approve, ntfy tap).
+
+## Group C live smokes — IN PROGRESS 2026-07-08 (workstation console, tailnet 100.72.193.64)
+Session walking operator through GROUP-C-CHECKLIST.md against the live workstation console.
+- Env found: console live on :3000 (HARNESS_LIVE=1 ENABLE_AGENT_EXEC=1 LANE_CONCURRENCY=1),
+  no active run, no NTFY_* envs, CONSOLE_BASE_URL=127.0.0.1:3000 (not phone-reachable).
+- C1 DONE (partial): drove Playwright → /graph/harness-57f84330 → "Show full swarm" = 7 agent
+  nodes, renders clean but IDLE (0 edges, no run). Captures in scratchpad/graph-swarm-c1*.png.
+  Did NOT overwrite curated graph-swarm.png. Re-shoot during a live run for the money shot.
+- KEY FINDING: server notifier notify() fires ONLY in daemon ingest path (daemon.ts:339);
+  fixture mode (HARNESS_LIVE unset) is CLIENT-SIDE optimistic → does NOT fire ntfy and gate
+  approve is local, not a real POST. So pure fixture = hollow C2 + no C3.
+- PLAN (corrected): smoke C2/C3 via DRY daemon run = HARNESS_LIVE=1 + ENABLE_AGENT_EXEC UNSET
+  (daemon.ts:424 agentRan=false) → real ingest/notify/gate paths, NO real agent/creds. gantry
+  up forces ENABLE_AGENT_EXEC=1 so launch next start directly with custom env on :3001, tailnet
+  host, NTFY_URL/NTFY_TOPIC set + CONSOLE_BASE_URL=http://100.72.193.64:3001.
+- Operator chose: fixture-on-3001 (superseded by dry-daemon per finding above) + ntfy ready
+  (awaiting topic name). NEXT: get topic → launch :3001 dry-daemon → gantry run --url :3001 →
+  watch raised gate + ntfy push → operator approves from phone → re-capture C1 live.
+
+### Session 2 (2026-07-08 resume) — C2 model corrected + C2/C3 both server-confirmed
+- **C2 was NOT actually blocked.** The prior "need the daemon to PARK at a *waiting* gate"
+  premise was the wrong model. The gate POST route (app/api/runs/[id]/gate/route.ts) is
+  DECOUPLED from daemon pausing — its own ponytail (lines 9-10) says daemon-pause-at-gate is a
+  future step. The route only needs a run SNAPSHOT that contains a gate with status "raised";
+  it records the operator verdict as a persisted+broadcast `gate` envelope (appendEvent+publish),
+  NOT a snapshot mutation. A dry-run that fails closed at wt-verify STILL leaves Gate B "raised"
+  in its snapshot — exactly an approvable gate. So the failed dry-run WAS the vehicle all along.
+- **Approvable run already in console.db: `55af2784b4a9841d411f3036`** — gates
+  [A:clear, B:raised], run page 200 on :3001. This is the operator's real phone-approve target.
+- **C2 approve path: SERVER-CONFIRMED (PASS ✓).** Seeded a throwaway run w/ raised Gate B via
+  upsertRun, POSTed `{gateId:B,status:approved}` THROUGH live :3001 (real CSRF: x-harness-request
+  + Origin=Host) → 200 {ok:true}, decision persisted as gate event, publish() broadcast ran.
+  Seed deleted after; 55af left pristine. Helper: console/scripts/verify-c2-approve.mts (untracked).
+- **C3 re-fired fresh (PASS ✓ server-side).** Called REAL notifier.notify() (run-failed) via
+  console/scripts/fire-c3-push.mts w/ live env → posted:true to topic gantry-smoke-c3, deep-link
+  http://100.72.193.64:3001/run/e9e460ed64c2abb3dceaf19f, retained 12h. Helper untracked.
+- **DISCOVERED BUG (middot confirmed real, NOT curl display):** ntfy push landed with Title
+  "Run failed � HARNESS" — the `·` (U+00B7) in notifier.ts:53 Title HEADER is byte-mangled
+  (HTTP headers are latin-1; fetch sends UTF-8 → replacement char on phone). Message BODY middot
+  renders fine (UTF-8 body). One-line fix: ASCII separator in the Title header. FOLLOW-UP, unfixed.
+- **REMAINING = operator physical taps only:** (C3) tap ntfy push → opens e9e460 run page;
+  (C2) open 55af run page on phone → tap approve on Gate B. (C1 money-shot) still needs a live
+  agent run vs a THROWAWAY repo. When taps confirmed → record "Group C — DONE".
+
+### Session 2b — operator hit UI bugs approving; ROOT-CAUSED 3 seams (C2 UI NOT actually usable as-is)
+Operator report: "approve/reject don't work on VECTOR; no gates on harness-c2verify or HANGAR, they stay stuck."
+Traced all of it — the earlier "open 55af run page and approve" plan is WRONG (RunFocus approve is optimistic-only). The real seams:
+1. **Fixture bleeds into LIVE mode.** app/page.tsx:14 ALWAYS `foldFleet(fixtureEnvelopes())` into the
+   fleet-home initial state, even when HARNESS_LIVE=1. So the browser shows demo lanes vector
+   (run-dropship, has raised Gate B), hangar (run-console, healthy), ledger (run-memoryos) alongside
+   live runs. Clicking Approve on VECTOR → FleetHome.onApprove sees live=true → postGate(run-dropship…)
+   → POST /api/runs/run-dropship/gate → **404** (no such live run) → fire-and-forget error swallowed →
+   "button does nothing." EMPIRICALLY CONFIRMED: curl approve run-dropship & run-console → 404; 55af → 200.
+2. **RunFocus (/run/[id]) approve is OPTIMISTIC-ONLY.** components/run/RunFocus.tsx:98-105 onApprove =
+   emitAll(buildGateApproveEnvelopes) — NO `live` check, NO server POST (comment: "so a live bridge can
+   route these later" = never wired). So approving on the run-focus PAGE never hits the server. Only
+   FleetHome.onApprove has the live→postGate branch. ⇒ the ONLY real-POST approve UI is the fleet home lane.
+3. **No active live run is ever parked at a raised gate.** Daemon fails closed (doesn't pause), so a
+   real run finalizes (ended_at set) → likely not an activeLane → 55af (failed) probably doesn't render
+   as an approvable fleet-home lane. NEEDS CHECK: activeLanes/laneOrder selectors — does a finalized
+   run with a raised gate show a lane? If not, there is NO UI path to really-approve 55af.
+- **harness-c2verify phantom = MY verify-c2-approve.mts seed.** I upsertRun'd c2verifyseed (unfinalized,
+  Gate B raised) then POSTed approved; the approved event published to the :3001 broker's in-memory ring.
+  I deleted the DB row but the broker still replays the event → shows as a STUCK run whose gate already
+  flipped to approved (hence "no gates"). Cosmetic; evict by RESTARTING :3001 (broker re-seeds from DB, clean).
+- **DB truth:** console.db has ONE project harness-57f84330, 15 runs. Runs with B:raised = 55af, ab5991, e3b141
+  (all outcome=failed). NO vector/hangar/harness-c2verify rows (those are fixture + broker-phantom).
+- **CLEAN C2-UI VEHICLE (proposed, not yet done):** seed a PERSISTENT, UNFINALIZED live run (no ended_at)
+  under a clear project (e.g. harness-c2-smoke) with a raised Gate B, LEFT un-approved → it renders as an
+  ACTIVE fleet-home lane with a working Approve → phone taps → real postGate → 200. Approve path is 100%
+  real (only gate-raise seeded, same envelope the daemon uses). Then delete seed + restart :3001.
+- **REAL FIX (code, needs go + rebuild + cross-review):** (a) app/page.tsx — don't fold fixture when
+  HARNESS_LIVE=1 (one-liner; fixture is the demo fallback). (b) wire RunFocus.onApprove/onReject to
+  postGate in live mode (parity with FleetHome). Both are `next build` + :3001 restart. NOT a smoke edit.
+- NEXT (this session): confirm activeLanes shows a finalized-run gate lane; decide with operator between
+  quick seed-vehicle vs the code fix; clean the phantom. Nothing committed/pushed.
+
+# Group C — throwaway run "won't start" fix + agent-exec wiring (2026-07-08 s3)
+ROOT CAUSE: daemon finally (daemon.ts:578) calls ONLY reset-base (switches HEAD to base);
+never deletes the `integration` branch or lane worktrees. Only promote (success) deletes
+integration. Throwaway smokes fail-closed → never promote → each failed run leaves
+integration → next run's `integ-start` dies ("integration already exists — clean first",
+harness.sh:296) → looks like nothing starts (seam #3: failed run never shows on fleet board).
+Confirmed live: cleaned /tmp/c2-throwaway → POST /api/runs started clean (Gate A clear,
+Gate B raised) → failed → left integration again (reproduced the poisoning).
+
+DECISION: failure-path cleanup ONLY. Success intentionally leaves integration (operator
+promotes via gate route promote-to-main kind behind ENABLE_PROMOTE_TO_MAIN, or manual clean).
+FIX (in progress): add {cmd:"clean"} to HarnessSubcommand+buildArgs; daemon finally, on a
+`failed` flag, best-effort runSub({cmd:"clean"}) AFTER reset-base. Update daemon.test.ts
+order asserts (failure cases gain trailing "clean").
+ponytail ceiling: multi-lane Gate-C conflict leaves tree dirty on integration; clean's safe
+`git branch -d` can't remove current/dirty branch → still needs manual clean (rare; throwaway
+smoke is single-lane fail-at-B so unaffected).
+
+Gate B REALITY (corrects prior msg): wt-verify Gate B is pass/fail, NOT an interactive pause.
+Real agent that commits CLEARS Gate B → run proceeds to merge → done (integration left).
+A raised (approvable) Gate B only happens on failure (no-op/dirty). Approve POST records a
+decision but does NOT resume the harness (seam #2, RunFocus was optimistic-only, now wired to
+POST). So ENABLE_AGENT_EXEC=1 makes runs REAL (real commit/trace/graph) but Gate B will CLEAR
+on success — the phone-approve tap needs the deep-link on a still-in-ring failed run, or the
+headless verify-c2-approve.mts path.
+
+ENABLE_AGENT_EXEC=1 wiring: restart :3001 (pid 263685) with agent-exec on (real agent vs
+/tmp/c2-throwaway). Restart empties broker ring (loses stale 846a92b). Rebuild needed (next
+start on built app) for the daemon.ts change.
+
+## tracehook Gate-D fix — s5 (2026-07-08 14:0x)
+- IMPLEMENTED in console/lib/sandbox/agent-runner.ts + tests. Full suite 508→ (agent-runner 71) pass, tsc=11 baseline, eslint clean. NOT committed, NOT smoke-tested live yet.
+- Change: buildAgentArgs appends `--settings <json>` injecting the harness's OWN eval-gate PostToolUse trace hook (absolute TRACE_HOOK_PATH); buildInvocation gained `projectDir?` → sets CLAUDE_PROJECT_DIR=worktree cwd (direct: spawnEnv; drop: --preserve-env); spawnAgent passes cwd. Byte-identical when projectDir omitted.
+- HARDENING (from cross-review): traceHookCommand() validates TRACE_HOOK_PATH is shell-safe-absolute (/^\/[A-Za-z0-9_./-]+$/) AND statSync().isFile() — fails CLOSED with AgentExecError before spawn. Closes the AGENT_TRACE_HOOK_PATH override to injection.
+- CROSS-REVIEW (Claude×Codex, sandbox mandatory): round1 BLOCK (2 High). Fixes applied. round2: #1 injection RESOLVED; #2 cwd-resolution → I converted silent-miss to LOUD throw + documented HARNESS_REPO operator contract; residual (existing-but-WRONG hook at bad cwd) is BENIGN (CLAUDE_PROJECT_DIR directs output; missing-hook fails closed → never a false PASS). Downgraded #2 to fails-safe Medium; awaiting operator tie-break before commit.
+- REMAINING: (1) operator OK on #2 tie-break; (2) rebuild+restart :3001 (kill pid 343982, env MUST include HARNESS_SCRIPT_PATH + ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 AGENT_CLI_PATH); (3) live smoke POST run to projectId harness-57f84330, CSRF x-harness-request:1 + origin; confirm Gate D PASSES + trace lands in <worktree>/.claude/traces + copied to /tmp/c2-throwaway/.claude/traces; (4) commit on feat/followups (NO push); (5) force-teardown leftover lane worktrees.
+
+## tracehook — s5-resume (2026-07-08, post-/clear) — STEP 1 DONE
+- FIXED the HARNESS_REPO collision (HANDOFF resume step 1). agent-runner.ts: replaced the
+  TRACE_HOOK_PATH const (was `process.env.HARNESS_REPO ?? cwd/..`) with resolveTraceHookPath():
+  AGENT_TRACE_HOOK_PATH override → HARNESS_SCRIPT_PATH sibling (dirname/../eval-gate/trace-log.py)
+  → cwd/.. fallback. HARNESS_REPO no longer consulted for the hook path (it points at the TARGET
+  repo /tmp/c2-throwaway → would fail closed on every live run). Updated the const comment + all 3
+  traceHookCommand() error strings (HARNESS_REPO→HARNESS_SCRIPT_PATH).
+- TESTS: +2 in agent-runner.test.ts (HARNESS_SCRIPT_PATH sibling resolution; HARNESS_REPO-ignored
+  collision regression — worktreePath aligned to <HARNESS_REPO>.worktrees so containedWorktree
+  doesn't mask the assertion). agent-runner file 73 pass.
+- VERIFY: full console suite 511 pass, tsc 11 (baseline, 0 in touched files), eslint clean on both files.
+- IN PROGRESS: step 2 cross-review of the delta (Codex fresh + Claude self). diff snapshot at
+  scratchpad/tracehook-delta.diff. Then steps 3-7 (rebuild/restart :3001 w/ HARNESS_SCRIPT_PATH+
+  AGENT_TRACE_HOOK_PATH guard, live smoke, verify trace, commit no-push, cleanup).
+
+## tracehook — s7 (2026-07-08, post-/clear resume) — CONTAINMENT TESTS + VERIFY DONE, cross-review CLOSED
+- CONTAINMENT HARDENING now fully tested (HANDOFF step 1). Added 4 tests to agent-runner.test.ts
+  in NEW describe "buildAgentArgs — trace-hook CONTAINMENT": (a) hook INSIDE target repo → THROWS;
+  (b) hook INSIDE a lane worktree → THROWS; (c) shell-safe ASCII SYMLINK whose realpath lands in
+  the worktrees dir → THROWS (realpath catches it, passes charset+isFile first); (d) false-reject
+  guard: hook in a SIBLING harness repo (disjoint from target repo+worktrees) → ACCEPTED, command
+  embeds it. Pattern mirrors the relocateTrace DESTINATION-containment setup (mkdtempSync realpath'd,
+  stub HARNESS_REPO, vi.resetModules + re-import; laneSpec worktreePath aligned to
+  <HARNESS_REPO>.worktrees so containedWorktree doesn't mask the hook-containment throw).
+- VERIFY (step 2): agent-runner.test.ts 77 pass; FULL console suite 515 pass (38 files);
+  tsc 11 = baseline (0 in lib/sandbox); eslint clean on the 3 touched files. GREEN.
+- CROSS-REVIEW CLOSED (step 3): the isAgentWritablePath containment guard + these 4 regression
+  tests resolve Codex #1 (override accepts worktree-controlled abs path) + #2 (statSync follows a
+  symlink → worktree) + #3 (no regression test). Self-reconciled VERDICT = **PASS** (evidence
+  concrete: (a)/(b) cover #1, (c) covers #2 realpath-follow, (d) proves no false-reject of the legit
+  harness-repo hook). Operator tie-break (s6 AskUserQuestion) "add realpath containment" satisfied.
+- REMAINING (steps 4-8, live smoke + commit): rebuild+restart :3001 (RE-CHECK old pid — was 343982
+  in s5, likely dead: `pgrep -af "next start"`) with env ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1
+  AGENT_CLI_PATH=/home/alter/.local/bin/claude HARNESS_LIVE=1 HARNESS_BASE=main
+  HARNESS_REPO=/tmp/c2-throwaway HARNESS_SCRIPT_PATH=<repo>/.claude/skills/harness/harness.sh
+  NTFY_URL/NTFY_TOPIC + belt-and-suspenders AGENT_TRACE_HOOK_PATH=<repo>/.claude/skills/eval-gate/
+  trace-log.py; POST run to projectId harness-57f84330 (CSRF x-harness-request:1 + origin
+  http://100.72.193.64:3001); confirm Gate D reaches `done`; verify trace lands in <worktree>/
+  .claude/traces + copied to /tmp/c2-throwaway/.claude/traces; COMMIT on feat/followups (NO push);
+  harness.sh clean + force-remove leftover lane worktrees. CODE IS COMMIT-READY (cross-review PASS).

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { EventEmitter } from "events";
 import { Readable } from "stream";
-import { startRun, planRun, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn, type RunPlan } from "./daemon";
+import { startRun, planRun, serializePlanFile, currentSlot, _resetSlot, SlotTakenError, type RunAgentFn, type DecomposeFn, type RunPlan } from "./daemon";
 import { resetDb, eventsSince, listAudit, getSnapshot } from "./persist";
 import { subscribe, _resetBroker } from "./broker";
 import { _resetRegistry } from "@/lib/bridge/registry";
@@ -76,6 +76,39 @@ describe("planRun — provenance derived from the server runId, never the briefs
     expect(() => planRun("run-cccc", "auto", ["a", "b", "c", "d", "e"])).toThrow(/1\.\.4/);
     expect(() => planRun("run-cccc", "auto", ["ok", "   "])).toThrow(/non-empty/);
     expect(() => planRun("run-cccc", "auto", ["ok", 5 as never])).toThrow(/non-empty/);
+  });
+});
+
+describe("serializePlanFile — plan.jsonl on-disk contract (Gate A budget input)", () => {
+  it("emits one JSON price row per lane, per-lane tier+rate, newline-joined with a trailing newline", () => {
+    // A mixed-tier run (auto): lane-0 routes cheap, lane-1 top — each row must price ITS
+    // own lane's model, never the run-global model. Golden bytes so a serialization drift
+    // (field rename/reorder, tier/rate divergence, missing trailing newline) fails loudly.
+    const plan: RunPlan = {
+      runId: "run-gold",
+      planFile: "plan-x.jsonl",
+      model: "sonnet",
+      lanes: [
+        { slug: "lane-abc-0", brief: "cheap lane", model: "haiku" },
+        { slug: "lane-abc-1", brief: "heavy lane", model: "opus" },
+      ],
+    };
+    expect(serializePlanFile(plan)).toBe(
+      '{"task":"lane-abc-0","tier":"cheap","in_ktok":40,"out_ktok":8,"cached_ktok":30,"rate_usd_per_mtok":1}\n' +
+        '{"task":"lane-abc-1","tier":"top","in_ktok":40,"out_ktok":8,"cached_ktok":30,"rate_usd_per_mtok":15}\n'
+    );
+  });
+
+  it("prices a single-lane sonnet plan at the default tier", () => {
+    const plan: RunPlan = {
+      runId: "run-solo",
+      planFile: "plan-y.jsonl",
+      model: "sonnet",
+      lanes: [{ slug: "lane-def-0", brief: "one", model: "sonnet" }],
+    };
+    expect(serializePlanFile(plan)).toBe(
+      '{"task":"lane-def-0","tier":"default","in_ktok":40,"out_ktok":8,"cached_ktok":30,"rate_usd_per_mtok":3}\n'
+    );
   });
 });
 
@@ -259,10 +292,12 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
     );
     await waitForSlotFree();
 
-    // The build failed before any commit/verify/merge; only pre-agent steps + reset-base ran.
+    // The build failed before any commit/verify/merge; pre-agent steps + reset-base + the
+    // failure-path clean (tears down the doomed integration branch + worktrees) ran.
     expect(order).toContain("wt-new");
     expect(order).not.toContain("wt-commit");
     expect(order).not.toContain("integ-merge");
+    expect(order).toContain("clean");
     expect(getSnapshot("run-agentfail")?.status).toBe("failed");
     expect(currentSlot()).toBeNull();
   });
@@ -845,8 +880,8 @@ describe("startRun — multi-lane (laneBriefs)", () => {
     await waitForSlotFree();
 
     // [] must NOT be papered over into a single lane from `brief`: planRun throws before
-    // any mint/plan-write/subcommand — only the finalizer's reset-base ever spawned.
-    expect(order).toEqual(["reset-base"]);
+    // any mint/plan-write/subcommand — only the finalizer's reset-base + failure-path clean spawned.
+    expect(order).toEqual(["reset-base", "clean"]);
     expect(getSnapshot("run-mlempty")?.status).toBe("failed");
     expect(currentSlot()).toBeNull();
   });
@@ -1044,7 +1079,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       await waitForSlotFree();
 
       expect(decomposeFn).not.toHaveBeenCalled();
-      expect(order).toEqual(["reset-base"]); // threw before any mint/plan/worktree side effect
+      expect(order).toEqual(["reset-base", "clean"]); // threw before any mint/plan/worktree side effect; failed run cleans
       expect(getSnapshot("run-dcx")?.status).toBe("failed");
       expect(currentSlot()).toBeNull();
     });
@@ -1061,7 +1096,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       await waitForSlotFree();
 
       expect(decomposeFn).not.toHaveBeenCalled();
-      expect(order).toEqual(["reset-base"]);
+      expect(order).toEqual(["reset-base", "clean"]);
       expect(getSnapshot("run-dcgate")?.status).toBe("failed");
       expect(currentSlot()).toBeNull();
     });
@@ -1081,7 +1116,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
       await waitForSlotFree();
 
       expect(order.some((k) => k.startsWith("wt-new:"))).toBe(false);
-      expect(order).toEqual(["reset-base"]);
+      expect(order).toEqual(["reset-base", "clean"]);
       expect(cleaned.some((s) => /^decomp-[0-9a-f]{16}$/.test(s))).toBe(true);
       expect(getSnapshot("run-dcfail")?.status).toBe("failed");
       expect(currentSlot()).toBeNull();

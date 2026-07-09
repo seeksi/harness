@@ -44,6 +44,9 @@ describe("buildArgs — argv typing + injection rejection (T1)", () => {
     expect(buildArgs({ cmd: "integ-merge", slug })).toEqual(["integ-merge", "lane-abc"]);
     const session = mintSession("sess_01");
     expect(buildArgs({ cmd: "trace", session })).toEqual(["trace", "sess_01"]);
+    // Fixed no-arg subcommands take no client-influenced input.
+    expect(buildArgs({ cmd: "reset-base" })).toEqual(["reset-base"]);
+    expect(buildArgs({ cmd: "clean" })).toEqual(["clean"]);
   });
 
   it("REJECTS an unminted slug even if it matches the shape (provenance, not regex)", () => {

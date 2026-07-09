@@ -1,5 +1,22 @@
 # Tier-3 GAPS — security-engineer self-review of this draft
 
+> **STATUS 2026-07-08 — SUPERSEDED (draft landed + live-validated).** This file is the
+> security-engineer's review of the tier-3 *draft*; the two items it flagged `OPEN` are
+> since RESOLVED and the deployment is live. Kept as the historical draft-review record;
+> the analysis prose below is preserved unedited except the two `OPEN` status cells,
+> which now point here.
+> - **§7 sign-off** — recorded PASS/APPROVED 2026-06-24 in
+>   `docs/security/threat-model-agent-exec.md` §7; `ENABLE_AGENT_EXEC=1` is live on the
+>   VPS (`docs/HANDOFF-17c.md`), `conformance-multilane.sh` **17/17 PASS**.
+> - **G1/G9 tool allowlist / commit-without-Bash** — resolved on both axes: the daemon
+>   sandbox's `DEFAULT_TOOLS` now *includes* `Bash` (`console/lib/sandbox/agent-runner.ts:139`,
+>   decision `feat/agent-exec-wire` — direct-local + full toolset), AND the daemon runs its
+>   own `wt-commit` in the Phase-3 finalize step (`console/lib/server/daemon.ts:532`), so a
+>   lane is committed by the harness regardless of the agent's toolset. The full pipeline
+>   (agent build → gates → promote) reached `main` on a real live run.
+> Remaining below is genuinely residual (SNI-aware egress, true host-wide aggregate RAM) —
+> deferred by design, not blocking.
+
 Reviewing `deploy/tier3/*` against the §6 gate checklist in
 `docs/security/threat-model-agent-exec.md`. Honest status, residual risk, and the
 decisions the operator/council must make BEFORE cutover.
@@ -11,7 +28,7 @@ Legend: **covered** (artifact + verify) · **partial** (works, real ceiling) ·
 |---|---|---|---|
 | **G1** dedicated low-priv `agent` user, FS-confined to worktrees | covered | `01-provision-agent-user.sh`, `sudoers.d-umbrella-agent` | single-lane: worktree is deploy-owned, ACL-granted to `agent`. |
 | **G1 multi-lane** per-lane uid isolation (#17 17b) | covered (17b) | `01b-provision-lane-users.sh` (pool `agent-1..N-1`), `sudoers.d-umbrella-agent` (Runas pool), 17a `wt-new` ACL, `conformance-multilane.sh` | each lane = distinct nologin uid + private 0700 HOME + its own ACL-granted worktree; cross-lane ACL isolation PROVEN by `conformance-multilane.sh` (sibling denied; agent-created file not sibling-readable — default-ACL leak closed). Residual: root can read all (single host). |
-| **G1/G9** tool allowlist (Bash off vs vetted command allowlist) | **OPEN** | code default `Read,Edit,Write,Grep,Glob` | **DECISION REQUIRED — see below.** Code ships no-Bash; whether the lane-builder can do real work without Bash is unproven. |
+| **G1/G9** tool allowlist (Bash off vs vetted command allowlist) | ~~OPEN~~ **RESOLVED** (see status banner) | daemon sandbox `DEFAULT_TOOLS` incl. `Bash` + daemon `wt-commit` | Original draft-review note kept below; the no-Bash/commit gap is closed (Bash in the toolset AND harness-side commit). |
 | **G4** egress — agent reaches only Anthropic API | covered (council 2B: FQDN proxy) | `egress-proxy/` (tinyproxy unit + conf + filter) + `agent-egress.nft` backstop | proxy filters on the CONNECT host line, not TLS SNI (no MITM/cert check); a client lying about the host is still bounded because nft pins egress to the proxy and the proxy dials the real allowlisted name. Proxy uid holds broad egress to `*.anthropic.com`. |
 | **G5** session outside others-readable FS; absent from env/audit/browser | covered (code) + operator-action (login) | provision (HOME 0700), RUNBOOK Step 5/7 | session sits in `agent`'s own HOME; root can still read it (unavoidable on a single host). Login is manual by design. |
 | **G6** per-agent resource limits (cpu/mem/disk/pids) | covered (council 3B: cgroup scope) | `agent-exec-wrapper.sh` (systemd-run --user --scope MemoryMax/MemorySwapMax/TasksMax/CPUQuota) + ulimits + `AGENT_TIMEOUT_MS` | per-INVOCATION scope. Per-lane MemoryMax default LOWERED to 500M (17b) so concurrency fits 2 GB. Fail-closed if the user scope is unavailable. |
@@ -20,7 +37,7 @@ Legend: **covered** (artifact + verify) · **partial** (works, real ceiling) ·
 | **G7** trace collected into run record | covered (code) | `relocateTrace` (symlink/size-hardened) | none new. |
 | **G8** promote default-off + human diff review | covered | `umbrella-agent.conf` (flag commented), RUNBOOK cutover/rollback | relies on a human actually reading the diff; no automated poison-code detection beyond cross-review (Gate B). |
 | **Max-plan auth** on the VPS (no API key) | operator-action | RUNBOOK Step 5 | manual interactive login; if it ever expires the agent fails closed (refused), not insecure. |
-| **§7 sign-off** | **OPEN** | threat model §7 table still `_open_` | must be recorded before flipping `ENABLE_AGENT_EXEC`. |
+| **§7 sign-off** | ~~OPEN~~ **RECORDED** (see status banner) | threat model §7 PASS/APPROVED 2026-06-24 | signed off before `ENABLE_AGENT_EXEC=1` went live on the VPS. |
 
 ## Decisions the operator / council must resolve before cutover
 

@@ -11,7 +11,11 @@ import { discoverProjects } from "@/lib/server/discovery";
 import { FleetHome } from "@/components/FleetHome";
 
 export default function Page() {
-  const initial = foldFleet(fixtureEnvelopes(), initialFleetState);
+  // LIVE mode seeds an empty fleet — the SSE stream is the sole source of real lanes.
+  // The deterministic fixture (vector/hangar/ledger) is the DEMO fallback only, so it
+  // never bleeds demo lanes (or their dead Approve buttons) into a live operator board.
+  const initial =
+    process.env.HARNESS_LIVE === "1" ? initialFleetState : foldFleet(fixtureEnvelopes(), initialFleetState);
 
   let projects: Array<{ id: string; name: string }> = [];
   try {

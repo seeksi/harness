@@ -11,9 +11,8 @@
 //   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
 //   gantry status [--url <base>]
 //
-// ponytail: no SSE auto-reconnect — a dropped stream exits with a resume hint
-// (the run keeps going server-side); add reconnect-with-Last-Event-ID if runs
-// get long enough for it to matter.
+// SSE follow (run) resumes across drops via ?lastEventId= (bounded reconnect); an
+// exhausted/never-opened stream exits with a resume hint (the run keeps going server-side).
 "use strict";
 
 const { spawn } = require("node:child_process");
@@ -178,48 +177,99 @@ function renderEvent(env) {
   }
 }
 
+// SSE reconnect knobs. A run can outlive a single HTTP connection (idle proxies, laptop
+// sleep, brief network blips); rather than exiting on the first drop we resume from the
+// last `id:` seq. Bounded so a genuinely dead server still returns instead of looping.
+const MAX_RECONNECTS = 5; // consecutive silent reconnects before giving up
+const RECONNECT_BASE_MS = 300; // linear backoff base
+const RECONNECT_CAP_MS = 3000;
+const STREAM_END = "__console_end"; // mirrors console/lib/sse/client.ts (finite fixture stream)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const reconnectDelay = (attempt) => Math.min(RECONNECT_BASE_MS * attempt, RECONNECT_CAP_MS);
+
 // Follow /api/fleet/stream, print this run's events, resolve on the daemon's TERMINAL
 // health lifecycle ("done"/"failed" only — the bridge also emits lifecycle:"running").
+// Resilient to mid-run disconnects: an ESTABLISHED stream that drops WITHOUT a terminal
+// frame reconnects from the last `id:` seq (?lastEventId=), which the server replays
+// strictly-after (broker `since` is exclusive; the fixture resumes at id+1) — so the
+// resume is gapless and duplicate-free. Bounded to MAX_RECONNECTS consecutive silent
+// attempts, reset whenever any frame arrives, so a dead server still returns "unknown".
 async function followRun(base, runId) {
-  let res;
-  try {
-    res = await fetch(new URL("/api/fleet/stream", base), { headers: { accept: "text/event-stream" } });
-  } catch {
-    console.error(amber(`stream connect failed — run ${runId} continues server-side (check: gantry status)`));
-    return "unknown";
-  }
-  if (!res.ok || !res.body) die(`stream failed: ${res.status}`);
-  const decoder = new TextDecoder();
-  let buf = "";
-  try {
-    for await (const chunk of res.body) {
-      buf += decoder.decode(chunk, { stream: true });
-      let sep;
-      while ((sep = buf.indexOf("\n\n")) !== -1) {
-        const rawFrame = buf.slice(0, sep);
-        buf = buf.slice(sep + 2);
-        const data = rawFrame
-          .split("\n")
-          .filter((l) => l.startsWith("data: "))
-          .map((l) => l.slice(6))
-          .join("\n");
-        if (!data) continue; // ": ping" / ": open" comments
-        let env;
-        try {
-          env = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        if (env.runId !== runId) continue;
-        const line = renderEvent(env);
-        if (line) console.log(line);
-        if (env.type === "health" && (env.payload.lifecycle === "done" || env.payload.lifecycle === "failed")) {
-          return env.payload.lifecycle;
-        }
+  let lastEventId = null; // last `id:` seq seen (resume cursor); null → fresh stream
+  let connected = false; // opened the stream at least once? gates initial-fail vs drop
+  let failures = 0; // consecutive reconnect attempts since the last received frame
+  for (;;) {
+    const url = new URL("/api/fleet/stream", base);
+    if (lastEventId !== null) url.searchParams.set("lastEventId", lastEventId);
+    let res;
+    try {
+      res = await fetch(url, { headers: { accept: "text/event-stream" } });
+    } catch {
+      // A stream we never opened is a wrong-URL/down-server case, not a mid-run drop —
+      // fail fast rather than retry-storm before the run is even being followed.
+      if (!connected) {
+        console.error(amber(`stream connect failed — run ${runId} continues server-side (check: gantry status)`));
+        return "unknown";
       }
+      if (++failures > MAX_RECONNECTS) break;
+      await sleep(reconnectDelay(failures));
+      continue;
     }
-  } catch {
-    /* mid-stream network error → same resume hint as a graceful drop */
+    if (!res.ok || !res.body) die(`stream failed: ${res.status}`);
+    connected = true;
+
+    const decoder = new TextDecoder();
+    let buf = "";
+    let terminal = null;
+    let ended = false; // fixture STREAM_END sentinel: finite stream, nothing to resume
+    try {
+      for await (const chunk of res.body) {
+        buf += decoder.decode(chunk, { stream: true });
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) !== -1) {
+          const rawFrame = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+          const lines = rawFrame.split("\n");
+          // Any COMPLETE frame — an event, a `sync`, or a ": ping"/": open" comment — proves
+          // the connection is alive, so refill the reconnect budget (the header note's "reset
+          // whenever any frame arrives"). A truly silent server sends nothing and still
+          // exhausts MAX_RECONNECTS. The resume cursor advances only on `id:` frames.
+          failures = 0;
+          const idLine = lines.find((l) => l.startsWith("id: "));
+          if (idLine) lastEventId = idLine.slice(4).trim(); // advance the resume cursor
+          const data = lines
+            .filter((l) => l.startsWith("data: "))
+            .map((l) => l.slice(6))
+            .join("\n");
+          if (!data) continue; // ": ping" / ": open" comments
+          let env;
+          try {
+            env = JSON.parse(data);
+          } catch {
+            continue;
+          }
+          if (env.type === STREAM_END) {
+            ended = true;
+            break;
+          }
+          if (env.runId !== runId) continue;
+          const line = renderEvent(env);
+          if (line) console.log(line);
+          if (env.type === "health" && (env.payload.lifecycle === "done" || env.payload.lifecycle === "failed")) {
+            terminal = env.payload.lifecycle;
+            break;
+          }
+        }
+        if (terminal || ended) break;
+      }
+    } catch {
+      /* mid-stream network error → resume from lastEventId below */
+    }
+    if (terminal) return terminal;
+    if (ended) break; // finite fixture stream ended without our run's terminal frame
+    // Stream closed without a terminal frame → resume from the cursor, bounded.
+    if (++failures > MAX_RECONNECTS) break;
+    await sleep(reconnectDelay(failures));
   }
   console.error(amber(`stream dropped — run ${runId} continues server-side (check: gantry status)`));
   return "unknown";

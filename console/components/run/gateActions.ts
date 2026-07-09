@@ -37,6 +37,23 @@ export function buildGateRejectEnvelopes(gate: Gate): ActionEnvelope[] {
   ];
 }
 
+// LIVE vs FIXTURE routing for a gate verdict — pure so both the decision and the
+// resulting envelopes are unit-testable without a DOM (mirrors FleetHome's
+// buildRunsPostBody split). LIVE → the caller POSTs {gateId,status} to the gate
+// endpoint (the SSE stream folds the result). FIXTURE → the optimistic local
+// envelopes, unchanged. Both RunFocus and FleetHome share this branch.
+export type GateEffect =
+  | { kind: "post"; runId: string; gateId: GateId; status: "approved" | "rejected" }
+  | { kind: "emit"; envelopes: ActionEnvelope[] };
+
+export function gateEffect(live: boolean, runId: string, gate: Gate, decision: "approved" | "rejected"): GateEffect {
+  if (live) return { kind: "post", runId, gateId: gate.id, status: decision };
+  return {
+    kind: "emit",
+    envelopes: decision === "approved" ? buildGateApproveEnvelopes(gate) : buildGateRejectEnvelopes(gate),
+  };
+}
+
 // Promote is its own action, scoped to the awaiting phase's promote-to-main
 // approval — never disguised as approving gate "A".
 export function buildPromoteApproveEnvelopes(phase: PhaseState): ActionEnvelope[] {

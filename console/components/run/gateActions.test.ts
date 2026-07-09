@@ -6,6 +6,7 @@ import {
   buildGateApproveEnvelopes,
   buildGateRejectEnvelopes,
   buildPromoteApproveEnvelopes,
+  gateEffect,
   type GateConfirmState,
 } from "./gateActions";
 import type { Gate, PhaseState } from "@/lib/contract/types";
@@ -77,6 +78,29 @@ describe("buildGateRejectEnvelopes", () => {
       { type: "gate", payload: { id: "D", status: "rejected", severity: "high", summary: "anomaly — rejected" } },
       { type: "health", payload: { verdict: "degraded", note: "Gate D rejected" } },
     ]);
+  });
+});
+
+describe("gateEffect — LIVE routes to a POST, FIXTURE stays optimistic", () => {
+  it("LIVE approve → a `post` effect carrying runId/gateId/status (no local envelopes)", () => {
+    const eff = gateEffect(true, "run-xyz", gate({ id: "B" }), "approved");
+    expect(eff).toEqual({ kind: "post", runId: "run-xyz", gateId: "B", status: "approved" });
+  });
+
+  it("LIVE reject → a `post` effect with status rejected", () => {
+    const eff = gateEffect(true, "run-xyz", gate({ id: "C" }), "rejected");
+    expect(eff).toEqual({ kind: "post", runId: "run-xyz", gateId: "C", status: "rejected" });
+  });
+
+  it("FIXTURE approve → the optimistic local envelopes (unchanged), never a post", () => {
+    const eff = gateEffect(false, "run-xyz", gate({ id: "B", summary: "review blocked" }), "approved");
+    expect(eff).toEqual({ kind: "emit", envelopes: buildGateApproveEnvelopes(gate({ id: "B", summary: "review blocked" })) });
+    expect(eff.kind).toBe("emit");
+  });
+
+  it("FIXTURE reject → the optimistic reject envelopes (gate + degraded health), never a post", () => {
+    const eff = gateEffect(false, "run-xyz", gate({ id: "B", summary: "review blocked" }), "rejected");
+    expect(eff).toEqual({ kind: "emit", envelopes: buildGateRejectEnvelopes(gate({ id: "B", summary: "review blocked" })) });
   });
 });
 

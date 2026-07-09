@@ -1,103 +1,85 @@
-# HANDOFF — agenda #4 CLI tests: DONE (promoted main f149661) — 2026-07-08
+# HANDOFF — tracehook Gate-D fix: code COMPLETE + cross-review PASS + **LIVE SMOKE PASSED** — resume = (optional) push — 2026-07-09 s8
 
-> Agenda #4 (CLI tests) is CLOSED. All four NEXT-PASS AGENDA items (#1 decompose, #2
-> handoff-respawn, #3 per-lane routing, #4 CLI tests) are now DONE. Standing GANTRY
-> resume doc below the `---` divider. Full batch record: NOTES.md section
-> "# CLI tests (HANDOFF agenda #4)" (status: COMPLETE line at its end).
+## Current state
+- **STEP 1 (HARNESS_REPO collision fix) — DONE + verified.** `resolveTraceHookPath()` in
+  `agent-runner.ts`: `AGENT_TRACE_HOOK_PATH` override → `HARNESS_SCRIPT_PATH` sibling
+  (`dirname/../eval-gate/trace-log.py`) → `cwd/..` fallback. HARNESS_REPO no longer consulted
+  for the hook path (it points at the TARGET repo, would fail closed on every live run).
+- **CONTAINMENT HARDENING — DONE + tested.** `worktree.ts` exports `isAgentWritablePath()`
+  (realpath-resolves the path AND the anchors REPO_ROOT_ABS/WORKTREES_DIR_ABS, both from
+  HARNESS_REPO; true if inside either). `traceHookCommand()` throws AgentExecError if the
+  resolved hook is agent-writable (after the isFile check). +4 regression tests in
+  agent-runner.test.ts describe "trace-hook CONTAINMENT": hook-in-repo THROWS; hook-in-worktree
+  THROWS; ASCII symlink→worktree THROWS (realpath); legit sibling-repo hook ACCEPTED (no false
+  reject).
+- **CROSS-REVIEW CLOSED (step 3): VERDICT PASS.** Containment guard + the 4 tests resolve Codex
+  #1 (override accepts worktree-controlled abs path), #2 (statSync follows symlink→worktree),
+  #3 (no test). Self-reconciled — evidence concrete. Operator tie-break (s6) "add realpath
+  containment" satisfied. Codex thread 019f43b9-d3dc-78d2-92bf-514558e4a654 (optional reply only).
+- **VERIFY GREEN:** full console suite **515 pass** (38 files), tsc **11 = baseline** (0 in
+  lib/sandbox), eslint clean on all 3 touched files.
+- **COMMITTED on feat/followups** (NO push per operator). Diff = the s5 tracehook
+  work (--settings hook injection + CLAUDE_PROJECT_DIR threading) + step-1 resolveTraceHookPath
+  + containment guard/tests.
+- **LIVE SMOKE PASSED (s8, 2026-07-09).** Rebuilt console with the committed fix (839a1ca),
+  restarted :3001 with the full live env, POSTed a real headless-agent run to `harness-57f84330`.
+  Run `3bf78820afcb887aaf14bdbb` reached **`done`**: Gate B clear (agent commit b63ef2d, worktree
+  clean) → Gate C clear (integration merge ffa0d1c) → **Gate D clear — trace written by hook AND
+  relocated** to `/tmp/c2-throwaway/.claude/traces/5c2e0db2-….jsonl` (7 tool-call lines incl. the
+  Write append + commit Bash). The s5 blocker (Gate-D trace-relocate) is CONFIRMED FIXED live. No
+  console code change was needed to pass.
+- **FIXTURE BUG FOUND + FIXED (not a code bug).** Run 1 (`7aa77767…`) failed at Gate B
+  (`wt-verify` exited 1): the trace hook writes `.claude/traces/` INTO the worktree pre-relocate,
+  and `wt-verify`'s clean-check assumes that path is gitignored ("…so the agent's own trace won't
+  trip it"). The real HARNESS repo gitignores `.claude/traces/`, but the throwaway base
+  `/tmp/c2-throwaway` was under-provisioned (`.gitignore` had only `data/plans/`). Fix = added
+  `.claude/traces/` to c2's `.gitignore` (commit `2a2567f`), matching a real target repo. Run 2
+  then passed clean. **Whatever provisions the C2 throwaway base MUST gitignore `.claude/traces/`.**
+- **c2-throwaway restored to bare main** (`2a2567f`): no worktrees, no leftover feat/integration
+  branches, tree clean, verified trace artifact retained (gitignored). Console still running on
+  :3001 (pid 993450 at handoff time).
 
-## Agenda #4 close-out
-- Two file-disjoint lanes promoted to main f149661 (ff): **clitest** (bin/gantry test seam —
-  `require.main` guard + `module.exports` of 9 units, ZERO CLI behavior change — plus
-  console/lib/cli/gantry-cli.test.ts) and **installsh** (tests/install.test.sh, install.sh
-  read-only). Gate C added `bash tests/install.test.sh` (29/0 exit 0) as a standing step.
-- Gates: A $0.212/5.0; B cross-review PASS ×2 (clitest Codex r4 after r2/r3 BLOCKs — the r3
-  "failed→1 false-green via stream-drop" was live mutation-tested then fixed by holding the
-  mock SSE stream open; installsh r3 prior); C 483 vitest + eslint + tsc 11-baseline + next
-  build + node --check + install.test.sh + live-argv usage exit 2; D both traces clean + opus
-  judge PASS. Promote auto-cleaned both worktrees + feat/clitest + feat/installsh + integration.
-- **Push to origin still pending operator say-so** (main advanced locally to f149661; not pushed).
-- Follow-up (non-gating, ponytail in test): cmdUp / findClaude PATH-scan branch not unit-tested.
+## Decisions
+- Containment SUBSUMES Codex #1+#2: realpath-contain the resolved hook, reject if inside the
+  target repo / worktrees. Do NOT blanket-reject symlinks (legit non-ASCII escape hatch).
+- Guard lives in worktree.ts; single exported predicate (isAgentWritablePath).
+- Operator posture: commit on feat/followups (DONE), **NO push**; run the live smoke.
+- Committed BEFORE the live smoke (deviation from prior ordering): code fully unit-verified +
+  cross-review PASS, feature branch + no push = reversible; done under context-budget pressure.
 
----
-# HANDOFF — GANTRY (harness dashboard + live build-agent) — 2026-07-08
+## Next steps (RESUME POINT = optional push; smoke is DONE)
+1. **(Optional) push feat/followups** — only on explicit operator say-so. Everything below is
+   already verified; nothing else is blocking.
+2. **(Optional) tear down the :3001 console** — `pkill -f "next start -H 100.72.193.64 -p 3001"`
+   (pid 993450 at s8 handoff). Left running so the next smoke skips the rebuild.
 
-> Resume context. The product/dashboard is named **GANTRY** (operator-picked
-> 2026-07-06; UI rebranded 2026-07-07). Open this + NOTES.md + memory
-> (agent-exec-gate, umbrella-vps-deploy) to continue. Repo: /home/alter/HARNESS,
-> branch `main`.
+### Live-smoke run recipe (for reference / re-runs)
+- Rebuild + restart :3001: `cd console && npx next build`, then
+  `npx next start -H 100.72.193.64 -p 3001` with env: `ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1
+  AGENT_CLI_PATH=/home/alter/.local/bin/claude HARNESS_LIVE=1 HARNESS_BASE=main
+  HARNESS_REPO=/tmp/c2-throwaway
+  HARNESS_SCRIPT_PATH=/home/alter/HARNESS/.claude/skills/harness/harness.sh
+  NTFY_URL=https://ntfy.sh NTFY_TOPIC=gantry-smoke-c3
+  AGENT_TRACE_HOOK_PATH=/home/alter/HARNESS/.claude/skills/eval-gate/trace-log.py` (log to
+  scratchpad, background). `/tmp/c2-throwaway` must be CLEAN main WITH `.claude/traces/` gitignored.
+- POST run: `curl :3001/api/runs -X POST -H 'content-type: application/json'
+  -H 'origin: http://100.72.193.64:3001' -H 'x-harness-request: 1'
+  -d '{"projectId":"harness-57f84330","brief":"…Commit.","routing":"haiku"}'`. Poll outcome via
+  `/api/projects` (project[0].recentRuns). Daemon `[daemon] run … failed:` lines land in the
+  server stdout log.
+- Cleanup: `harness.sh clean` (from repo root, not a worktree) leaves the feat lane unmerged-vs-main
+  by design — force-remove it: `git worktree remove --force …`, `git branch -D feat/<slug> integration`.
 
-## Where things stand (all on `main`, pushed to origin through ea03823, 2026-07-07)
-
-DONE + verified:
-- **Dashboard rebuild** (`console/` Next.js 16 app) shipped: fleet home, `/run/[id]`,
-  `/deck`, `/graph/[projectId]`, launch console, ⌘K palette, ntfy, chime, `/brand`.
-  Industrial-CRT identity (graphite + amber phosphor, green=live only). 351 tests green.
-- **Live build-agent executor** wired + cross-reviewed + **live-verified end-to-end**:
-  agent→wt-commit→Gate B→Gate D(trace)→Gate C (merge to integration), `main` untouched
-  (promote gated). See memory [[agent-exec-gate]].
-- **Isolated per-lane agent HOMEs** (`~/.gantry/agent-homes/<slug>`, provisioned per
-  spawn, reclaimed per run) + **multi-lane concurrency** (1..4 lanes per run,
-  `LANE_CONCURRENCY` clamp, finalize-ALL→merge-ALL, 2-lane live smoke PASS).
-- **`gantry` CLI** (`bin/gantry` run/up/status, zero-dep Node ≥18 over the console API)
-  + **install.sh** symlink install — cross-review PASS, live-verified twice.
-- **Decompose agent** (READ-ONLY headless split of brief → 1..4 disjoint lanes,
-  fail-closed validation) — promoted 2c900fb; live decomposed-run smoke PASS.
-- **Handoff-respawn loop** (context-guard HANDOFF.md → fresh-agent respawn, fail-closed
-  neutralization) — promoted 5f200e7; live respawn smoke PASS 2026-07-07.
-- **Per-lane model routing** — promoted cf2090a 2026-07-08: `route-tier.ts` (route.py
-  TOP/CHEAP regexes verbatim), `auto` ⇒ routeModel(brief) per lane, explicit tier ⇒
-  force-all, per-lane plan.jsonl pricing, worker uses lane.model. No API change.
-- Sandbox: `console/lib/sandbox/{agent-runner,worktree,agent-home,decompose,handoff}.ts`.
-  Wired in `console/lib/server/daemon.ts`.
-- Posture (operator-approved): DIRECT mode (agent runs as operator), FULL toolset incl.
-  Bash, zero-MCP, credential-free env, worktree-cwd, timeout, audit. Gates:
-  `ENABLE_AGENT_EXEC=1` + `AGENT_ALLOW_DIRECT=1`.
-
-## To run GANTRY live (proven working)
-Easiest: `gantry up` (live env owned by the CLI), `gantry run "<brief>"`, `gantry status`.
-Manual equivalent:
-```
-cd /home/alter/HARNESS/console && npm run build
-ENABLE_AGENT_EXEC=1 AGENT_ALLOW_DIRECT=1 HARNESS_LIVE=1 \
-  AGENT_CLI_PATH=/home/alter/.local/bin/claude \
-  CONSOLE_BASE_URL=http://127.0.0.1:3000 HARNESS_REPO=/home/alter/HARNESS \
-  npx next start -H 127.0.0.1 -p 3000        # or -H 100.72.193.64 for tailnet
-```
-`AGENT_CLI_PATH` must be the ABSOLUTE claude binary; `buildAgentArgs` passes
-`--dangerously-skip-permissions`. Do NOT set `AGENT_HOME` (isolated per-lane homes are
-the default; `AGENT_HOME=<path>` = explicit legacy override). Multi-lane: POST
-`lanes:["b1","b2"]` (1..4) + `LANE_CONCURRENCY=2..4`. Decompose: `gantry run --decompose`.
-
-## NEXT-PASS AGENDA (what to build after /clear)
-
-1. **Decompose agent** — DONE 2026-07-07 (promoted 2c900fb + live smoke PASS).
-2. **Console handoff-respawn loop** — DONE 2026-07-07 (promoted 5f200e7 + live respawn
-   smoke PASS). Boundary (documented): dissimilar-content renames undetectable.
-3. **Per-lane model routing** — DONE 2026-07-08 (promoted cf2090a; all gates green,
-   opus judge PASS). Non-gating follow-up: live mixed-tier `--decompose` smoke
-   (confirm mixed models in audit argv + usage envelopes); plan.jsonl serialization
-   golden-test (accepted Medium).
-4. **CLI tests** (accepted Medium at gantry-cli merge) — bin/gantry parser + API client
-   against a mock server; install.sh shell asserts. ← IN PROGRESS (this batch, above divider).
-5. **Operator DoD leftovers** (dashboard rebuild) — phone approve over tailnet, ntfy
-   tap deep-link, /graph showpiece capture. (Live run e2e: done repeatedly.)
-6. **VPS drop-mode track** (when wanted) — agent Max-plan login, egress firewall,
-   resource limits, agent-N accounts for multi-lane, threat-model §7 sign-off.
-
-Low/background: haiku alias quirk (+ usage-extraction may pick wrong modelUsage key —
-see decompose smoke note in NOTES.md); gantry SSE reconnect if runs get long; agent-home
-hardening notes (git-identity cache, openat-anchored writes).
-
-## Decisions already made (don't relitigate)
-- Direct mode + Bash for the local build agent — intentional, gated, live-verified. Not a
-  regression of web/'s no-Bash/OS-jail invariants (those stay for the VPS drop mode).
-- Cross-review gate before every merge to main has caught real bugs each time — keep it.
-- Throwaway smoke artifacts are cleaned; `main` never carries them. Promote to main stays
-  human-gated + `ENABLE_PROMOTE_TO_MAIN`.
-
-## Open / notes
-- RUN-RECIPE GOTCHA: a live run against THIS repo flips the operator checkout to
-  `integration` mid-run; reset-base returns to base only from a CLEAN tree. Dirty tree ⇒
-  recover with `git switch <branch>` + delete `integration`. Smoke leftovers to clean:
-  lane worktree+branch, integration branch, data/plans/plan-<id>.jsonl.
-- Model alias quirk: `--model haiku` resolved to sonnet-5 in one run; sonnet/opus map fine.
+## Dead ends / open questions
+- `HARNESS_REPO` is OVERLOADED: harness-bridge uses it as the TARGET repo; it must NOT locate
+  the harness's own files. `HARNESS_SCRIPT_PATH` is the harness-repo anchor.
+- isAgentWritablePath false-reject check: legit hook is in the HARNESS repo, anchors are the
+  TARGET repo — disjoint in live AND dev (dev REPO_ROOT=cwd=console/, hook at repo-root/.claude).
+  Test (d) proves this.
+- ~~Open (verify in smoke): headless `claude` respects a pre-set CLAUDE_PROJECT_DIR; `--settings`
+  MERGES (not replaces) project settings.~~ **CONFIRMED live in s8:** the trace landed at
+  `$CLAUDE_PROJECT_DIR/.claude/traces/<session>.jsonl` inside the worktree and relocated cleanly —
+  so both the pre-set CLAUDE_PROJECT_DIR and the `--settings` merge behave as designed.
+- **Gotcha (s8):** the trace hook writes into the worktree BEFORE relocate, so the target repo
+  MUST gitignore `.claude/traces/` or Gate B (`wt-verify` clean-check) fails every live run. Real
+  target repos do; the C2 throwaway base had to be patched. Bake this into base provisioning.
