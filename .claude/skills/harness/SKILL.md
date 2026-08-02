@@ -1,6 +1,6 @@
 ---
 name: harness
-description: Top-level orchestrator that runs the full four-phase agent harness end to end — decompose a task, route+budget-gate it (Phase 4), build each subtask in an isolated worktree gated by a cross-review PASS (Phases 1-2), merge sequentially through an integration branch, run evals + a trajectory check (Phase 3), then fast-forward to main. Use on "run the harness", "full pipeline", "build this end to end", or to drive cross-review / parallel-build / eval-gate / route-cost as one flow. Also runs under /loop (loop mode): each tick advances the state machine one step, with harness.sh loop-tick as the deterministic stop rule.
+description: Top-level orchestrator that runs the full four-phase agent harness end to end — decompose a task, route+budget-gate it (Phase 4), build each subtask in an isolated worktree gated by a cross-review PASS (Phases 1-2), merge sequentially through an integration branch, run evals + a trajectory check (Phase 3), then fast-forward to main. Use on "run the harness", "full pipeline", "build this end to end", a spec-doc-driven build brief ("build <feature> per <spec doc>" — the harness's native input), or to drive cross-review / parallel-build / eval-gate / route-cost as one flow. Also runs under /loop (loop mode): each tick advances the state machine one step, with harness.sh loop-tick as the deterministic stop rule.
 ---
 
 # The Harness (orchestrator over the four phases)
@@ -26,8 +26,9 @@ S1 ROUTE+BUDGET   [script]   route.py per subtask -> tier; you write plan.jsonl;
                              GATE A: exit 1 -> HALT (report total vs ceiling). Nothing irreversible yet.
 S2 BUILD/slug     [you+script] harness.sh wt-new <slug>; implement in the worktree on the routed model.
 S3 VERIFY/slug    [you+script] build + the subtask's tests + app-runs; then cross-review the worktree diff.
-                             GATE B: verdict BLOCK -> HALT this slug, fix in place, re-review. Other
-                             slugs keep going. Never merge a BLOCKed branch.
+                             GATE B: verdict BLOCK -> HALT this slug, fix in place (Read worktree
+                             files before editing — the builder's edits are not in your context),
+                             re-review. Other slugs keep going. Never merge a BLOCKed branch.
 S4 MERGE          [script]   harness.sh integ-start; per slug (foundational first) harness.sh
                              integ-merge <slug>; run the FULL suite on integration each time.
                              GATE C: suite red / unresolved conflict -> HALT on integration (main untouched).
@@ -124,11 +125,16 @@ an optional `"project"` field is tolerated and ignored):
 {"task":"add bye() farewell","tier":"cheap","in_ktok":12,"out_ktok":4,"cached_ktok":8}
 ```
 You author this from the decomposition + `route.py` tiers (estimates are yours).
+`tier` MUST be exactly one of `cheap` | `default` | `top` (models.json keys) —
+anything else crashes `harness.sh budget`.
 
 **The `integration` branch** — created per batch off the base, deleted on success.
 **Worktrees** — `../<repo>.worktrees/<slug>`, one per subtask, via `harness.sh`.
 
 ## harness.sh subcommands (the mechanical glue)
+
+Canonical paths (skip the discovery ls): `bash ~/.claude/skills/harness/harness.sh`,
+`python3 ~/.claude/skills/route-cost/route.py`.
 
 ```
 harness.sh budget <plan.jsonl>       Gate A — exit 1 if over ceiling_usd
@@ -163,12 +169,17 @@ All memory-os integration is orchestrator-side, behind `ENABLE_MEMORY_OS`
 
 ## Preconditions
 
+- **Clean base**: no uncommitted tracked changes on the base branch — worktrees branch
+  from HEAD, so WIP on subtask-owned files silently diverges. If dirty, stop at S0 and
+  ask: commit the WIP (suite green first) or stash.
 - **Codex MCP** (`mcp__codex__codex`) available — required for Gate B.
 - **Trace hook** for Gate D Layer 2: the target repo's `.claude/settings.json` must
   register the eval-gate PostToolUse hook (`python3 .claude/skills/eval-gate/trace-log.py`)
-  so `.claude/traces/<session>.jsonl` exists. This repo already has it. In another
-  repo without it, `harness.sh trace` will error — warn and skip Layer 2 (Layer 1
-  outcome evals still gate); do not hard-fail the pipeline over a missing trace.
+  so `.claude/traces/<session>.jsonl` exists. Only the HARNESS repo has it today. In a
+  repo without it, `harness.sh trace` will error — warn and skip Layer 2; and when the
+  target repo has no eval-gate suites either, S5 degrades BY DESIGN to: full test suite
+  green on integration + a scripted app-level QA pass (e.g. Playwright) of each subtask's
+  acceptance checks. Say which S5 mode ran in the S6 go/no-go report.
 
 ## Notes / ceiling
 

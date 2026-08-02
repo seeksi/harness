@@ -27,10 +27,17 @@ strict-biased. Rationale: `docs/adr/0002-skill-rationale.md`.
 
 ### 1. Capture the diff and the spec
 ```
-git diff --merge-base origin/main   # or the relevant base; fall back to: git diff HEAD
+git diff <base>...HEAD              # branch;  worktree lane: git -C <wt> diff <base>...HEAD
+git diff --cached | git diff HEAD   # staged / uncommitted work
 ```
+Exclude build artifacts and lockfiles (e.g. `-- . ':(exclude)app/assets/builds/*'`) —
+regenerate the diff if artifacts leak in. Over ~200 lines: write the diff to a scratch
+file and Read it — don't inline it twice.
+
 The spec = the task description / PR body / ticket. If none exists, write one
 sentence stating the intended behavior — Codex needs the *intent*, not just mechanics.
+Keep the gloss NO BROADER than the real spec: a padded spec generates spurious
+"spec violation = High" findings that then gate the merge.
 
 ### 2. Launch the Codex pass (fresh, read-only)
 Call `mcp__codex__codex` with `sandbox: "read-only"`. Pass ONLY the diff + spec in
@@ -52,6 +59,11 @@ Be terse. Flag spec violations as at least High. Do not praise.
 ```
 `prompt`: `SPEC:\n<spec>\n\nDIFF:\n<diff>`
 Set `model` to your current Codex model (e.g. `gpt-5.2-codex`) or omit to use the default.
+
+Codex usually exceeds the 120s MCP timeout and gets moved to a background task — this
+is normal, not a failure. Do the Claude self-review while it runs; collect the result
+via the task notification or `TaskOutput {block:true}`. Never skip the self-review
+while waiting.
 
 ### 3. Run the Claude self-review in parallel
 Review the same diff against the same four lenses in your own context. It is NOT
@@ -77,6 +89,15 @@ VERDICT: BLOCK | PASS
 - PASS if only Medium/Low remain; list them as follow-ups, do not gate on them.
 Then: the merged table, and the 1–3 must-fix items if BLOCK.
 ```
+
+### 6. Fix → focused re-check
+
+After applying fixes for gating findings, run a focused Codex re-check of just the fix
+delta against its own findings: continue the session via `mcp__codex__codex-reply` with
+the `threadId` returned by the first call (preferred), or restate the numbered findings
+in a fresh call. All gating findings RESOLVED → flip the verdict to PASS. A High may
+also be resolved by demonstrating the behavior live (a test or scripted browser check) —
+record in the table which finding was resolved how.
 
 Position in the harness: the Phase 1 review gate — after verification (tests +
 app actually run), before the sequential merge to integration. BLOCK stops the merge.
