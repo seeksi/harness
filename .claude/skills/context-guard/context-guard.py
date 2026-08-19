@@ -14,7 +14,8 @@ import sys, os, json
 # (cross-language). Env-overridable for tests/tuning.
 SOFT = float(os.environ.get("CONTEXT_GUARD_SOFT", "0.60"))
 HARD = float(os.environ.get("CONTEXT_GUARD_HARD", "0.75"))
-WINDOW = int(os.environ.get("CONTEXT_GUARD_WINDOW", "200000"))
+# ponytail: 1M window for the current session models; override via env for 200k models.
+WINDOW = int(os.environ.get("CONTEXT_GUARD_WINDOW", "1000000"))
 
 HANDOFF_TEMPLATE = """# HANDOFF — <task> — <ISO timestamp>
 ## Current state
@@ -70,10 +71,9 @@ def main():
 
         # Debounce: emit only on an upward tier crossing; re-arm when the fill
         # drops back below soft (/clear or compaction reusing the session file).
-        repo_root = os.environ.get("CLAUDE_PROJECT_DIR") or os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        )
-        state_dir = os.path.join(repo_root, ".claude", "context-guard")
+        # State lives in ~/.claude so the hook works globally without littering
+        # every project with a .claude/context-guard/ dir.
+        state_dir = os.path.join(os.path.expanduser("~"), ".claude", "context-guard")
         os.makedirs(state_dir, exist_ok=True)
         state_file = os.path.join(state_dir, f"{session}.json")
         try:

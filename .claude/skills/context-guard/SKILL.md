@@ -11,9 +11,9 @@ enforces the harness context-management policy:
   start a fresh session opened with NOTES + HANDOFF.md.
 
 Fill is estimated from the transcript's last main-thread assistant
-`message.usage` (`input + cache_read + cache_creation` tokens) over a 200k
+`message.usage` (`input + cache_read + cache_creation` tokens) over a 1M
 window. Warnings fire once per upward tier crossing, debounced via
-`.claude/context-guard/<session>.json`; the tier re-arms when fill drops below
+`~/.claude/context-guard/<session>.json`; the tier re-arms when fill drops below
 the soft limit (compaction, `/clear`).
 
 Env overrides: `CONTEXT_GUARD_SOFT`, `CONTEXT_GUARD_HARD` (fractions),
@@ -21,4 +21,4 @@ Env overrides: `CONTEXT_GUARD_SOFT`, `CONTEXT_GUARD_HARD` (fractions),
 in `web/lib/contract/types.ts` (the daemon/HUD side of the same policy).
 
 Non-blocking contract (same as eval-gate/trace-log.py): any failure exits 0.
-Registered in `.claude/settings.json` under `PostToolUse`.
+Registered globally in `~/.claude/settings.json` under `PostToolUse` (and in HARNESS project settings).
