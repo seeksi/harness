@@ -25,7 +25,7 @@
 #   harness.sh integ-start           create the integration branch off the base
 #   harness.sh integ-merge <slug>    merge feat/<slug> into integration (--no-ff)
 #   harness.sh trace <session>       Gate D L2: check .claude/traces/<session>.jsonl
-#   harness.sh loop-tick             loop-mode Stop Rule: bump NOTES.loop.json, exit 1 = stop the loop
+#   harness.sh loop-tick             LEGACY loop-mode Stop Rule (NOTES.loop.json) — superseded by graph.py next/advance
 #   harness.sh promote               guarded fast-forward of base to integration (run only after the human go)
 #   harness.sh reset-base            best-effort: return the main repo checkout to the base branch (idempotent; never fails the caller)
 #   harness.sh clean [session ...]   remove merged worktrees + delete integration + prune stale

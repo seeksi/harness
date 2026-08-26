@@ -1,153 +1,167 @@
 ---
 name: harness
-description: Top-level orchestrator that runs the full four-phase agent harness end to end — decompose a task, route+budget-gate it (Phase 4), build each subtask in an isolated worktree gated by a cross-review PASS (Phases 1-2), merge sequentially through an integration branch, run evals + a trajectory check (Phase 3), then fast-forward to main. Use on "run the harness", "full pipeline", "build this end to end", a spec-doc-driven build brief ("build <feature> per <spec doc>" — the harness's native input), or to drive cross-review / parallel-build / eval-gate / route-cost as one flow. Also runs under /loop (loop mode): each tick advances the state machine one step, with harness.sh loop-tick as the deterministic stop rule.
+description: Top-level orchestrator that runs the full four-phase agent harness as an explicit execution graph — decompose a task into subtasks, materialize a node/edge graph (graph.py init), then walk it engine-driven; every step is next → execute one node → advance, with the engine refusing off-graph moves. Nodes cover route+budget (Gate A), per-subtask build/commit/verify/review in isolated worktrees with a declared fix cycle (Gate B), dependency-ordered merges through an integration branch (Gate C), evals + trajectory check (Gate D), and a human-gated promote to main. Use on "run the harness", "full pipeline", "build this end to end", a spec-doc-driven build brief, or to drive cross-review / parallel-build / eval-gate / route-cost as one flow. Also runs under /loop: each tick is one graph step; graph.py next/advance is the deterministic stop rule.
 ---
 
-# The Harness (orchestrator over the four phases)
+# The Harness (graph-driven orchestrator)
 
-You own the two *subjective* steps — decomposition and the cross-review
-reconcile/verdict — and delegate the *mechanical* steps to `harness.sh` (which
-only sequences the phase scripts + integration-branch git transitions).
+Execution is controlled by an explicit graph of nodes and edges, walked by
+`graph.py` — not by you. You own the two *subjective* inputs — the decomposition
+(which parameterizes the graph) and the cross-review reconcile/verdict (a node
+outcome) — and you execute node payloads. The engine decides what is eligible,
+which transitions are legal, which cycles may run and how many times.
 Reimplement nothing. Rationale: `docs/adr/0002-skill-rationale.md`.
+
+Canonical paths: `python3 ~/.claude/skills/harness/graph.py`,
+`bash ~/.claude/skills/harness/harness.sh`,
+`python3 ~/.claude/skills/route-cost/route.py`.
+
+## The iron rule
+
+**Every step of a run is exactly: `graph.py next` → execute ONE frontier node's
+payload → `graph.py advance <node> <outcome>`.** Never run a `harness.sh`
+subcommand, build, review, merge, or eval that is not the payload of a node
+currently on the frontier. `advance` refuses off-graph moves, undeclared
+outcomes, over-cap cycle visits, and anything after a HALT — a refusal (exit 1)
+means you mis-stepped: re-run `next` and follow it, never work around the engine.
+
+## Run lifecycle
+
+```
+1. DECOMPOSE [you]   Write NOTES.md, NOTES.subtasks.json, and one NOTES.<slug>.md
+                     per subtask (formats below). Refuse if two subtasks write
+                     the same file. Declare inter-subtask deps here — they become
+                     the merge-order edges.
+2. INIT     [engine] graph.py init NOTES.subtasks.json   → writes GRAPH.json and
+                     prints the initial frontier.
+3. WALK     [loop]   next → execute one node → advance, until next reports
+                     COMPLETE or the graph HALTS.
+```
+
+## The graph topology (what init materializes)
+
+```
+route_budget ──ok──> build.<slug> ─ok─> commit.<slug> ─ok─> verify.<slug> ─ok─> review.<slug>
+   │fail=HALT (Gate A)     ^                ^                   │fail──> build.<slug> (retry, cap 2)
+                           │                └──ok── fix.<slug> <┘block (Gate B cycle, cap 3 fixes)
+                           │
+all review.<slug> ══pass══> integ_start ─ok─> merge.<s1> ─ok─> suite.<s1> ─ok─> merge.<s2> … (topo order)
+(AND-join)                                      │conflict=HALT     │fail=HALT (Gate C)
+… ─ok─> eval_trace ─ok─> promote_gate ─approved─> promote ─ok─> account_clean (terminal)
+          │fail=HALT (Gate D)   │human node          │fail=HALT
+```
+
+Node types: `script` (run the payload command, map exit 0/1 to the declared
+outcomes), `model` (you do the work described in the payload), `model+script`
+(you prepare, then a script gate decides), `human` (promote_gate — see below).
+
+Per-node `context` lists what you may read while executing that node
+(`NOTES.<slug>.md`, `worktree:<slug>`, …). Honor it: a build/fix/review node
+sees its own subtask's context only — never the master NOTES.md, never a
+sibling worktree.
+
+HALT semantics: an outcome with no declared edge (gate failure) halts the
+graph and locks `advance`. After fixing the cause (e.g. resolving a merge
+conflict on integration), `graph.py resume "<note>"` re-arms the halted node
+for a retry; its visit cap still applies. Visit/step-cap halts are NOT
+resumable by you — report them to the human (they can raise the cap by editing
+GRAPH.json deliberately).
 
 ## Autonomy policy
 
-Run the batch **autonomously**. Halt automatically only on a real gate failure
-(over budget, cross-review BLOCK, integration suite red, eval red, trace anomaly).
-Require **exactly one** human go/no-go: immediately before promoting to `main`
-(`harness.sh promote`) — the only irreversible, shared-state step.
+Walk the graph **autonomously**. Halts are automatic and engine-enforced
+(over budget, Gate B block-cycle exhausted, conflict, red suite, red eval,
+trace anomaly, visit/step caps). Exactly **one** human checkpoint exists and it
+is a node: `promote_gate`. Never `advance promote_gate approved` without an
+explicit human yes in this conversation — the engine cannot verify this; it is
+the one honor-bound edge, so treat it as inviolable.
 
-## State machine
+## Loop mode (/loop as the tick)
 
-```
-S0 DECOMPOSE      [you]      write NOTES.md + NOTES.status.json + one NOTES.<slug>.md per subtask
-                             (below). Refuse if two subtasks write the same file.
-S1 ROUTE+BUDGET   [script]   route.py per subtask -> tier; you write plan.jsonl; harness.sh budget.
-                             GATE A: exit 1 -> HALT (report total vs ceiling). Nothing irreversible yet.
-S2 BUILD/slug     [you+script] harness.sh wt-new <slug>; implement in the worktree on the routed model.
-S3 VERIFY/slug    [you+script] build + the subtask's tests + app-runs; then cross-review the worktree diff.
-                             GATE B: verdict BLOCK -> HALT this slug, fix in place (Read worktree
-                             files before editing — the builder's edits are not in your context),
-                             re-review. Other slugs keep going. Never merge a BLOCKed branch.
-S4 MERGE          [script]   harness.sh integ-start; per slug (foundational first) harness.sh
-                             integ-merge <slug>; run the FULL suite on integration each time.
-                             GATE C: suite red / unresolved conflict -> HALT on integration (main untouched).
-S5 EVAL+TRACE     [you+script] on integration: regression (HARD) + planning/judge (HARD) + capability
-                             (soft, record); harness.sh trace <session>.
-                             GATE D: any HARD eval red OR trace exit 1 -> HOLD on integration; report
-                             the failing eval / trace flag + session file. Do not delete integration.
-S6 PROMOTE        [CHECKPOINT] all gates green -> ask the human go/no-go -> harness.sh promote (--ff-only).
-S7 ACCOUNT+CLEAN  [script]   note actual cost vs the S1 estimate (read /cost); harness.sh clean.
-```
+For long batches run under `/loop` (`/loop /harness <task>` self-paced, or
+`/loop 10m /harness <task>`). Each tick:
 
-## Loop mode (/loop as the tick, eval-gate as Eval + Trace)
-
-For long batches, run the state machine under `/loop` so each wake-up advances
-it **one step** instead of one giant turn: `/loop /harness <task>` (self-paced
-via ScheduleWakeup) or `/loop 10m /harness <task>` (fixed interval). The seven
-loop parts map to existing pieces — nothing reinvented:
-
-| Part      | Owner |
-|-----------|-------|
-| State     | `NOTES.status.json` (subtask state) + `NOTES.loop.json` (loop ledger) |
-| Target    | the NOTES.md decomposition — every subtask `merged`, Gates A–D green |
-| Observe   | tick start: read `NOTES.status.json` + the last eval/trace result |
-| Action    | advance exactly ONE state-machine step (S2–S5) for the next eligible slug |
-| Eval      | eval-gate Layer 1 — the S5 regression/judge suites (HARD) |
-| Trace     | eval-gate Layer 2 — `harness.sh trace <session>` |
-| Stop Rule | `harness.sh loop-tick` — deterministic; NEVER model self-judgment |
-
-At S0, alongside the other NOTES files, write **`NOTES.loop.json`** (repo root,
-volatile like NOTES.status.json):
-```
-{"target":"<one line>","iteration":0,"max_iterations":10,"stall":0,"max_stall":2,"last_fp":"","stop":""}
-```
-
-Every tick, in this order:
-1. `harness.sh loop-tick` FIRST. **Exit 1 → the loop is over: do NOT schedule
-   the next wake-up.** Read `stop` from the ledger: `target-reached` → report
-   and ask the S6 human go/no-go (the loop never auto-promotes);
-   `max-iterations` / `stalled` → HALT and report the stuck slug + gate.
-2. Observe: `NOTES.status.json` → pick the next eligible slug/step.
-3. Act: one step only — one build, one review, one merge, or the S5 eval+trace pass.
+1. `graph.py next`. COMPLETE → report and stop the loop (do not schedule the
+   next wake-up). HALTED / exit 1 → stop the loop and report the halt reason
+   from GRAPH.json. (For `promote_gate` on the frontier: ask the human, then
+   continue — the loop never auto-approves.)
+2. Execute **one** frontier node's payload.
+3. `graph.py advance <node> <outcome>`.
 4. Dynamic mode only: ScheduleWakeup with the same /loop prompt.
 
-`stall` counts consecutive ticks with an unchanged `NOTES.status.json`; raise
-`max_stall` in the ledger when a single step legitimately spans several ticks
-(long builds). All other rules — gates, autonomy policy, the S6 human
-checkpoint — apply unchanged.
+The engine's visit caps and `max_steps` replace the old NOTES.loop.json
+stall/iteration ledger — there is no separate loop state.
 
 ## Routing (Phase 4) applied throughout
 
-Run `route.py "<subtask spec>"` for each subtask and for the review work; it
-prints the tier + model id (tier table lives in the route-cost skill). The
+At DECOMPOSE, run `route.py "<subtask spec>"` per subtask and record the tier
+in NOTES.subtasks.json — init bakes it into each build node's payload. The
 cross-review reconcile always routes `top`.
 
 ## Gate B: cross-review (the hard rule that must survive)
 
-When you reach S3, invoke the `cross-review` skill on the worktree diff. Its
-independence is load-bearing: **Codex gets a fresh context with only the diff +
-the one-line spec from NOTES.<slug>.md** — never your own reasoning or self-review.
-Reconcile strict-biased; any unresolved High/Critical = BLOCK = no merge.
+The `review.<slug>` node's payload invokes the `cross-review` skill on the
+worktree diff. Its independence is load-bearing: **Codex gets a fresh context
+with only the diff + the one-line spec from NOTES.<slug>.md** — never your own
+reasoning or self-review. Reconcile strict-biased; any unresolved High/Critical
+= outcome `block` (which routes to `fix.<slug>` — the engine caps the cycle).
+Never advance `pass` on an unresolved High/Critical.
 
 ## State this skill owns
 
-**`NOTES.md`** (target repo root — survives context compaction). **Append-only
-during a run** (never rewrite lines — keeps it byte-stable / prompt-cache
-eligible). Live status lives in `NOTES.status.json`, not here. The `project:`
-header is optional forward plumbing (memory-os slug, ignored today).
+**`GRAPH.json`** (target repo root, volatile) — the single source of execution
+truth: nodes, edges, states, visit counts, halt reason. Written only by
+`graph.py`; never hand-edit it mid-run (the one exception: a human deliberately
+raising a visit cap). Supersedes NOTES.status.json and NOTES.loop.json.
+
+**`NOTES.md`** (repo root — survives context compaction). Append-only during a
+run (byte-stable / prompt-cache eligible). Human-readable decomposition record:
 ```
 # <task>  — base: <BASE> (default main)
-project: <memory-os-slug>            # optional; ignored today
 
 ## Subtasks
-- slug: hello    spec: "add hello() greeter"     owns: src/hello.js          tier: cheap
-- slug: bye      spec: "add bye() farewell"       owns: src/bye.js            tier: cheap
+- slug: hello    spec: "add hello() greeter"     owns: src/hello.js   tier: cheap
+- slug: bye      spec: "add bye() farewell"      owns: src/bye.js     tier: cheap   deps: hello
 ```
-3-5 subtasks, each independent (no shared write-file), testable (its own check),
-bounded (one-line spec + owned paths).
+3-5 subtasks, each independent (no shared write-file), testable, bounded.
 
-**`NOTES.status.json`** (repo root, volatile — the ONLY place status changes;
-never write status into NOTES.md): `{"hello": "pending", "bye": "building"}`,
-status ∈ pending|building|reviewed|merged|blocked.
-
-**`NOTES.loop.json`** (repo root, volatile — loop mode only; schema above).
-Written by you at S0, updated ONLY by `harness.sh loop-tick` after that.
+**`NOTES.subtasks.json`** (repo root — the machine input to `graph.py init`):
+```
+{"task":"<one line>","subtasks":[
+  {"slug":"hello","spec":"add hello() greeter","tier":"cheap","deps":[]},
+  {"slug":"bye","spec":"add bye() farewell","tier":"cheap","deps":["hello"]}]}
+```
+`deps` (other slugs) drive merge order via topological sort; a dep cycle is
+refused at init. `tier` ∈ `cheap`|`default`|`top`.
 
 **`NOTES.<slug>.md`** — one per subtask, ~15 lines max: the one-line spec, the
-owned files/dirs, and the acceptance check. Nothing else. Point each worktree
-agent at its own `NOTES.<slug>.md` — never at the master NOTES.md.
+owned files/dirs, the acceptance check. This is the build node's entire
+context — point each worktree agent at it only.
 
-**`plan.jsonl`** (input to `harness.sh budget`, token fields are thousands;
-an optional `"project"` field is tolerated and ignored):
+**`plan.jsonl`** (input to `harness.sh budget` inside the route_budget node;
+token fields are thousands):
 ```
 {"task":"add hello() greeter","tier":"cheap","in_ktok":12,"out_ktok":4,"cached_ktok":8}
-{"task":"add bye() farewell","tier":"cheap","in_ktok":12,"out_ktok":4,"cached_ktok":8}
 ```
-You author this from the decomposition + `route.py` tiers (estimates are yours).
-`tier` MUST be exactly one of `cheap` | `default` | `top` (models.json keys) —
-anything else crashes `harness.sh budget`.
 
 **The `integration` branch** — created per batch off the base, deleted on success.
 **Worktrees** — `../<repo>.worktrees/<slug>`, one per subtask, via `harness.sh`.
 
-## harness.sh subcommands (the mechanical glue)
-
-Canonical paths (skip the discovery ls): `bash ~/.claude/skills/harness/harness.sh`,
-`python3 ~/.claude/skills/route-cost/route.py`.
+## harness.sh subcommands (node payloads — the mechanical glue)
 
 ```
 harness.sh budget <plan.jsonl>       Gate A — exit 1 if over ceiling_usd
 harness.sh wt-new <slug>             create feat/<slug> worktree off the base
-harness.sh wt-commit <slug>          commit the lane after the agent edits (harness commits, not the agent)
-harness.sh wt-verify <slug>          Gate B — verify the lane is committed before it may merge
+harness.sh wt-commit <slug>          commit the lane after the agent edits
+harness.sh wt-verify <slug>          Gate B pre-check — lane committed + clean
 harness.sh integ-start               create integration off the base
 harness.sh integ-merge <slug>        git merge --no-ff feat/<slug> (stops on conflict)
 harness.sh trace <session>           Gate D L2 — check .claude/traces/<session>.jsonl
-harness.sh loop-tick                 loop-mode Stop Rule — bump NOTES.loop.json; exit 1 = stop the loop
-harness.sh promote                   guarded --ff-only of base to integration (only after the human go)
-harness.sh reset-base                best-effort return of the repo to the base branch after a run (never fails the caller)
-harness.sh clean [keep-session ...]  remove merged worktrees + delete integration + prune stale traces
+harness.sh promote                   guarded --ff-only (only after the human go)
+harness.sh reset-base                best-effort return to the base branch
+harness.sh clean [keep-session ...]  remove worktrees + integration + stale traces
+harness.sh loop-tick                 LEGACY (pre-graph loop ledger) — superseded by
+                                     graph.py; do not use in graph runs
 ```
 Set `HARNESS_BASE=<branch>` to target a non-`main` base (smoke tests). The base
 must already exist.
@@ -156,33 +170,42 @@ must already exist.
 
 All memory-os integration is orchestrator-side, behind `ENABLE_MEMORY_OS`
 (default off). Hard boundaries:
-- Memory calls ONLY at the `[you]`-owned steps **S0/S3/S5/S7** — never in
-  `harness.sh`, the phase scripts, or the build agents (zero-MCP sandbox, no Bash).
+- Memory calls ONLY around model-type nodes at run boundaries (DECOMPOSE,
+  review reconciles, eval_trace, account_clean) — never in graph.py,
+  harness.sh, the phase scripts, or the build agents (zero-MCP sandbox).
 - `route.py` (model tier) and memory-os `mem_route` (project→skill→agent) are
   **orthogonal** — never merge them.
 - Writes are **summary-only at run boundaries**, exclusively through
-  `web/lib/memory/proposeFromHarness.ts` (secret-scan + provisional/queue
-  semantics live there). Never feed raw `.claude/traces/*.jsonl` into a write.
-- Failures never block Gates A–D: reads fail open (skip enrichment), writes queue.
-- harness.sh's stdout event contract RESERVES `type:"memory"` (comment only —
-  the script never emits it).
+  `web/lib/memory/proposeFromHarness.ts`. Never feed raw `.claude/traces/*.jsonl`
+  into a write.
+- Failures never block any gate: reads fail open, writes queue.
+- harness.sh's stdout event contract RESERVES `type:"memory"` (comment only).
 
 ## Preconditions
 
-- **Clean base**: no uncommitted tracked changes on the base branch — worktrees branch
-  from HEAD, so WIP on subtask-owned files silently diverges. If dirty, stop at S0 and
-  ask: commit the WIP (suite green first) or stash.
-- **Codex MCP** (`mcp__codex__codex`) available — required for Gate B.
-- **Trace hook** for Gate D Layer 2: the target repo's `.claude/settings.json` must
-  register the eval-gate PostToolUse hook (`python3 .claude/skills/eval-gate/trace-log.py`)
-  so `.claude/traces/<session>.jsonl` exists. Only the HARNESS repo has it today. In a
-  repo without it, `harness.sh trace` will error — warn and skip Layer 2; and when the
-  target repo has no eval-gate suites either, S5 degrades BY DESIGN to: full test suite
-  green on integration + a scripted app-level QA pass (e.g. Playwright) of each subtask's
-  acceptance checks. Say which S5 mode ran in the S6 go/no-go report.
+- **Clean base**: no uncommitted tracked changes on the base branch. If dirty,
+  stop at DECOMPOSE and ask: commit the WIP (suite green first) or stash.
+- **Codex MCP** (`mcp__codex__codex`) available — required for review nodes.
+- **Trace hook** for the eval_trace node's L2: the target repo must register the
+  eval-gate PostToolUse hook (`python3 .claude/skills/eval-gate/trace-log.py`).
+  In a repo without it, warn and skip L2; with no eval-gate suites either,
+  eval_trace degrades BY DESIGN to: full suite green on integration + a scripted
+  app-level QA pass of each subtask's acceptance checks. Say which mode ran in
+  the promote_gate report.
 
 ## Notes / ceiling
 
-skipped: dependency-graph merge ordering — pick foundational-first by hand in S4; add when batches exceed ~5 subtasks.
+skipped: engine-verified promote_gate approval (honor-bound edge) — add if a control-plane approval event becomes consumable here.
+skipped: machine enforcement of per-node context lists (they're printed by `next`, honored by you) — add a sandbox wrapper when build agents get shell access.
 skipped: auto-appending caught Gate-B BLOCKs to the regression suite — do it manually per eval-gate; add when BLOCK volume is high.
-skipped: parsing route.py output into plan.jsonl — you write plan.jsonl; add a parser when decompositions get large.
+
+## Visual-diff gate (shots/)
+
+`bash ~/.claude/skills/harness/shots/shots.sh <worktree> <port> <outdir> [routes…]` seeds a
+throwaway checkout (never a dev DB you care about), boots its server, logs in past the
+verification/terms gates, and screenshots each route at 1440/390 beside its mockup
+(`side-*.png` montages when ImageMagick is installed). Use it inside `review.<slug>` as the
+visual half of Gate B, and on integration before `promote_gate` for the human's evidence.
+Knobs are env vars documented at the top of the script; the mockup map is in `shots.rb`.
+Written for prospect-farm (Rails, `sample_data:seed`, `LegalHelper` terms); adapt those two
+lines for another app.
