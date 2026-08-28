@@ -101,8 +101,12 @@ def build_graph(sub):
         g, tier = s["slug"], s.get("tier", "default")
         ctx = [f"NOTES.{g}.md", f"worktree:{g}"]
         node(f"build.{g}", "model",
-             f"harness.sh wt-new {g}; implement NOTES.{g}.md's spec in the worktree "
-             f"on the routed tier ({tier})",
+             f"harness.sh wt-new {g}; TDD in the worktree on the routed tier ({tier}): "
+             f"1) write the failing test for NOTES.{g}.md's acceptance check, "
+             f"2) harness.sh tdd-run {g} red -- <test cmd> (must fail), "
+             f"3) implement the spec, 4) harness.sh tdd-run {g} green -- <test cmd> "
+             f"(must pass). Docs/config-only lane: write the reason to "
+             f".harness/tdd/{g}.skip instead",
              ("ok",), context=ctx, max_visits=2)
         node(f"commit.{g}", "script", f"harness.sh wt-commit {g}", ("ok",),
              max_visits=4)

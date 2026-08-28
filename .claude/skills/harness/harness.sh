@@ -265,6 +265,36 @@ case "$cmd" in
       *) die "wt-commit: git diff failed (rc=$rc)" ;;
     esac
     ;;
+  tdd-run)
+    # TDD evidence: harness.sh tdd-run <slug> red|green -- <test cmd...>
+    # Runs the test cmd inside the lane worktree and captures `exit=<n>` + output to
+    # .harness/tdd/<slug>.<phase>.log. red MUST fail (exit!=0), green MUST pass (exit 0);
+    # otherwise the log is still written but this command exits 1 so the agent notices.
+    # Both logs get committed by wt-commit and are required by wt-verify.
+    slug=${2:-}; phase=${3:-}
+    [ -n "$slug" ] || die "tdd-run needs a <slug>"
+    case "$slug" in *[!a-zA-Z0-9_-]*) die "tdd-run: slug must be [a-zA-Z0-9_-]";; esac
+    case "$phase" in red|green) ;; *) die "tdd-run: phase must be red|green";; esac
+    [ "${4:-}" = "--" ] || die "tdd-run: usage tdd-run <slug> red|green -- <cmd...>"
+    shift 4
+    [ $# -gt 0 ] || die "tdd-run: missing test command"
+    repo_root=$(git rev-parse --show-toplevel)
+    wt_path="$(cd "$repo_root/.." && pwd)/$(basename "$repo_root").worktrees/$slug"
+    [ -d "$wt_path" ] || die "tdd-run: lane worktree missing for feat/$slug"
+    mkdir -p "$wt_path/.harness/tdd"
+    log="$wt_path/.harness/tdd/$slug.$phase.log"
+    set +e
+    out=$(cd "$wt_path" && "$@" 2>&1); rc=$?
+    set -e
+    { echo "exit=$rc"; echo "cmd=$*"; echo "---"; printf '%s\n' "$out" | tail -n 200; } > "$log"
+    if [ "$phase" = red ] && [ "$rc" -eq 0 ]; then
+      echo "tdd-run: RED phase passed (exit 0) — the test does not fail before the implementation; write a real failing test" >&2; exit 1
+    fi
+    if [ "$phase" = green ] && [ "$rc" -ne 0 ]; then
+      echo "tdd-run: GREEN phase failed (exit $rc) — implementation incomplete" >&2; exit 1
+    fi
+    echo "tdd-run: $phase captured -> .harness/tdd/$slug.$phase.log"
+    ;;
   wt-verify)
     # Gate B: a lane must be COMMITTED before it can merge — otherwise integ-merge of
     # an empty feat/<slug> is a silent no-op and a do-nothing agent passes unnoticed.
@@ -290,7 +320,29 @@ case "$cmd" in
       emit_gate B raised high "feat/$slug has no commits beyond $BASE (agent produced nothing)" "$slug"
       emit_phase 2 blocked; exit 1
     fi
-    emit_gate B clear info "lane feat/$slug committed and clean" "$slug"
+    # TDD evidence (Gate B, ECC-style): red log (exit!=0) + green log (exit 0) committed in
+    # the lane, and at least one test file in the lane's diff. Opt-out per lane by committing
+    # .harness/tdd/<slug>.skip containing the reason (e.g. docs-only / config-only subtasks).
+    ref="feat/$slug"
+    if git cat-file -e "$ref:.harness/tdd/$slug.skip" 2>/dev/null; then
+      emit_gate B clear warn "TDD evidence skipped: $(git show "$ref:.harness/tdd/$slug.skip" | head -1)" "$slug"
+    else
+      red=$(git show "$ref:.harness/tdd/$slug.red.log" 2>/dev/null | head -1)
+      green=$(git show "$ref:.harness/tdd/$slug.green.log" 2>/dev/null | head -1)
+      if [ -z "$red" ] || [ "$red" = "exit=0" ]; then
+        emit_gate B raised high "no failing RED test run committed for feat/$slug (use: harness.sh tdd-run $slug red -- <cmd>)" "$slug"
+        emit_phase 2 blocked; exit 1
+      fi
+      if [ "$green" != "exit=0" ]; then
+        emit_gate B raised high "no passing GREEN test run committed for feat/$slug (use: harness.sh tdd-run $slug green -- <cmd>)" "$slug"
+        emit_phase 2 blocked; exit 1
+      fi
+      if ! git diff --name-only "$BASE..$ref" | grep -Eiq '(^|/)(tests?|spec|__tests__)(/|$)|[._-](test|spec)s?\.[a-z]+$|^test_.*\.py$|/test_[^/]*\.py$'; then
+        emit_gate B raised high "feat/$slug diff contains no test file" "$slug"
+        emit_phase 2 blocked; exit 1
+      fi
+    fi
+    emit_gate B clear info "lane feat/$slug committed, clean, TDD evidence present" "$slug"
     ;;
   integ-start)
     git show-ref --verify --quiet refs/heads/integration && die "integration already exists — clean first"
@@ -454,7 +506,7 @@ PYEOF
     done
     ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | integ-start | integ-merge <slug> | trace <session> | loop-tick | promote | reset-base | clean [keep-session ...]}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | tdd-run <slug> red|green -- <cmd> | integ-start | integ-merge <slug> | trace <session> | loop-tick | promote | reset-base | clean [keep-session ...]}" >&2
     exit 2
     ;;
 esac

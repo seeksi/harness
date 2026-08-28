@@ -98,7 +98,21 @@ At DECOMPOSE, run `route.py "<subtask spec>"` per subtask and record the tier
 in NOTES.subtasks.json — init bakes it into each build node's payload. The
 cross-review reconcile always routes `top`.
 
-## Gate B: cross-review (the hard rule that must survive)
+## Gate B part 1: TDD evidence (no test, no merge)
+
+Every `build.<slug>` is red → green with captured proof. The builder writes the
+failing test for the acceptance check in `NOTES.<slug>.md`, runs
+`harness.sh tdd-run <slug> red -- <cmd>` (refuses if it passes), implements,
+then `tdd-run <slug> green -- <cmd>` (refuses if it fails). Both logs land in
+`.harness/tdd/` inside the lane and are committed by `wt-commit`; `wt-verify`
+raises Gate B if either is missing, red shows `exit=0`, green isn't `exit=0`,
+or the lane diff touches no test file. The point is the evidence, not the
+ritual: a reviewer with fresh context can read the red log and know the test
+actually guards the behavior. Lanes with nothing testable (docs, config) commit
+`.harness/tdd/<slug>.skip` with a one-line reason — visible as a warn, never
+silent.
+
+## Gate B part 2: cross-review (the hard rule that must survive)
 
 The `review.<slug>` node's payload invokes the `cross-review` skill on the
 worktree diff. Its independence is load-bearing: **Codex gets a fresh context
@@ -153,7 +167,8 @@ token fields are thousands):
 harness.sh budget <plan.jsonl>       Gate A — exit 1 if over ceiling_usd
 harness.sh wt-new <slug>             create feat/<slug> worktree off the base
 harness.sh wt-commit <slug>          commit the lane after the agent edits
-harness.sh wt-verify <slug>          Gate B pre-check — lane committed + clean
+harness.sh tdd-run <slug> red|green -- <cmd>  capture a test run as TDD evidence (red must fail, green must pass)
+harness.sh wt-verify <slug>          Gate B pre-check — lane committed + clean + TDD evidence
 harness.sh integ-start               create integration off the base
 harness.sh integ-merge <slug>        git merge --no-ff feat/<slug> (stops on conflict)
 harness.sh trace <session>           Gate D L2 — check .claude/traces/<session>.jsonl
