@@ -3,6 +3,7 @@
   "owner": { "name": "seeksi" },
   "plugins": [
     { "name": "trajectory-guard", "source": "./trajectory-guard" },
-    { "name": "context-guard", "source": "./context-guard" }
+    { "name": "context-guard", "source": "./context-guard" },
+    { "name": "memory-guard", "source": "./memory-guard" }
   ]
 }

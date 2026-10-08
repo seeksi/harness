@@ -1,0 +1,8 @@
+{
+  "name": "memory-guard",
+  "version": "0.1.0",
+  "description": "Denies hand-edits to memory-os JSON (use `mem propose`) and secrets written under memory_layer/.",
+  "userConfig": {
+    "memoryRoot": { "type": "string", "title": "memory-os root", "description": "Absolute path of the memory-os checkout.", "default": "/home/alter/claude/memory-os" }
+  }
+}
