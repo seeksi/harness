@@ -365,12 +365,12 @@ case "$cmd" in
       review_file="${HARNESS_REVIEWS_DIR:-$HOME/.gantry/reviews}/$sha.json"
       if ! python3 -c 'import json,sys
 r=json.load(open(sys.argv[1])); sys.exit(0 if r.get("verdict")=="PASS" and r.get("head")==sys.argv[2] else 1)' "$review_file" "$sha" 2>/dev/null; then
-        emit_gate B raised high "no cross-review PASS on record for feat/$2 (${sha:0:12}): run the cross-review skill, then /review-record PASS feat/$2" "$2"
+        emit_gate B raised high "no cross-review PASS on record for feat/$2 ($(printf %.12s "$sha")): run the cross-review skill, then /review-record PASS feat/$2" "$2"
         emit_subtask "$2" blocked
         emit_phase 5 blocked
         exit 1
       fi
-      emit_gate B clear info "cross-review PASS on record for feat/$2 (${sha:0:12})" "$2"
+      emit_gate B clear info "cross-review PASS on record for feat/$2 ($(printf %.12s "$sha"))" "$2"
     fi
     # --no-ff ALWAYS writes a merge commit, so it needs a committer identity, no signing,
     # and no inherited hooks — same as wt-commit. The prod `deploy` user has no global

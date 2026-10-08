@@ -39,6 +39,9 @@ function fakeSpawn(byCmd: Record<string, string[]>) {
   });
 }
 
+// Cross-review stub for live tests that reach the merge phase: a PASS for every lane.
+const passReview = async (i: { slug: string }) => ({ verdict: "PASS" as const, sha: "a".repeat(40), summary: `cross-review PASS for ` });
+
 // Wait until the async producer settles (slot released).
 async function waitForSlotFree(timeoutMs = 2000): Promise<void> {
   const t0 = Date.now();
@@ -129,7 +132,7 @@ describe("startRun — live spawn pipeline: persist + broadcast + slot", () => {
 
     startRun(
       { runId: "run-live1", projectId: "proj", projectName: "vector", brief: "do the thing", routing: "sonnet" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {} }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -226,7 +229,7 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
 
     startRun(
       { runId: "run-agent1", projectId: "proj", projectName: "v", brief: "do the thing", routing: "sonnet" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -267,7 +270,7 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
 
     startRun(
       { runId: "run-noexec", projectId: "proj", projectName: "v", brief: "x" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: runAgent as never, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: runAgent as never, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -276,6 +279,50 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
     expect(order).not.toContain("trace"); // no session → no Gate D
     // Same subcommand set as before the wiring.
     expect(order).toEqual(expect.arrayContaining(["budget", "integ-start", "wt-new", "wt-commit", "wt-verify", "integ-merge", "reset-base"]));
+  });
+
+  it("Gate B part 2: a cross-review BLOCK raises gate B for the lane and fails the run BEFORE any merge", async () => {
+    const order: string[] = [];
+    const spawnFn = recordingSpawn(order);
+    const reviewLane = vi.fn(async (i: { slug: string; brief: string }) => ({
+      verdict: "BLOCK" as const,
+      sha: "b".repeat(40),
+      summary: `cross-review BLOCK: High | SECURITY | x:1 | injection in ${i.slug} | escape`,
+    }));
+
+    startRun(
+      { runId: "run-block", projectId: "proj", projectName: "v", brief: "x" },
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: vi.fn() as never, relocate: () => true, reviewLane }
+    );
+    await waitForSlotFree();
+
+    expect(reviewLane).toHaveBeenCalledTimes(1);
+    expect(reviewLane.mock.calls[0]![0]).toMatchObject({ slug: expect.stringMatching(/^lane-/), brief: expect.any(String) });
+    expect(order).toContain("wt-verify");
+    expect(order).not.toContain("integ-merge"); // nothing reaches integration
+    const gates = eventsSince("run-block", 0).filter((e) => e.env.type === "gate").map((e) => e.env.payload as { id: string; status: string; summary: string });
+    expect(gates.some((g) => g.id === "B" && g.status === "raised" && /cross-review BLOCK/.test(g.summary))).toBe(true);
+    expect(getSnapshot("run-block")?.status).toBe("failed");
+  });
+
+  it("Gate B part 2: the cross-review runs AFTER Gate D (trace) and BEFORE the merge, once per lane", async () => {
+    process.env.ENABLE_AGENT_EXEC = "1";
+    const order: string[] = [];
+    const spawnFn = recordingSpawn(order);
+    const runAgent: RunAgentFn = async () => ({ exitCode: 0, sessionId: "sess-rv000001", stdout: "" }) as never;
+    const reviewLane = vi.fn(async (i: { slug: string }) => {
+      order.push(`review:${i.slug}`);
+      return { verdict: "PASS" as const, sha: "a".repeat(40), summary: "ok" };
+    });
+    startRun(
+      { runId: "run-order", projectId: "proj", projectName: "v", brief: "x" },
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane }
+    );
+    await waitForSlotFree();
+    const review = order.findIndex((o) => o.startsWith("review:"));
+    expect(review).toBeGreaterThan(order.indexOf("trace"));
+    expect(review).toBeLessThan(order.indexOf("integ-merge"));
+    expect(order.filter((o) => o.startsWith("review:"))).toHaveLength(1);
   });
 
   it("fail-closed: an agent that rejects fails the run BEFORE commit/verify/merge", async () => {
@@ -288,7 +335,7 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
 
     startRun(
       { runId: "run-agentfail", projectId: "proj", projectName: "v", brief: "x" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -316,7 +363,7 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
 
     startRun(
       { runId: "run-agentexit", projectId: "proj", projectName: "v", brief: "x" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -344,7 +391,7 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
 
     startRun(
       { runId: "run-nosess", projectId: "proj", projectName: "v", brief: "x" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -372,7 +419,7 @@ describe("startRun — agent-exec build phase (ENABLE_AGENT_EXEC gate)", () => {
 
     startRun(
       { runId: "run-noreloc", projectId: "proj", projectName: "v", brief: "x" },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => false }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => false, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -435,7 +482,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hf1", projectId: "proj", projectName: "v", brief: "keep going" },
-      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -461,7 +508,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfcap", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -496,7 +543,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfstale", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: fs }
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: fs }
     );
     await waitForSlotFree();
 
@@ -517,7 +564,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hftrack", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -544,7 +591,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfexit", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -569,7 +616,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfcap0", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -595,7 +642,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfusage", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn([], clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -622,7 +669,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfreject", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: h.fs }
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: h.fs }
     );
     await waitForSlotFree();
 
@@ -659,7 +706,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfsweepfail", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: fsSeam }
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: fsSeam }
     );
     await waitForSlotFree();
 
@@ -690,7 +737,7 @@ describe("startRun — handoff-respawn loop (context-guard)", () => {
 
     startRun(
       { runId: "run-hfsweepmask", projectId: "proj", projectName: "v", brief: "b" },
-      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, handoffFs: fsSeam }
+      { live: true, spawnFn: recordingSpawn(order, clearVerify) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, handoffFs: fsSeam }
     );
     await waitForSlotFree();
 
@@ -751,7 +798,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-ml1", projectId: "proj", projectName: "v", brief: "summary", laneBriefs: ["lane one task", "lane two task"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -802,7 +849,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlfail", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["ok lane", "doomed lane"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -832,7 +879,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlseq", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["a", "b"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -861,7 +908,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlpar", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["a", "b"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -875,7 +922,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlempty", projectId: "proj", projectName: "v", brief: "s", laneBriefs: [] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -897,7 +944,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlsplit", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["ok lane", "doomed lane"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -924,7 +971,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mldupe", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["a", "b"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -951,7 +998,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlnan", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["a", "b"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -979,7 +1026,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlhigh", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["a", "b"] },
-      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true }
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -1003,7 +1050,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
     startRun(
       { runId: "run-mlclean", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["a", "b"] },
-      { live: true, spawnFn: laneRecordingSpawn([]) as never, writePlan: () => {}, runAgent, relocate: () => true, cleanupHome }
+      { live: true, spawnFn: laneRecordingSpawn([]) as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, cleanupHome }
     );
     await waitForSlotFree(); // slot released despite the failed run + throwing cleanup
 
@@ -1037,7 +1084,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
       startRun(
         { runId: "run-dc1", projectId: "proj", projectName: "v", brief: "one big brief", routing: "sonnet", decompose: true },
-        { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, decomposeFn }
+        { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent, relocate: () => true, reviewLane: passReview, decomposeFn }
       );
       await waitForSlotFree();
 
@@ -1074,7 +1121,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
       startRun(
         { runId: "run-dcx", projectId: "proj", projectName: "v", brief: "s", laneBriefs: ["x"], decompose: true },
-        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn: decomposeFn as never }
+        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, reviewLane: passReview, decomposeFn: decomposeFn as never }
       );
       await waitForSlotFree();
 
@@ -1091,7 +1138,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
       startRun(
         { runId: "run-dcgate", projectId: "proj", projectName: "v", brief: "s", decompose: true },
-        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn: decomposeFn as never }
+        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, reviewLane: passReview, decomposeFn: decomposeFn as never }
       );
       await waitForSlotFree();
 
@@ -1111,7 +1158,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
       startRun(
         { runId: "run-dcfail", projectId: "proj", projectName: "v", brief: "s", decompose: true },
-        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn, cleanupHome: (s) => cleaned.push(s) }
+        { live: true, spawnFn: laneRecordingSpawn(order) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, reviewLane: passReview, decomposeFn, cleanupHome: (s) => cleaned.push(s) }
       );
       await waitForSlotFree();
 
@@ -1132,7 +1179,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
       startRun(
         { runId: "run-dcphase", projectId: "proj", projectName: "v", brief: "s", decompose: true },
-        { live: true, spawnFn: laneRecordingSpawn([]) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn, cleanupHome: () => {} }
+        { live: true, spawnFn: laneRecordingSpawn([]) as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, reviewLane: passReview, decomposeFn, cleanupHome: () => {} }
       );
       await waitForSlotFree();
 
@@ -1153,7 +1200,7 @@ describe("startRun — multi-lane (laneBriefs)", () => {
 
       startRun(
         { runId: "run-dcclean", projectId: "proj", projectName: "v", brief: "s", decompose: true },
-        { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, decomposeFn, cleanupHome: (s) => cleaned.push(s) }
+        { live: true, spawnFn: spawnFn as never, writePlan: () => {}, runAgent: okAgent(), relocate: () => true, reviewLane: passReview, decomposeFn, cleanupHome: (s) => cleaned.push(s) }
       );
       await waitForSlotFree();
 
@@ -1207,7 +1254,7 @@ describe("startRun — per-lane model routing (Phase 4)", () => {
         routing: "auto",
         laneBriefs: ["review the security threat model", "write docs for the README", "implement the fetch wrapper"],
       },
-      { live: true, spawnFn: fakeSpawn(clearVerify) as never, writePlan: () => {}, runAgent: okAgentModel(models), relocate: () => true }
+      { live: true, spawnFn: fakeSpawn(clearVerify) as never, writePlan: () => {}, runAgent: okAgentModel(models), relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -1231,7 +1278,7 @@ describe("startRun — per-lane model routing (Phase 4)", () => {
         routing: "haiku",
         laneBriefs: ["review the security threat model", "write docs for the README"],
       },
-      { live: true, spawnFn: fakeSpawn(clearVerify) as never, writePlan: () => {}, runAgent: okAgentModel(models), relocate: () => true }
+      { live: true, spawnFn: fakeSpawn(clearVerify) as never, writePlan: () => {}, runAgent: okAgentModel(models), relocate: () => true, reviewLane: passReview }
     );
     await waitForSlotFree();
 
@@ -1259,7 +1306,7 @@ describe("startRun — per-lane model routing (Phase 4)", () => {
           captured = p;
         },
         runAgent: okAgentModel(models),
-        relocate: () => true,
+        relocate: () => true, reviewLane: passReview,
       }
     );
     await waitForSlotFree();

@@ -30,6 +30,7 @@ import {
 } from "@/lib/bridge/harness-bridge";
 import { mintLane, mintPlanFile, mintSession } from "@/lib/bridge/registry";
 import { routeModel } from "./route-tier";
+import { reviewLane, type ReviewLaneFn } from "@/lib/sandbox/review";
 import {
   runAgentInSandbox,
   decomposeBrief,
@@ -286,6 +287,8 @@ export interface StartRunOptions {
   cleanupHome?: (slug: string) => void;
   /** TEST-ONLY seam: injectable decompose step (default = real decomposeBrief). IGNORED unless test. */
   decomposeFn?: DecomposeFn;
+  /** TEST-ONLY seam: injectable cross-review (default = real reviewLane via codex). IGNORED unless test. */
+  reviewLane?: ReviewLaneFn;
   /** TEST-ONLY seam: injectable handoff-file access (default = real defaultHandoffFs). IGNORED unless test. */
   handoffFs?: HandoffFs;
 }
@@ -317,6 +320,7 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
   const cleanupHome = (testSeam && opts.cleanupHome) || removeAgentHome;
   const decompose: DecomposeFn = (testSeam && opts.decomposeFn) || decomposeBrief;
   const handoffFs: HandoffFs = (testSeam && opts.handoffFs) || defaultHandoffFs;
+  const review: ReviewLaneFn = (testSeam && opts.reviewLane) || reviewLane;
 
   // ONE ingest path: fold → persist → broadcast → notify (edge-triggered).
   let fleet: FleetState = initialFleetState;
@@ -555,6 +559,28 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
               throw new Error(`agent ran but its trace could not be relocated (lane ${lane.slug}) — failing run closed (Gate D)`);
             }
             await runSub({ cmd: "trace", session: agentSessionId }); // Gate D
+          }
+
+          // Gate B, part 2 — the independent Codex cross-review of the committed lane
+          // (diff + brief ONLY; cross-review skill rule 1). Records the verdict artifact
+          // integ-merge requires; anything but PASS fails the run CLOSED before any merge,
+          // with the lane's gate raised so the reason is on the timeline. Runs AFTER Gate D
+          // so a looping agent's lane is never sent to the reviewer.
+          const verdict = await review({ slug: lane.slug, brief: lane.brief });
+          const isPass = verdict.verdict === "PASS";
+          ingest(
+            toEnvelope({
+              type: "gate",
+              id: "B",
+              status: isPass ? "clear" : "raised",
+              severity: isPass ? "info" : "high",
+              summary: verdict.summary,
+              subtaskId: lane.slug,
+            })
+          );
+          if (!isPass) {
+            ingest(toEnvelope({ type: "subtask", id: lane.slug, status: "blocked", phase: 2 }));
+            throw new HarnessExitError(`cross-review ${verdict.verdict} for lane ${lane.slug}: ${verdict.summary}`);
           }
         }
 

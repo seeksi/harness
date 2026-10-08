@@ -36,7 +36,7 @@ record() { # <repo> <ref> <verdict> [head-override]
 run_merge() { # <repo> [env...] -> stdout+stderr in OUT, exit in RC
   local d="$1"; shift
   set +e
-  OUT=$(cd "$d" && env HARNESS_REVIEWS_DIR="$REVIEWS" HARNESS_BASE=main "$@" bash "$HARNESS" integ-merge x 2>&1); RC=$?
+  OUT=$(cd "$d" && env HARNESS_REVIEWS_DIR="$REVIEWS" HARNESS_BASE=main "$@" sh "$HARNESS" integ-merge x 2>&1); RC=$?
   set -e
 }
 
