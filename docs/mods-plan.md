@@ -67,7 +67,8 @@ Harness follow-up (not a mod, separate PR): `harness.sh integ-merge` reads the s
 ## Status (2026-10-08)
 
 All four built on `feat/mods`, each: Gate A (batch est. $1.40/$5), Gate B codex PASS, Gate C (`claude plugin validate` + `claude plugin test` + tsc 0; console 81/81, eslint, tsc 11 = baseline, install.test.sh 29/0). Gate D on the orchestrator session flagged THRASH (Bash 87% of calls — research session, not a lane; reported, not blocking). Installed at user scope from the folder marketplace `harness-mods` (`claude plugin list` → "Read from: mods/<name>"); runtime copy at `~/.gantry/mods/trajectory-guard`.
-Open: live headless smoke of trajectory-guard on the c2 throwaway (HANDOFF recipe); `harness.sh integ-merge` honouring `~/.gantry/reviews/<sha>.json` (the real gate, separate PR); retire the `context-guard.py` PostToolUse entry after one real session; push `feat/mods` on operator say-so.
+Live headless smoke (2026-10-08, run `2230c50dd8bfe98d59aaa352` on a fresh c2 throwaway): the lane spawned with the runtime `--plugin-dir` (no "not installed" warning; the only omission path), built `src/hello.test.js`, committed, trace written; a direct `claude -p --plugin-dir ~/.gantry/mods/trajectory-guard --debug-file` shows `Loaded inline plugin from path: trajectory-guard`. The run then stopped at Gate B's TDD-evidence rule (no `tdd-run red` log committed) — a pre-existing harness gate the headless agent does not yet satisfy, unrelated to the mod.
+Open: `harness.sh integ-merge` honouring `~/.gantry/reviews/<sha>.json` (the real gate, separate PR); retire the `context-guard.py` PostToolUse entry after one real session; push `feat/mods` on operator say-so.
 
 ## Order and stop rule
 
