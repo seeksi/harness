@@ -204,7 +204,39 @@ export function buildAgentArgs(spec: AgentSpec): string[] {
         PostToolUse: [{ hooks: [{ type: "command", command: traceHookCommand() }] }],
       },
     }),
+    ...pluginDirArgs(),
   ];
+}
+
+// Live Gate-D guard (mods/trajectory-guard): loaded into the headless lane via --plugin-dir
+// from a FIXED console-owned path (install.sh copies it there). No env override on purpose:
+// an override could point the lane at any plugin, including one that registers tools or
+// reaches memory. NOT an MCP/memory boundary change (rule 5): the mod registers no tools,
+// no MCP, and reads nothing but its own $.state. Missing ⇒ the lane runs unguarded and
+// trace-check.py (post-hoc Gate D) still gates — warn, don't refuse the run. Present ⇒ the
+// same realpath containment as the trace hook, plus the manifest must name the expected mod.
+const PLUGIN_DIR = path.join(os.homedir(), ".gantry", "mods", "trajectory-guard");
+function pluginDirArgs(): string[] {
+  let real: string;
+  try {
+    real = fs.realpathSync(PLUGIN_DIR);
+  } catch {
+    console.warn(`agent-runner: trajectory-guard mod not installed at ${PLUGIN_DIR} — lane runs without the live Gate-D guard (run install.sh)`);
+    return [];
+  }
+  if (isAgentWritablePath(real)) {
+    throw new AgentExecError(`plugin dir resolves into agent-writable territory — refusing to load it: ${JSON.stringify(real)}`);
+  }
+  let name: unknown;
+  try {
+    name = JSON.parse(fs.readFileSync(path.join(real, ".claude-plugin", "plugin.json"), "utf8")).name;
+  } catch {
+    throw new AgentExecError(`plugin dir has no readable .claude-plugin/plugin.json: ${JSON.stringify(real)}`);
+  }
+  if (name !== "trajectory-guard") {
+    throw new AgentExecError(`plugin dir is not the trajectory-guard mod (name=${JSON.stringify(name)}): ${JSON.stringify(real)}`);
+  }
+  return ["--plugin-dir", real];
 }
 
 export interface SpawnAgentOptions {

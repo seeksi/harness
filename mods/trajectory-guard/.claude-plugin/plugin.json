@@ -1,0 +1,6 @@
+{
+  "name": "trajectory-guard",
+  "version": "0.1.0",
+  "description": "Live Gate D: denies a tool call that repeats 3x in a row or exceeds 200 calls in a session.",
+  "types": "./types/index.d.ts"
+}

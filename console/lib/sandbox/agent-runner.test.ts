@@ -62,7 +62,9 @@ describe("buildAgentArgs / containedWorktree", () => {
       "--strict-mcp-config",
       "--dangerously-skip-permissions",
     ]);
-    expect(args).toHaveLength(12);
+    // After --settings the only thing allowed is the optional `--plugin-dir <abs>` pair, present
+    // iff the trajectory-guard mod is installed on this box (install.sh) — covered in its own block.
+    expect(args.slice(12).length === 0 || (args[12] === "--plugin-dir" && args.length === 14)).toBe(true);
     expect(args[10]).toBe("--settings");
     const settings = JSON.parse(args[11]);
     const hook = settings.hooks.PostToolUse[0].hooks[0];
@@ -278,6 +280,73 @@ describe("buildAgentArgs — trace-hook CONTAINMENT (hook must live OUTSIDE agen
     const args = mod.buildAgentArgs(laneSpec(repoRoot)); // must NOT throw
     const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toBe(`python3 "${hook}"`);
+  });
+});
+
+describe("buildAgentArgs — trajectory-guard --plugin-dir (fixed path, contained, name-pinned)", () => {
+  // PLUGIN_DIR = $HOME/.gantry/mods/trajectory-guard at module load; drive it off a temp HOME.
+  let tmp: string;
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+    if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  async function withHome(home: string, repoRoot: string) {
+    vi.stubEnv("HOME", home);
+    vi.stubEnv("HARNESS_REPO", repoRoot);
+    vi.resetModules();
+    const mod = await import("./agent-runner");
+    (await import("@/lib/bridge/registry")).mintLane("lane-x");
+    return mod;
+  }
+  const laneSpec = (repoRoot: string) => ({
+    slug: "lane-x",
+    worktreePath: path.join(`${repoRoot}.worktrees`, "lane-x"),
+    taskPrompt: "build the thing",
+  });
+  const writeMod = (dir: string, name = "trajectory-guard") => {
+    fs.mkdirSync(path.join(dir, ".claude-plugin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".claude-plugin", "plugin.json"), JSON.stringify({ name }));
+  };
+  const pluginDirOf = (args: string[]) => args[args.indexOf("--plugin-dir") + 1];
+
+  it("omits --plugin-dir (with a warning) when the mod is not installed", async () => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "plugdir-")));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await withHome(path.join(tmp, "home"), path.join(tmp, "repo"));
+    const args = mod.buildAgentArgs(laneSpec(path.join(tmp, "repo")));
+    expect(args).not.toContain("--plugin-dir");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("trajectory-guard mod not installed"));
+    warn.mockRestore();
+  });
+
+  it("passes the realpath of the installed mod", async () => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "plugdir-")));
+    const home = path.join(tmp, "home");
+    writeMod(path.join(home, ".gantry", "mods", "trajectory-guard"));
+    const mod = await withHome(home, path.join(tmp, "repo"));
+    const args = mod.buildAgentArgs(laneSpec(path.join(tmp, "repo")));
+    expect(pluginDirOf(args)).toBe(path.join(home, ".gantry", "mods", "trajectory-guard"));
+  });
+
+  it("THROWS when the mod dir is a symlink into a lane worktree (agent-writable)", async () => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "plugdir-")));
+    const home = path.join(tmp, "home");
+    const repoRoot = path.join(tmp, "repo");
+    const planted = path.join(`${repoRoot}.worktrees`, "lane-x", "mod");
+    writeMod(planted);
+    fs.mkdirSync(path.join(home, ".gantry", "mods"), { recursive: true });
+    fs.symlinkSync(planted, path.join(home, ".gantry", "mods", "trajectory-guard"));
+    const mod = await withHome(home, repoRoot);
+    expect(() => mod.buildAgentArgs(laneSpec(repoRoot))).toThrow(mod.AgentExecError);
+  });
+
+  it("THROWS when the manifest names a different plugin", async () => {
+    tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "plugdir-")));
+    const home = path.join(tmp, "home");
+    writeMod(path.join(home, ".gantry", "mods", "trajectory-guard"), "mem-bridge");
+    const mod = await withHome(home, path.join(tmp, "repo"));
+    expect(() => mod.buildAgentArgs(laneSpec(path.join(tmp, "repo")))).toThrow(/not the trajectory-guard mod/);
   });
 });
 

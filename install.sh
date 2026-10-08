@@ -31,6 +31,19 @@ for dir in "$SRC"/*/; do
   echo "✓ $name -> ${dir%/}"
 done
 
+# Runtime copy of the lane guard mod. A COPY, not a symlink: the console loads it into
+# headless lanes via --plugin-dir and refuses a path that resolves into agent-writable
+# territory; the repo checkout may be exactly that in direct mode. Re-run after editing the mod.
+MOD_SRC="$HERE/mods/trajectory-guard"
+MOD_DEST="$HOME/.gantry/mods/trajectory-guard"
+if [ -d "$MOD_SRC" ]; then
+  # Regular files only (find -type f never follows links): a symlink inside the mod could
+  # resolve back into agent-writable territory past the console's plugin-root realpath check.
+  rm -rf "$MOD_DEST" && mkdir -p "$MOD_DEST"
+  (cd "$MOD_SRC" && find . -type f ! -path './.claude-plugin/types/*' -exec install -D -m 0644 {} "$MOD_DEST/{}" \;)
+  echo "✓ trajectory-guard -> $MOD_DEST"
+fi
+
 mkdir -p "$(dirname "$BIN_DEST")"
 if [ -e "$BIN_DEST" ] || [ -L "$BIN_DEST" ]; then
   if [ ! -L "$BIN_DEST" ] || [ "$(readlink -f "$BIN_DEST")" != "$(readlink -f "$BIN_SRC")" ]; then

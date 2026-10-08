@@ -1,0 +1,5 @@
+{"task":"trajectory-guard mod + --plugin-dir wiring + tests","tier":"default","in_ktok":60,"out_ktok":12,"cached_ktok":40}
+{"task":"context-guard mod + tests","tier":"default","in_ktok":40,"out_ktok":8,"cached_ktok":30}
+{"task":"memory-guard mod + tests","tier":"default","in_ktok":40,"out_ktok":8,"cached_ktok":30}
+{"task":"review-gate mod + /review-record + tests","tier":"default","in_ktok":50,"out_ktok":10,"cached_ktok":35}
+{"task":"4x codex cross-review reconcile","tier":"top","in_ktok":80,"out_ktok":16,"cached_ktok":40}

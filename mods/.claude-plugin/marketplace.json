@@ -1,0 +1,7 @@
+{
+  "name": "harness-mods",
+  "owner": { "name": "seeksi" },
+  "plugins": [
+    { "name": "trajectory-guard", "source": "./trajectory-guard" }
+  ]
+}
