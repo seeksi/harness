@@ -5,7 +5,7 @@
 // its one-line brief — never the build agent's output, reasoning, or this daemon's view.
 // NOT an MCP/memory boundary change (rule 5): nothing here reaches the build agent; the
 // review runs daemon-side after the lane is committed, with the operator's own codex login.
-import { execFile as nodeExecFile, type ExecFileException, type ExecFileOptions } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -72,15 +72,29 @@ export const REVIEWER_INSTRUCTIONS = [
 // never a silent PASS. ponytail: chunk-and-merge reviews when a real lane hits it.
 export const MAX_DIFF_CHARS = 400_000;
 
-const defaultExec: ExecFn = (cmd, args, opts) =>
+// stdin is CLOSED ('ignore'): `codex exec` reads a non-TTY stdin as additional prompt input and
+// waits on an open pipe ("Reading additional input from stdin...") — the whole prompt is argv.
+// Exported for its one real-process test; everything else injects `exec`.
+export const execClosedStdin: ExecFn = (cmd, args, opts) =>
   new Promise((resolve) => {
-    const options: ExecFileOptions = { cwd: opts.cwd, env: opts.env as NodeJS.ProcessEnv, timeout: opts.timeoutMs, maxBuffer: opts.maxBuffer, shell: false };
-    nodeExecFile(cmd, args, options, (err: ExecFileException | null, stdout: string | Buffer, stderr: string | Buffer) => {
-      // A nonzero exit carries a numeric code; a spawn failure/timeout a string code (ENOENT…) → 1.
-      const code = err === null ? 0 : typeof err.code === "number" ? err.code : 1;
-      resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-    });
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env as NodeJS.ProcessEnv, stdio: ["ignore", "pipe", "pipe"], shell: false, timeout: opts.timeoutMs, killSignal: "SIGKILL" });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d: Buffer) => { if (out.length < opts.maxBuffer) out += d.toString(); });
+    child.stderr.on("data", (d: Buffer) => { if (err.length < opts.maxBuffer) err += d.toString(); });
+    let isDone = false;
+    const finish = (code: number, extraErr = "") => {
+      if (isDone) return;
+      isDone = true;
+      resolve({ code, stdout: out, stderr: err + extraErr });
+    };
+    child.on("error", (e) => finish(1, e.message));
+    // A signal exit (timeout/kill) resolves at once on 'exit' — a grandchild (codex's own
+    // helpers) can hold the pipes open past the kill, and 'close' would wait for it.
+    child.on("exit", (code, signal) => { if (signal !== null) finish(1, `killed by ${signal}`); });
+    child.on("close", (code) => finish(code ?? 1));
   });
+const defaultExec = execClosedStdin;
 
 // The verdict is the LAST `VERDICT:` line; a reviewer that never says one yields ERROR.
 export function parseVerdict(text: string): { verdict: ReviewVerdict; summary: string } {
@@ -145,7 +159,11 @@ export async function reviewLane(input: ReviewLaneInput, deps: ReviewDeps = {}):
     return { verdict: "ERROR", sha, summary: `codex exited ${run.code}: ${run.stderr.trim().slice(0, 200) || "no output"}` };
   }
   const { verdict, summary } = parseVerdict(text);
-  if (verdict === "ERROR") return { verdict, sha, summary };
+  if (verdict === "ERROR") {
+    // Say what the reviewer DID say, so a no-verdict run is diagnosable from the gate line.
+    const tail = (text.trim() || run.stderr.trim()).split(/\r?\n/).slice(-2).join(" / ").slice(0, 200);
+    return { verdict, sha, summary: `${summary} (exit ${run.code}${tail ? `: ${tail}` : ""})` };
+  }
 
   // The artifact integ-merge and the review-gate mod read; written for BLOCK too (a record),
   // but only PASS with a matching head unlocks a merge.

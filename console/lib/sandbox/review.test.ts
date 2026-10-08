@@ -2,7 +2,25 @@ import { describe, it, expect, afterEach } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { reviewLane, parseVerdict, MAX_DIFF_CHARS, type ExecFn } from "./review";
+import { reviewLane, parseVerdict, execClosedStdin, MAX_DIFF_CHARS, type ExecFn } from "./review";
+
+describe("execClosedStdin (the real runner)", () => {
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  it("closes stdin, so a child that reads it does not hang (codex exec reads stdin as more prompt)", async () => {
+    const r = await execClosedStdin("sh", ["-c", "cat; echo done"], { cwd: "/", env, timeoutMs: 5_000, maxBuffer: 1 << 20 });
+    expect(r).toEqual({ code: 0, stdout: "done\n", stderr: "" });
+  });
+  it("reports a nonzero exit and stderr; a missing binary is code 1 with the error text", async () => {
+    expect(await execClosedStdin("sh", ["-c", "echo bad >&2; exit 3"], { cwd: "/", env, timeoutMs: 5_000, maxBuffer: 1 << 20 })).toEqual({ code: 3, stdout: "", stderr: "bad\n" });
+    const missing = await execClosedStdin("/nonexistent/codex", [], { cwd: "/", env, timeoutMs: 5_000, maxBuffer: 1 << 20 });
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toMatch(/ENOENT/);
+  });
+  it("a timeout is a nonzero exit, never a silent 0", async () => {
+    const r = await execClosedStdin("sh", ["-c", "sleep 5"], { cwd: "/", env, timeoutMs: 200, maxBuffer: 1 << 20 });
+    expect(r.code).not.toBe(0);
+  });
+});
 
 const SHA = "a".repeat(40);
 
