@@ -64,6 +64,11 @@ Failure mode: old-SHA artifact unlocking a new lane head — covered by `head` m
 Test (cwd a temp repo with `integration` checked out and `feat/x` one commit ahead): `git merge feat/x` denied; allowed after `/review-record PASS feat/x`; a new commit on `feat/x` → denied again; `git merge-base main HEAD` allowed; on branch `feat/x`, `git merge main` allowed; `git -C <repo> merge feat/x` denied from another cwd.
 Harness follow-up (not a mod, separate PR): `harness.sh integ-merge` reads the same artifact — that is the real gate.
 
+## Status (2026-10-08)
+
+All four built on `feat/mods`, each: Gate A (batch est. $1.40/$5), Gate B codex PASS, Gate C (`claude plugin validate` + `claude plugin test` + tsc 0; console 81/81, eslint, tsc 11 = baseline, install.test.sh 29/0). Gate D on the orchestrator session flagged THRASH (Bash 87% of calls — research session, not a lane; reported, not blocking). Installed at user scope from the folder marketplace `harness-mods` (`claude plugin list` → "Read from: mods/<name>"); runtime copy at `~/.gantry/mods/trajectory-guard`.
+Open: live headless smoke of trajectory-guard on the c2 throwaway (HANDOFF recipe); `harness.sh integ-merge` honouring `~/.gantry/reviews/<sha>.json` (the real gate, separate PR); retire the `context-guard.py` PostToolUse entry after one real session; push `feat/mods` on operator say-so.
+
 ## Order and stop rule
 
 1 → 2 → 3 → 4. Each mod: write → gates A–D → commit on `feat/mods` → next. Any BLOCK halts that mod only. No push without operator say-so. Promote to `main` is the one human go/no-go.
