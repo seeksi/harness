@@ -1,0 +1,5 @@
+{
+  "name": "review-gate",
+  "version": "0.1.0",
+  "description": "Gate B at the merge: /review-record stamps the cross-review verdict for a SHA; git merge into main/integration is denied without a PASS for the source."
+}

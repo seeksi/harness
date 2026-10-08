@@ -4,6 +4,7 @@
   "plugins": [
     { "name": "trajectory-guard", "source": "./trajectory-guard" },
     { "name": "context-guard", "source": "./context-guard" },
-    { "name": "memory-guard", "source": "./memory-guard" }
+    { "name": "memory-guard", "source": "./memory-guard" },
+    { "name": "review-gate", "source": "./review-gate" }
   ]
 }

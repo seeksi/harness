@@ -89,6 +89,9 @@ VERDICT: BLOCK | PASS
 - PASS if only Medium/Low remain; list them as follow-ups, do not gate on them.
 Then: the merged table, and the 1–3 must-fix items if BLOCK.
 ```
+Record it: `/review-record PASS|BLOCK <ref>` (the `review-gate` mod, `mods/review-gate`).
+It stamps `~/.gantry/reviews/<sha>.json`; without a PASS for the source SHA the mod denies
+`git merge` into `integration`/`main` and `harness.sh integ-merge`.
 
 ### 6. Fix → focused re-check
 
