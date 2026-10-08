@@ -1,0 +1,9 @@
+{
+  "name": "context-guard",
+  "version": "0.1.0",
+  "description": "Context + cost on the status line; checkpoint nudge at the soft limit; denies starting new work past the hard limit.",
+  "userConfig": {
+    "soft": { "type": "number", "title": "Soft limit (%)", "description": "Context fill (whole %) at which to nudge a NOTES.md checkpoint.", "default": 60 },
+    "hard": { "type": "number", "title": "Hard limit (%)", "description": "Context fill (whole %) past which new work (Agent, lane launches) is denied.", "default": 75 }
+  }
+}
