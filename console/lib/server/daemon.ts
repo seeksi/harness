@@ -447,7 +447,7 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
               let handoff: string | undefined;
               for (;;) {
                 const result = await runAgent({
-                  prompt: buildLanePrompt(lane.brief, handoff),
+                  prompt: buildLanePrompt(lane.brief, handoff, lane.slug),
                   cwd: worktreePathFor(lane.slug),
                   sessionId: lane.slug,
                   model: lane.model, // per-lane routed tier (auto) or the forced explicit tier

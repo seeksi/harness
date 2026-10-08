@@ -41,6 +41,17 @@ describe("buildLanePrompt — composes over buildAgentPrompt + guard", () => {
     expect(p).not.toContain("Handoff from the previous agent");
   });
 
+  it("with a slug: carries the TDD ritual naming that lane's red/green/skip files; without: none", () => {
+    const p = buildLanePrompt("do the thing", undefined, "lane-abc");
+    expect(p).toContain("TDD EVIDENCE");
+    expect(p).toContain('> .harness/tdd/lane-abc.red.log');
+    expect(p).toContain('> .harness/tdd/lane-abc.green.log');
+    expect(p).toContain(".harness/tdd/lane-abc.skip");
+    expect(p).toContain('echo "exit=$rc"'); // the first-line shape wt-verify reads
+    expect(p.indexOf("TDD EVIDENCE")).toBeLessThan(p.indexOf("Context budget"));
+    expect(buildLanePrompt("do the thing")).not.toContain("TDD EVIDENCE");
+  });
+
   it("respawn (with handoff): inlines the previous handoff between the base and the guard", () => {
     const p = buildLanePrompt("task text", "prior progress notes");
     expect(p).toContain("task text");

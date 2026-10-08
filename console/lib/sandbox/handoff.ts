@@ -52,7 +52,7 @@ const PROMPT_SAFETY_MARGIN = 500;
  * task text (never provenance) and is length-capped here. (Lives here, alongside the other
  * prompt-composition helpers, mirroring buildDecomposePrompt in sandbox/decompose.ts.)
  */
-export function buildAgentPrompt(brief: string): string {
+export function buildAgentPrompt(brief: string, slug?: string): string {
   const task = (typeof brief === "string" ? brief : "").slice(0, MAX_BRIEF);
   return [
     "Implement the following task IN THIS WORKTREE (your current working directory).",
@@ -67,8 +67,31 @@ export function buildAgentPrompt(brief: string): string {
     "- Verify your work by running the project's own tests/build before finishing.",
     "- DO NOT run `git commit` or `git add`. The harness commits your lane after you",
     "  finish; committing yourself will break the commit/verify step (wt-commit).",
+    ...(slug ? tddRitual(slug) : []),
     "Finish once the task is implemented and its tests/build pass.",
   ].join("\n");
+}
+
+// Gate B's TDD-evidence rule (harness.sh wt-verify): the lane must carry a failing RED run,
+// a passing GREEN run and a test file, or a .skip with a reason. The headless agent has no
+// harness.sh and a minimal env, so it writes the logs itself in the exact shape tdd-run
+// produces (first line `exit=<n>`, then the output); wt-commit stages them with the lane.
+function tddRitual(slug: string): string[] {
+  const log = (phase: string) => `.harness/tdd/${slug}.${phase}.log`;
+  const capture = (phase: string) =>
+    `  out=$(<test cmd> 2>&1); rc=$?; mkdir -p .harness/tdd; { echo "exit=$rc"; printf '%s\\n' "$out"; } > ${log(phase)}`;
+  return [
+    "",
+    "TDD EVIDENCE (required — the lane is rejected without it):",
+    "1. Write the test(s) FIRST, run them, and capture the FAILING run (exit must be non-zero):",
+    capture("red"),
+    "2. Implement until the tests pass, then capture the PASSING run (exit must be 0):",
+    capture("green"),
+    `   (same command; \`<test cmd>\` is the project's own test runner, e.g. \`node --test\`, \`npm test\`, \`pytest\`.)`,
+    "3. If the task genuinely has nothing testable (docs/config only), instead write one line",
+    `   explaining why to .harness/tdd/${slug}.skip.`,
+    "Leave the .harness/tdd/ files in place; do not delete or commit them.",
+  ];
 }
 
 // Context-management: a judgment-based handoff instruction appended to every lane prompt.
@@ -102,8 +125,8 @@ const HANDOFF_HEADER = "\n\n## Handoff from the previous agent (continue from he
  * MAX_PROMPT budget) so a maximal brief + maximal handoff still composes under
  * agent-runner's MAX_PROMPT (asserted). Pure — unit-tested without a worktree.
  */
-export function buildLanePrompt(brief: string, handoff?: string): string {
-  const base = buildAgentPrompt(brief);
+export function buildLanePrompt(brief: string, handoff?: string, slug?: string): string {
+  const base = buildAgentPrompt(brief, slug);
   let inlined = "";
   if (handoff) {
     // Budget remaining for the handoff body once everything that must ride along is
