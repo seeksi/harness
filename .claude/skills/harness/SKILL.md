@@ -170,7 +170,9 @@ harness.sh wt-commit <slug>          commit the lane after the agent edits
 harness.sh tdd-run <slug> red|green -- <cmd>  capture a test run as TDD evidence (red must fail, green must pass)
 harness.sh wt-verify <slug>          Gate B pre-check — lane committed + clean + TDD evidence
 harness.sh integ-start               create integration off the base
-harness.sh integ-merge <slug>        git merge --no-ff feat/<slug> (stops on conflict)
+harness.sh integ-merge <slug>        Gate B — requires a cross-review PASS on record for feat/<slug>'s HEAD
+                                     (~/.gantry/reviews/<sha>.json via /review-record; HARNESS_REVIEW_GATE=skip
+                                     merges unreviewed and says so), then git merge --no-ff (stops on conflict)
 harness.sh trace <session>           Gate D L2 — check .claude/traces/<session>.jsonl
 harness.sh promote                   guarded --ff-only (only after the human go)
 harness.sh reset-base                best-effort return to the base branch

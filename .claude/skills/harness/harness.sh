@@ -353,6 +353,25 @@ case "$cmd" in
     [ -n "${2:-}" ] || die "integ-merge needs a <slug>"
     on_branch integration || die "not on integration (run integ-start first)"
     emit_phase 5 active
+    # Gate B, the real one: the lane's HEAD must carry a cross-review PASS on record —
+    # <HARNESS_REVIEWS_DIR|~/.gantry/reviews>/<sha>.json written by `/review-record PASS feat/<slug>`
+    # (mods/review-gate). Operator-owned, outside every repo/worktree, so a lane cannot forge
+    # it. The review-gate mod denies the same merge interactively; this is the daemon path.
+    # HARNESS_REVIEW_GATE=skip merges unreviewed and SAYS so (gate B clear/warn) — never silent.
+    sha=$(git rev-parse --verify --quiet "feat/$2^{commit}") || die "integ-merge: feat/$2 does not resolve"
+    if [ "${HARNESS_REVIEW_GATE:-}" = skip ]; then
+      emit_gate B clear warn "review gate SKIPPED (HARNESS_REVIEW_GATE=skip): merging feat/$2 unreviewed" "$2"
+    else
+      review_file="${HARNESS_REVIEWS_DIR:-$HOME/.gantry/reviews}/$sha.json"
+      if ! python3 -c 'import json,sys
+r=json.load(open(sys.argv[1])); sys.exit(0 if r.get("verdict")=="PASS" and r.get("head")==sys.argv[2] else 1)' "$review_file" "$sha" 2>/dev/null; then
+        emit_gate B raised high "no cross-review PASS on record for feat/$2 (${sha:0:12}): run the cross-review skill, then /review-record PASS feat/$2" "$2"
+        emit_subtask "$2" blocked
+        emit_phase 5 blocked
+        exit 1
+      fi
+      emit_gate B clear info "cross-review PASS on record for feat/$2 (${sha:0:12})" "$2"
+    fi
     # --no-ff ALWAYS writes a merge commit, so it needs a committer identity, no signing,
     # and no inherited hooks — same as wt-commit. The prod `deploy` user has no global
     # git identity, so pin it here (env + -c; empty inherited GIT_*_NAME would override -c).
