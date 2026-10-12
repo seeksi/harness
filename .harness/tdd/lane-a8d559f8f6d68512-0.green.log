@@ -1,0 +1,18 @@
+exit=0
+PASS: PASS: exits 0
+PASS: PASS: file written
+PASS: PASS: head is full sha
+PASS: PASS: verdict
+PASS: PASS: reviewer
+PASS: PASS: ref
+PASS: PASS: ISO-8601 UTC at
+PASS: PASS: stderr line
+PASS: BLOCK: writes BLOCK
+PASS: bad verdict: exit 1, nothing written
+PASS: bad ref: exit 1, nothing written
+PASS: default ref: HEAD
+PASS: integ-merge: exits 0 after review-record PASS
+PASS: integ-merge: feat/x merged
+=== Summary ===
+Passed: 14
+Failed: 0

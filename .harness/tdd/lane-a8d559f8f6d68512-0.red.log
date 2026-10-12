@@ -1,0 +1,43 @@
+exit=1
+FAIL: PASS: exits 0 (condition: [ $RC -eq 0 ])
+FAIL: PASS: file written (condition: [ -f "$REVIEWS/$SHA.json" ])
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])
+                                     ~~~~^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.hcNjg2WwNp/reviews/dd96f1a8b4660a35748626ee6ec15b5ee0474cec.json'
+FAIL: PASS: head is full sha (condition: [ "$(field "$REVIEWS/$SHA.json" head)" = "$SHA" ])
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])
+                                     ~~~~^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.hcNjg2WwNp/reviews/dd96f1a8b4660a35748626ee6ec15b5ee0474cec.json'
+FAIL: PASS: verdict (condition: [ "$(field "$REVIEWS/$SHA.json" verdict)" = PASS ])
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])
+                                     ~~~~^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.hcNjg2WwNp/reviews/dd96f1a8b4660a35748626ee6ec15b5ee0474cec.json'
+FAIL: PASS: reviewer (condition: [ "$(field "$REVIEWS/$SHA.json" reviewer)" = harness-cli ])
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])
+                                     ~~~~^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.hcNjg2WwNp/reviews/dd96f1a8b4660a35748626ee6ec15b5ee0474cec.json'
+FAIL: PASS: ref (condition: [ "$(field "$REVIEWS/$SHA.json" ref)" = feat/x ])
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])
+                                     ~~~~^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.hcNjg2WwNp/reviews/dd96f1a8b4660a35748626ee6ec15b5ee0474cec.json'
+FAIL: PASS: ISO-8601 UTC at (condition: field "$REVIEWS/$SHA.json" at | grep -Eq "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$")
+FAIL: PASS: stderr line (condition: echo "$OUT" | grep -q "review-record: PASS for feat/x ($(printf %.12s "$SHA"))")
+FAIL: BLOCK: writes BLOCK (condition: [ $RC -eq 0 ] && [ "$(field "$REVIEWS/$SHA.json" verdict)" = BLOCK ])
+FAIL: bad verdict: exit 1, nothing written (condition: [ $RC -eq 1 ] && [ ! -e "$REVIEWS" ])
+FAIL: bad ref: exit 1, nothing written (condition: [ $RC -eq 1 ] && [ ! -e "$REVIEWS" ])
+FAIL: default ref: HEAD (condition: [ $RC -eq 0 ] && [ "$(field "$REVIEWS/$HSHA.json" ref)" = HEAD ])
+FAIL: integ-merge: exits 0 after review-record PASS (condition: [ $RC -eq 0 ])
+FAIL: integ-merge: feat/x merged (condition: git -C "$R2" log --oneline integration | grep -q "Merge branch .feat/x")
+=== Summary ===
+Passed: 0
+Failed: 14
