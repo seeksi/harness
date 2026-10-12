@@ -524,8 +524,19 @@ PYEOF
       fi
     done
     ;;
+  review-record)
+    # CLI twin of the integ-merge artifact check: same file path and JSON shape.
+    case "${2:-}" in PASS|BLOCK) ;; *) die "review-record: verdict must be PASS or BLOCK" ;; esac
+    rr_ref="${3:-HEAD}"
+    sha=$(git rev-parse --verify --quiet "$rr_ref^{commit}") || die "review-record: $rr_ref does not resolve"
+    rr_dir="${HARNESS_REVIEWS_DIR:-$HOME/.gantry/reviews}"
+    mkdir -p "$rr_dir"
+    printf '{"verdict":"%s","head":"%s","ref":"%s","at":"%s","reviewer":"harness-cli"}\n' \
+      "$2" "$sha" "$(printf %s "$rr_ref" | sed 's/\\/\\\\/g; s/"/\\"/g')" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$rr_dir/$sha.json"
+    echo "review-record: $2 for $rr_ref ($(printf %.12s "$sha"))" >&2
+    ;;
   *)
-    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | tdd-run <slug> red|green -- <cmd> | integ-start | integ-merge <slug> | trace <session> | loop-tick | promote | reset-base | clean [keep-session ...]}" >&2
+    echo "usage: harness.sh {budget <plan.jsonl> | wt-new <slug> | wt-commit <slug> | wt-verify <slug> | tdd-run <slug> red|green -- <cmd> | integ-start | integ-merge <slug> | review-record PASS|BLOCK [<ref>] | trace <session> | loop-tick | promote | reset-base | clean [keep-session ...]}" >&2
     exit 2
     ;;
 esac
