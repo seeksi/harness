@@ -962,3 +962,14 @@ start on built app) for the daemon.ts change.
   http://100.72.193.64:3001); confirm Gate D reaches `done`; verify trace lands in <worktree>/
   .claude/traces + copied to /tmp/c2-throwaway/.claude/traces; COMMIT on feat/followups (NO push);
   harness.sh clean + force-remove leftover lane worktrees. CODE IS COMMIT-READY (cross-review PASS).
+
+# Mods + Gate B live path — session checkpoint 2026-10-12
+- DONE on main (through f669946 + this commit): four mods under mods/ (trajectory-guard, context-guard,
+  memory-guard, review-gate; marketplace harness-mods, installed user-scope); lane prompt TDD ritual;
+  integ-merge requires ~/.gantry/reviews/<sha>.json PASS; daemon runs the Codex cross-review per lane
+  (console/lib/sandbox/review.ts); harness.sh review-record; install.sh copies the mod + trace hook to ~/.gantry.
+- Live proof: run 367753ed4d06e3a6b5ae54e0 (HARNESS dogfood, sonnet, $0.15) passed A/B/D/B(codex)/C, promoted.
+- Gotchas: harness.sh runs under dash (no bash-isms); codex exec reads open stdin as prompt (spawn stdio ignore);
+  `next build` only from console/; dogfood needs AGENT_TRACE_HOOK_PATH=~/.gantry/hooks/trace-log.py.
+- Open (operator): prospect-farm needs HARNESS_PROJECT_ROOTS + .claude/traces/ gitignored (+ core has 96 dirty files);
+  drop the context-guard.py PostToolUse entry from .claude/settings.json (mod replaces it); docs/mods-plan.md is the plan record.

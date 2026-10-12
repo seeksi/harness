@@ -44,6 +44,16 @@ if [ -d "$MOD_SRC" ]; then
   echo "✓ trajectory-guard -> $MOD_DEST"
 fi
 
+# Gate-D trace hook copy. The console refuses a hook path inside the target repo or its
+# worktrees (agent-writable), so a GANTRY run that targets THIS repo (dogfooding) needs the
+# hook outside it: AGENT_TRACE_HOOK_PATH="$HOME/.gantry/hooks/trace-log.py". Re-run after edits.
+HOOK_SRC="$HERE/.claude/skills/eval-gate/trace-log.py"
+HOOK_DEST="$HOME/.gantry/hooks/trace-log.py"
+if [ -f "$HOOK_SRC" ]; then
+  install -D -m 0644 "$HOOK_SRC" "$HOOK_DEST"
+  echo "✓ trace-log.py -> $HOOK_DEST"
+fi
+
 mkdir -p "$(dirname "$BIN_DEST")"
 if [ -e "$BIN_DEST" ] || [ -L "$BIN_DEST" ]; then
   if [ ! -L "$BIN_DEST" ] || [ "$(readlink -f "$BIN_DEST")" != "$(readlink -f "$BIN_SRC")" ]; then

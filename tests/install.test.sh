@@ -162,9 +162,38 @@ scenario_symlinked_repo() {
 echo "=== install.sh test suite ==="
 echo ""
 
+# Scenario D: the two runtime copies for GANTRY lanes land under ~/.gantry as regular files
+# (no symlinks — the console refuses agent-writable or link-resolved paths), and a re-run
+# refreshes them. Absent sources are skipped, not fatal (scenario A's fixture has neither).
+scenario_runtime_copies() {
+  local dir="$TMP_BASE/D"; mkdir -p "$dir"
+  local repo_dir="$dir/repo" home_dir="$dir/home"
+  setup_fake_repo "$repo_dir"
+  setup_fake_home "$home_dir"
+  mkdir -p "$repo_dir/.claude/skills/eval-gate" "$repo_dir/mods/trajectory-guard/hooks" "$repo_dir/mods/trajectory-guard/.claude-plugin/types"
+  echo "# hook v1" > "$repo_dir/.claude/skills/eval-gate/trace-log.py"
+  echo '{"name":"trajectory-guard"}' > "$repo_dir/mods/trajectory-guard/.claude-plugin/plugin.json"
+  echo "// mod" > "$repo_dir/mods/trajectory-guard/hooks/register.ts"
+  echo "// laid by the engine, never shipped" > "$repo_dir/mods/trajectory-guard/.claude-plugin/types/index.d.ts"
+  ln -s register.ts "$repo_dir/mods/trajectory-guard/hooks/link.ts"
+
+  local rc; rc=$(run_install "$repo_dir" "$home_dir")
+  assert "[ '$rc' = '0' ]" "runtime copies: exit 0"
+  assert "[ -f '$home_dir/.gantry/hooks/trace-log.py' ] && [ ! -L '$home_dir/.gantry/hooks/trace-log.py' ]" "trace-log.py copied as a regular file"
+  assert "grep -q 'hook v1' '$home_dir/.gantry/hooks/trace-log.py'" "trace-log.py content copied"
+  assert "[ -f '$home_dir/.gantry/mods/trajectory-guard/hooks/register.ts' ]" "mod copied"
+  assert "[ ! -e '$home_dir/.gantry/mods/trajectory-guard/hooks/link.ts' ]" "mod copy carries no symlinks"
+  assert "[ ! -e '$home_dir/.gantry/mods/trajectory-guard/.claude-plugin/types' ]" "mod copy omits engine-laid types"
+
+  echo "# hook v2" > "$repo_dir/.claude/skills/eval-gate/trace-log.py"
+  rc=$(run_install "$repo_dir" "$home_dir")
+  assert "[ '$rc' = '0' ] && grep -q 'hook v2' '$home_dir/.gantry/hooks/trace-log.py'" "re-run refreshes trace-log.py"
+}
+
 scenario_install_idempotent_uninstall
 scenario_refuse_clobber
 scenario_symlinked_repo
+scenario_runtime_copies
 
 echo ""
 echo "=== Summary ==="
