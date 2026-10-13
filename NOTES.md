@@ -988,3 +988,12 @@ start on built app) for the daemon.ts change.
   (ss -ltnpH "sport = :PORT"). Launcher: scratchpad/start-console.sh <repo> <port> [ENV=..].
 - NEXT: task 3 (GANTRY build on prospect-farm core — daemon targets HARNESS_REPO, not project.path: check)
   and task 4 (multi-lane + cross-review).
+- 10-13 later: task 3 DONE — real sonnet lane on prospect-farm core (Pf::PhoneFormat + minitest, $0.09)
+  passed A/B/D/B(codex)/C; integration 3876b33 in core LEFT UNPROMOTED (Rex's go/no-go); checkout
+  returned to main by hand (reset-base refuses on a dirty tree → core's 96 dirty files strand it).
+  BUG FIXED 4ed011d: daemon always built HARNESS_REPO regardless of projectId → run route 422s on a
+  mismatch; `gantry up --repo <path>` targets another repo. c2 made discoverable (.claude/agents).
+- task 4: two-lane run on c2 passed (parallel builds, serial reviews, 2 artifacts, 2 merges).
+  BUG FIXED 3aa1822: a second run before promote died with bare "stuck → failed" → bridge keeps
+  die()'s stderr line, daemon raises it as a gate (C for integ-*). Reviewer variance: codex BLOCKed
+  an ambiguous spec ("exactly 'hello'" vs trailing newline) — gate working, brief's fault.
