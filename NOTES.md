@@ -973,3 +973,18 @@ start on built app) for the daemon.ts change.
   `next build` only from console/; dogfood needs AGENT_TRACE_HOOK_PATH=~/.gantry/hooks/trace-log.py.
 - Open (operator): prospect-farm needs HARNESS_PROJECT_ROOTS + .claude/traces/ gitignored (+ core has 96 dirty files);
   drop the context-guard.py PostToolUse entry from .claude/settings.json (mod replaces it); docs/mods-plan.md is the plan record.
+
+# Mods live-verification — session checkpoint 2026-10-13
+- VERIFIED headless (claude -p --plugin-dir, haiku): review-gate deny w/o artifact + pass after
+  `harness.sh review-record PASS`; memory-guard denies Write + Bash redirect under memory_layer/projects;
+  context-guard hard deny fires (tested via probe copy with manifest default hard=1 — `--settings
+  pluginConfigs` did NOT reach the mod; options come from manifest defaults/settings menu only).
+- VERIFIED daemon live on /tmp/c2-throwaway (:3001, haiku): cross-review ERROR (AGENT_CODEX_PATH=/bin/false
+  → "codex exited 1: no output", lane blocked, no merge) and BLOCK (hardcoded sk_live → Critical SECURITY,
+  artifact verdict BLOCK, integration untouched).
+- FINDING: the four mods are NOT active in this interactive session (installed after it started);
+  the merge in a scratch repo went through un-gated. New sessions load them.
+- GOTCHA: `pkill -f "next start"` misses the real `next-server` listener → stale env served; kill by port
+  (ss -ltnpH "sport = :PORT"). Launcher: scratchpad/start-console.sh <repo> <port> [ENV=..].
+- NEXT: task 3 (GANTRY build on prospect-farm core — daemon targets HARNESS_REPO, not project.path: check)
+  and task 4 (multi-lane + cross-review).
