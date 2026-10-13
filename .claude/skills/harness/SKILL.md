@@ -104,11 +104,11 @@ Every `build.<slug>` is red → green with captured proof. The builder writes th
 failing test for the acceptance check in `NOTES.<slug>.md`, runs
 `harness.sh tdd-run <slug> red -- <cmd>` (refuses if it passes), implements,
 then `tdd-run <slug> green -- <cmd>` (refuses if it fails). Both logs land in
-`.harness/tdd/` inside the lane and are committed by `wt-commit`; `wt-verify`
+`.harness/tdd/` inside the lane worktree, untracked (wt-commit never stages them); `wt-verify`
 raises Gate B if either is missing, red shows `exit=0`, green isn't `exit=0`,
 or the lane diff touches no test file. The point is the evidence, not the
 ritual: a reviewer with fresh context can read the red log and know the test
-actually guards the behavior. Lanes with nothing testable (docs, config) commit
+actually guards the behavior. Lanes with nothing testable (docs, config) write
 `.harness/tdd/<slug>.skip` with a one-line reason — visible as a warn, never
 silent.
 

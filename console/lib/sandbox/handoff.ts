@@ -75,7 +75,8 @@ export function buildAgentPrompt(brief: string, slug?: string): string {
 // Gate B's TDD-evidence rule (harness.sh wt-verify): the lane must carry a failing RED run,
 // a passing GREEN run and a test file, or a .skip with a reason. The headless agent has no
 // harness.sh and a minimal env, so it writes the logs itself in the exact shape tdd-run
-// produces (first line `exit=<n>`, then the output); wt-commit stages them with the lane.
+// produces (first line `exit=<n>`, then the output); wt-verify reads them from the worktree
+// (they stay untracked — never committed into the target repo).
 function tddRitual(slug: string): string[] {
   const log = (phase: string) => `.harness/tdd/${slug}.${phase}.log`;
   const capture = (phase: string) =>

@@ -239,7 +239,9 @@ case "$cmd" in
     # is also gitignored — the two-step add+reset is robust in BOTH cases.)
     wtgit checkout -- .gitignore 2>/dev/null || true
     wtgit add -A
-    wtgit reset -q -- .claude/traces 2>/dev/null || true
+    # Traces and TDD evidence (.harness/tdd) never enter the target repo's history: wt-verify
+    # reads the evidence from the lane worktree's filesystem instead.
+    wtgit reset -q -- .claude/traces .harness 2>/dev/null || true
     # [#5 diff exit code] --cached --quiet: 0=no change (no-op), 1=staged changes (commit),
     # >1=git error (must NOT be treated as "commit"). Capture rc explicitly.
     rc=0; wtgit diff --cached --quiet || rc=$?
@@ -270,7 +272,7 @@ case "$cmd" in
     # Runs the test cmd inside the lane worktree and captures `exit=<n>` + output to
     # .harness/tdd/<slug>.<phase>.log. red MUST fail (exit!=0), green MUST pass (exit 0);
     # otherwise the log is still written but this command exits 1 so the agent notices.
-    # Both logs get committed by wt-commit and are required by wt-verify.
+    # Both logs stay untracked in the lane worktree and are required by wt-verify.
     slug=${2:-}; phase=${3:-}
     [ -n "$slug" ] || die "tdd-run needs a <slug>"
     case "$slug" in *[!a-zA-Z0-9_-]*) die "tdd-run: slug must be [a-zA-Z0-9_-]";; esac
@@ -312,7 +314,8 @@ case "$cmd" in
     fi
     # --porcelain catches modified, staged AND untracked files (plain `diff` misses
     # untracked). .claude/traces is gitignored, so the agent's own trace won't trip it.
-    if [ -n "$(git -C "$wt_path" status --porcelain)" ]; then
+    # .harness/ (TDD evidence) stays untracked by design — filter it, don't require an ignore.
+    if [ -n "$(git -C "$wt_path" status --porcelain | grep -Ev '^.. \.harness/' || true)" ]; then
       emit_gate B raised high "uncommitted/untracked changes in feat/$slug (agent did not commit)" "$slug"
       emit_phase 2 blocked; exit 1
     fi
@@ -320,15 +323,17 @@ case "$cmd" in
       emit_gate B raised high "feat/$slug has no commits beyond $BASE (agent produced nothing)" "$slug"
       emit_phase 2 blocked; exit 1
     fi
-    # TDD evidence (Gate B, ECC-style): red log (exit!=0) + green log (exit 0) committed in
-    # the lane, and at least one test file in the lane's diff. Opt-out per lane by committing
+    # TDD evidence (Gate B, ECC-style): red log (exit!=0) + green log (exit 0) present in the
+    # lane worktree's .harness/tdd/ (untracked — never committed into the target repo), and
+    # at least one test file in the lane's diff. Opt-out per lane with
     # .harness/tdd/<slug>.skip containing the reason (e.g. docs-only / config-only subtasks).
     ref="feat/$slug"
-    if git cat-file -e "$ref:.harness/tdd/$slug.skip" 2>/dev/null; then
-      emit_gate B clear warn "TDD evidence skipped: $(git show "$ref:.harness/tdd/$slug.skip" | head -1)" "$slug"
+    tdd="$wt_path/.harness/tdd"
+    if [ -f "$tdd/$slug.skip" ]; then
+      emit_gate B clear warn "TDD evidence skipped: $(head -1 "$tdd/$slug.skip")" "$slug"
     else
-      red=$(git show "$ref:.harness/tdd/$slug.red.log" 2>/dev/null | head -1)
-      green=$(git show "$ref:.harness/tdd/$slug.green.log" 2>/dev/null | head -1)
+      red=$(head -1 "$tdd/$slug.red.log" 2>/dev/null || true)
+      green=$(head -1 "$tdd/$slug.green.log" 2>/dev/null || true)
       if [ -z "$red" ] || [ "$red" = "exit=0" ]; then
         emit_gate B raised high "no failing RED test run committed for feat/$slug (use: harness.sh tdd-run $slug red -- <cmd>)" "$slug"
         emit_phase 2 blocked; exit 1
