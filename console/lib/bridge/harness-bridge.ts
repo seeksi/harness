@@ -358,7 +358,7 @@ export function spawnHarness(
   sub: HarnessSubcommand,
   onEvent: (event: ParsedHarnessEvent) => void,
   opts: SpawnHarnessOptions = {}
-): Promise<{ code: number | null }> {
+): Promise<{ code: number | null; reason?: string }> {
   return new Promise((resolve, reject) => {
     // Audit (T7): the persisted append-only log is ALWAYS written (mandatory, best-effort
     // so a logging failure never changes control flow); onAudit is an observer only.
@@ -436,8 +436,15 @@ export function spawnHarness(
       return;
     }
     // Drain stderr so a verbose child can't fill the pipe buffer and deadlock. Not
-    // forwarded to the client (may contain noise); bounded by discarding.
-    child.stderr?.resume();
+    // forwarded to the client (may contain noise); bounded by discarding — except the LAST
+    // `harness: ...` line (die()'s one-line reason), kept so a non-zero exit is diagnosable
+    // on the timeline rather than only in the server log.
+    let reason: string | undefined;
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      const m = chunk.match(/^harness: (.+)$/gm);
+      if (m) reason = m[m.length - 1].slice("harness: ".length, "harness: ".length + 200);
+    });
     // stdout flood defense (T6): drop any single line over the cap, count it, and if the
     // child keeps spewing oversize lines, SIGKILL the tree and fail the run. Hand-rolled
     // line splitting (not readline) so the cap is enforced on the PARTIAL line as it grows:
@@ -536,7 +543,7 @@ export function spawnHarness(
           reject(new HarnessTimeoutError(`harness '${sub.cmd}' timed out after ${timeoutMs}ms`));
         } else {
           audit({ cmd: sub.cmd, argv: args, outcome: "exit", code });
-          resolve({ code });
+          resolve(reason === undefined ? { code } : { code, reason });
         }
       })
     );

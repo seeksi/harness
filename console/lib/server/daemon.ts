@@ -54,6 +54,16 @@ export class SlotTakenError extends Error {
   }
 }
 /** A harness subcommand exited non-zero (e.g. a raised gate / merge conflict). */
+// Which gate a harness subcommand's failure belongs to on the timeline (A budget, B lane,
+// C integration, D trace).
+const GATE_FOR_SUB: Partial<Record<HarnessSubcommand["cmd"], "A" | "B" | "C" | "D">> = {
+  budget: "A",
+  "integ-start": "C",
+  "integ-merge": "C",
+  promote: "C",
+  trace: "D",
+};
+
 export class HarnessExitError extends Error {
   constructor(msg: string) {
     super(msg);
@@ -351,8 +361,31 @@ export function startRun(input: StartRunInput, opts: StartRunOptions = {}): void
     return { runId, projectId, agentId: "harness", ts: nowSec(), type, payload } as unknown as Envelope;
   };
   const runSub = async (sub: HarnessSubcommand): Promise<void> => {
-    const { code } = await spawnHarness(sub, (parsed) => ingest(toEnvelope(parsed)), { spawnFn });
-    if (code !== 0) throw new HarnessExitError(`harness '${sub.cmd}' exited with code ${code}`);
+    let raised = false;
+    const { code, reason } = await spawnHarness(
+      sub,
+      (parsed) => {
+        if (parsed.type === "gate" && parsed.status === "raised") raised = true;
+        ingest(toEnvelope(parsed));
+      },
+      { spawnFn }
+    );
+    if (code === 0) return;
+    // A sub that died without raising a gate itself (die() → stderr only) would otherwise fail
+    // the run with a bare "stuck → failed" on the timeline; put its one-line reason there.
+    if (!raised) {
+      ingest(
+        toEnvelope({
+          type: "gate",
+          id: GATE_FOR_SUB[sub.cmd] ?? "B",
+          status: "raised",
+          severity: "high",
+          summary: `${sub.cmd}: ${reason ?? `exited with code ${code}`}`,
+          ...("slug" in sub ? { subtaskId: sub.slug } : {}),
+        })
+      );
+    }
+    throw new HarnessExitError(`harness '${sub.cmd}' exited with code ${code}${reason ? `: ${reason}` : ""}`);
   };
 
   // Seed the run identity so persistence + reconnecting clients see it immediately.

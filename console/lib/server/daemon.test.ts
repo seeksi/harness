@@ -25,16 +25,18 @@ afterEach(() => {
 });
 
 // Fake harness child: emits JSON lines for `cmd`, then closes 0.
-function fakeSpawn(byCmd: Record<string, string[]>) {
+// `failing` makes a subcommand exit non-zero after printing `stderr` (die() style).
+function fakeSpawn(byCmd: Record<string, string[]>, failing: Record<string, { code: number; stderr: string }> = {}) {
   return vi.fn((_script: string, args: string[], opts: Record<string, unknown>) => {
     expect(opts.shell).toBe(false);
     const lines = byCmd[args[0]] ?? [];
+    const fail = failing[args[0]];
     const child = new EventEmitter() as EventEmitter & { stdout: Readable; stderr: Readable; pid: number; kill: () => boolean };
     child.stdout = Readable.from(lines.map((l) => l + "\n"));
-    child.stderr = Readable.from([]);
+    child.stderr = Readable.from(fail ? [fail.stderr + "\n"] : []);
     child.pid = 999;
     child.kill = () => true;
-    child.stdout.on("end", () => setImmediate(() => child.emit("close", 0)));
+    child.stdout.on("end", () => setImmediate(() => child.emit("close", fail?.code ?? 0)));
     return child as never;
   });
 }
@@ -1317,5 +1319,42 @@ describe("startRun — per-lane model routing (Phase 4)", () => {
     expect(captured).toBeDefined();
     expect(captured!.lanes.map((l) => l.model)).toEqual(["opus", "haiku"]);
     expect(getSnapshot("run-rt-wp")?.status).toBe("done");
+  });
+});
+
+describe("startRun — a harness sub that dies without raising a gate", () => {
+  it("puts die()'s reason on the timeline as a raised gate, then fails the run", async () => {
+    const spawnFn = fakeSpawn(
+      { budget: [JSON.stringify({ type: "phase", phase: 1, status: "done" })], "reset-base": [] },
+      { "integ-start": { code: 1, stderr: "harness: integration already exists — clean first" } }
+    );
+    startRun(
+      { runId: "run-diestart", projectId: "proj", projectName: "v", brief: "x", routing: "sonnet" },
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, reviewLane: passReview }
+    );
+    await waitForSlotFree();
+    const gates = eventsSince("run-diestart", 0).map((e) => e.env).filter((e) => e.type === "gate");
+    expect(gates).toHaveLength(1);
+    expect(gates[0].payload).toMatchObject({ id: "C", status: "raised", summary: "integ-start: integration already exists — clean first" });
+    expect(getSnapshot("run-diestart")?.status).toBe("failed");
+    expect(spawnFn.mock.calls.map((c) => c[1][0])).not.toContain("wt-new");
+  });
+
+  it("does not double-raise when the sub already raised a gate itself", async () => {
+    const spawnFn = fakeSpawn(
+      {
+        budget: [JSON.stringify({ type: "gate", id: "A", status: "raised", severity: "high", summary: "over budget" })],
+        "reset-base": [],
+      },
+      { budget: { code: 1, stderr: "harness: budget over ceiling" } }
+    );
+    startRun(
+      { runId: "run-diebudget", projectId: "proj", projectName: "v", brief: "x", routing: "sonnet" },
+      { live: true, spawnFn: spawnFn as never, writePlan: () => {}, reviewLane: passReview }
+    );
+    await waitForSlotFree();
+    const gates = eventsSince("run-diebudget", 0).map((e) => e.env).filter((e) => e.type === "gate");
+    expect(gates).toHaveLength(1);
+    expect(gates[0].payload).toMatchObject({ id: "A", summary: "over budget" });
   });
 });
