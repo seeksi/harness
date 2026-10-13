@@ -91,7 +91,7 @@ Bugs found and fixed on `main`:
 
 Known limitations surfaced:
 - `reset-base` refuses a dirty tree, so a run on a checkout with uncommitted work (core has 96 dirty files) strands it on `integration`; switch back by hand or keep the operator checkout clean.
-- ~~The TDD ritual committed `.harness/tdd/<slug>.{red,green}.log` into the target repo.~~ Fixed: wt-commit leaves `.harness/` unstaged and wt-verify reads the evidence from the lane worktree (`tests/wt-verify-tdd.test.sh`); live lane on c2 merged only its source + test.
+- ~~The TDD ritual committed `.harness/tdd/<slug>.{red,green}.log` into the target repo.~~ Fixed `0e7b196`: wt-commit leaves `.harness/` unstaged and wt-verify reads the evidence from the lane worktree (`tests/wt-verify-tdd.test.sh`, 10/10). Live lane on c2 (`upper.sh`) merged only its source + test. The two logs from the first core run were removed from core `main` (`38ceda1`); the Pf::PhoneFormat lane itself was promoted and pushed (`3876b33`).
 - Reviews run serially in the finalize loop; two lanes = two sequential codex calls (~15 s each).
 
 ## Order and stop rule
