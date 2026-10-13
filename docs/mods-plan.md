@@ -71,6 +71,29 @@ Live headless smoke (2026-10-08, run `2230c50dd8bfe98d59aaa352` on a fresh c2 th
 `harness.sh integ-merge` now requires the same artifact (`tests/integ-merge-review.test.sh`); `HARNESS_REVIEW_GATE=skip` is the loud opt-out. The console daemon now runs the Codex cross-review per lane (`console/lib/sandbox/review.ts`: diff + brief only, `codex exec --sandbox read-only --ephemeral`, stdin closed, verdict artifact written, fail-closed) after Gate D and before any merge. Live smoke run `35a51527aae1da32be25b8ee`: `done`, gates A/B(wt-verify)/D/B(cross-review PASS)/B(artifact on record)/C all clear, lane merged to integration. Before this, every GANTRY lane had merged unreviewed.
 Done: `context-guard.py` PostToolUse entries retired 2026-10-12 (global + project) after the mod fired live; script kept one release.
 
+## Live verification (2026-10-13)
+
+Every path that had only unit coverage was exercised against the real engine or the real daemon. The mods were tested headless (`claude -p --plugin-dir mods/<name>`, haiku); note that a session started before `plugin install` does **not** load them — a scratch-repo `git merge` in the original build session went through un-gated. Fresh sessions load all four.
+
+| What | Result |
+|---|---|
+| review-gate: `git merge feat/x` on main, no artifact | denied with the `/review-record` hint; after `harness.sh review-record PASS feat/x` the same merge fast-forwards |
+| memory-guard: Write + Bash `>` under `memory_layer/projects` | both denied (realpath against the real memory-os tree) |
+| context-guard: hard limit | deny fires (`context at 3% (>= 1%)` via a probe copy with manifest default `hard: 1`). `--settings pluginConfigs` did not reach the mod; options come from the manifest defaults or the settings menu only |
+| daemon cross-review ERROR (`AGENT_CODEX_PATH=/bin/false`) | `gate B raised codex exited 1: no output`, lane blocked, integration untouched |
+| daemon cross-review BLOCK (brief hardcodes an `sk_live` key) | codex Critical/SECURITY → artifact `verdict: BLOCK`, lane blocked, no merge |
+| real project: prospect-farm **core**, sonnet, $0.09 | `Pf::PhoneFormat` + Rails-free minitest, red/green logs genuine; A/B/D/B(codex)/C clear; promoted to core `main` `3876b33` |
+| multi-lane (2 lanes, c2 throwaway) | builds in parallel, reviews serial, two artifacts, two merges; passed twice. One run BLOCKed on an ambiguous brief ("exactly 'hello'" vs trailing newline) — reviewer working, brief's fault |
+
+Bugs found and fixed on `main`:
+- `4ed011d` — the daemon always built in `HARNESS_REPO` whatever `projectId` was sent; with `HARNESS_PROJECT_ROOTS` exposing app/core, a run on "core" would have built in HARNESS. The run route now 422s when the project's realpath is not the served repo; `gantry up --repo <path>` targets another repo and pins `HARNESS_SCRIPT_PATH` + `AGENT_TRACE_HOOK_PATH` (`~/.gantry/hooks/trace-log.py`) to this checkout. Per-run repo plumbing deferred (ponytail).
+- `3aa1822` — a second run before promote died with a bare `stuck → failed`; the reason lived only in the server log. The bridge now keeps the last `harness: …` stderr line and the daemon raises it as a gate (A/B/C/D by subcommand, C for `integ-*`) unless the sub already raised one.
+
+Known limitations surfaced:
+- `reset-base` refuses a dirty tree, so a run on a checkout with uncommitted work (core has 96 dirty files) strands it on `integration`; switch back by hand or keep the operator checkout clean.
+- The TDD ritual commits `.harness/tdd/<slug>.{red,green}.log` into the target repo (wt-verify requires the evidence); it is debris in a non-HARNESS project.
+- Reviews run serially in the finalize loop; two lanes = two sequential codex calls (~15 s each).
+
 ## Order and stop rule
 
 1 → 2 → 3 → 4. Each mod: write → gates A–D → commit on `feat/mods` → next. Any BLOCK halts that mod only. No push without operator say-so. Promote to `main` is the one human go/no-go.
