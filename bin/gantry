@@ -8,7 +8,7 @@
 //
 //   gantry run "<brief>" [--lane <brief>... | --decompose] [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
 //              (auto = tier routed per lane; named model forces all lanes)
-//   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
+//   gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture] [--repo <path>]
 //   gantry status [--url <base>]
 //
 // SSE follow (run) resumes across drops via ?lastEventId= (bounded reconnect); an
@@ -76,7 +76,8 @@ function usage() {
   console.log(`usage:
   gantry run "<brief>" [--lane <brief>... | --decompose] [--project <id|name>] [--model auto|haiku|sonnet|opus] [--url <base>] [--no-follow]
              (auto = tier routed per lane; named model forces all lanes)
-  gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture]
+  gantry up  [--host <ip>] [--port <n>] [--lanes <1..4>] [--fixture] [--repo <path>]
+             (--repo = target repo to build; default this checkout)
   gantry status [--url <base>]`);
   process.exit(2);
 }
@@ -340,6 +341,16 @@ function cmdUp(opts) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) die("--port must be 1..65535");
   const env = { ...process.env, HARNESS_REPO: repo, CONSOLE_BASE_URL: `http://${opts.host}:${port}` };
   for (const k of LIVE_ENV) delete env[k];
+  if (opts.repo) {
+    // Build a project other than this checkout: the target repo is HARNESS_REPO, while the
+    // harness script and the Gate-D trace hook must still come from HERE (the target does not
+    // ship them; the hook may not live inside the target, which is agent-writable).
+    const target = path.resolve(opts.repo);
+    if (!existsSync(path.join(target, ".git"))) die(`--repo ${target} is not a git repository`);
+    const hook = path.join(process.env.HOME ?? "", ".gantry", "hooks", "trace-log.py");
+    if (!existsSync(hook)) die(`${hook} missing — run ./install.sh first`);
+    Object.assign(env, { HARNESS_REPO: target, HARNESS_SCRIPT_PATH: path.join(repo, ".claude", "skills", "harness", "harness.sh"), AGENT_TRACE_HOOK_PATH: hook });
+  }
   if (!opts.fixture) {
     const lanes = Number(opts.lanes);
     if (!Number.isInteger(lanes) || lanes < 1 || lanes > 4) die("--lanes must be 1..4");
@@ -394,6 +405,7 @@ async function main() {
         port: { type: "string", default: "3000" },
         lanes: { type: "string", default: "1" },
         fixture: { type: "boolean", default: false },
+        repo: { type: "string" },
       },
     });
     cmdUp(values);

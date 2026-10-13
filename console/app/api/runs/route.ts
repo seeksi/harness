@@ -13,6 +13,8 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
+import fs from "fs";
+import path from "path";
 import { csrfOk } from "@/lib/server/csrf";
 import { discoverProjects } from "@/lib/server/discovery";
 import { startRun, currentSlot, SlotTakenError, type Routing } from "@/lib/server/daemon";
@@ -103,6 +105,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!project) {
     return NextResponse.json({ error: "unknown projectId (not a discovered project)" }, { status: 422 });
   }
+  // One console process serves ONE target repo (HARNESS_REPO; every sandbox module anchors on
+  // it at load). A discovered project that is not that repo must fail loudly here, not build
+  // silently in the wrong checkout. ponytail: per-run repo plumbing when a second project is live.
+  const served = servedRepo();
+  if (served !== null && realpathOrNull(project.path) !== served) {
+    return NextResponse.json(
+      { error: `console serves ${served}, not ${project.path} — restart it: gantry up --repo ${project.path}` },
+      { status: 422 },
+    );
+  }
 
   // Server-generated ID — NEVER client-supplied (threat model T1: provenance is derived
   // from this, never from the brief/projectId).
@@ -117,6 +129,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     throw e;
   }
+}
+
+function realpathOrNull(p: string | undefined): string | null {
+  try {
+    return p ? fs.realpathSync(path.resolve(p)) : null;
+  } catch {
+    return null;
+  }
+}
+// null under test/fixture when HARNESS_REPO is unset (the guard then stays out of the way).
+function servedRepo(): string | null {
+  return process.env.HARNESS_REPO ? realpathOrNull(process.env.HARNESS_REPO) : null;
 }
 
 // GET /api/runs — mode probe for the client: is live spawning enabled, and is the slot
